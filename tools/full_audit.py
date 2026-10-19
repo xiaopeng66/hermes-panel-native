@@ -64,6 +64,7 @@ class App:
         self.instance = "audit-%d" % os.getpid()
         env = dict(os.environ)
         env["HERMES_WSL_EXE"] = FAKE
+        env["HERMES_DISABLE_UNC"] = "1"
         env["FAKE_HERMES_HOME"] = HOME
         self.proc = subprocess.Popen(
             [APP, "--instance", self.instance, "--data-dir", DATA,
@@ -384,6 +385,7 @@ def error_paths(app):
             handle.write("{ this is not json")
     env = dict(os.environ)
     env["HERMES_WSL_EXE"] = FAKE
+    env["HERMES_DISABLE_UNC"] = "1"
     env["FAKE_HERMES_HOME"] = HOME
     instance = "audit-broken-%d" % os.getpid()
     proc = subprocess.Popen([APP, "--instance", instance, "--data-dir", broken,

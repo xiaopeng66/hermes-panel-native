@@ -586,6 +586,14 @@ void Application::ApplyState(const char* reason,State previous) {
         geometry_.Place(model_,monitor_.geometry,state_,"reconcile");
     geometry_.Validate(model_,monitor_.geometry,state_);
     UpdateWidgetTimer();
+    // DESIGN v1.7：可见性变化 → 轮询节奏跟着变（收起 60s / 隐藏停）；重新可见立即刷新一次，
+    // 保证从贴条/托盘回到面板时看到的就是当前状态。刷新走 30ms 一次性定时器**延后触发**：
+    // StartRefresh 会在 UI 线程 join 上一轮 worker（可能正卡在 wsl.exe 上百毫秒），在点击
+    // 处理里同步调它会让「点贴条展开」体感卡顿甚至超时（a-pullout/a-edge 门禁抓到）。
+    if(VisibleFor(previous)!=VisibleFor(state_)) {
+        UpdatePollTimer();
+        if(state_!=State::Hidden) SetTimer(panel_,kPollTimer,30,nullptr);
+    }
     if(state_==State::Collapsed) RenderStrip();
     HideHoverCard();   // 状态/几何变了：卡片内容和位置都作废，下次悬停重新计算
     (void)reason;

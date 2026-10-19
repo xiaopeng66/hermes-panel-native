@@ -15,6 +15,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2) return 2;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const std::wstring id=L"drag-"+std::to_wstring(GetCurrentProcessId());
+    SetEnvironmentVariableW(L"HERMES_DISABLE_UNC",L"1");
     auto command=harness::AppCommandLine(argv[1],id);
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION child{};

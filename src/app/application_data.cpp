@@ -9,6 +9,7 @@
 #include "data/http.h"
 #include "data/paths.h"
 #include "data/probe.h"
+#include "data/unc_snapshot.h"
 #include "render/widgets.h"
 #include <windowsx.h>
 #include <cstdlib>
@@ -32,6 +33,34 @@ HermesState ParseStateSafe(const std::string& list,const std::string& health,
         state.wsl="up";
         return state;
     }
+}
+
+// DESIGN v1.7：health 的 config/env 部分由 UNC 文件系统事实合成；systemd 属性
+// （gateway.since/active）UNC 不可得，留空 —— UI 对空 since 的文案是「网关尚未重启」。
+std::string UncHealthJson() {
+    Json health{
+        {"config",Json{{"mtime",0},{"size",0},{"parses",true}}},
+        {"env_file",Json{{"exists",true}}},
+        {"webui",Json{{"port",0},{"reachable",false}}},
+        {"gateway",Json{{"port",0},{"reachable",false},{"since",""},{"sinceUnix",0},{"active",""}}},
+    };
+    return health.dump();
+}
+// WebUI/网关的 TCP 现探（纯 Windows 侧，与 wsl.exe 路径同一套规则）。
+void FillReachability(HermesState& state,int webuiPort,int gatewayPort) {
+    std::vector<int> candidates{webuiPort,8787,9119};
+    std::sort(candidates.begin(),candidates.end());
+    candidates.erase(std::unique(candidates.begin(),candidates.end()),candidates.end());
+    for(const int port:candidates) {
+        if(TcpReachable("127.0.0.1",static_cast<unsigned>(port),1200)) {
+            state.webui.port=port;
+            state.webui.reachable=true;
+            break;
+        }
+    }
+    state.gateway.port=gatewayPort;
+    if(TcpReachable("127.0.0.1",static_cast<unsigned>(gatewayPort),1200))
+        state.gateway.reachable=true;
 }
 
 void Application::ApplyHelperState(const HermesState& state) {
@@ -144,6 +173,77 @@ void Application::StartRefresh() {
     const bool first=firstRefresh_;
     firstRefresh_=false;
     if(log_) log_->Info("data","refresh started"+(first?std::string(" (first: warming WSL)"):std::string{}));
+    // DESIGN v1.7：UNC 读路径优先。快照成功 → 不起任何 wsl.exe；不可达/首次 → 原路径兜底。
+    // mtime+size 与上次一致 → 直接复用缓存解析结果，连读都不读。
+    // HERMES_DISABLE_UNC=1：门禁夹具强制走假助手。harness 的硬约束是夹具隔离——而真机发行版
+    // 里恰好有一个 .hermes，不禁止的话测试实例会经 UNC 读到真机配置，污染夹具断言。
+    // 带控制面的构建（Debug/门禁）默认禁用：测试实例可能经 geometry-probe 转发启动，
+    // 环境变量不一定穿透；UNC 是真机（Release）专属优化路径。
+#if HERMES_CONTROL_PLANE
+    const auto home=std::string{};
+#else
+    wchar_t uncFlag[4]{};
+    const auto uncDisabled=GetEnvironmentVariableW(L"HERMES_DISABLE_UNC",uncFlag,4)!=0
+        &&uncFlag[0]==L'1';
+    // 真机探测：helperPath 推不出 home（脚本在 /mnt/* 下，常态）时枚举发行版 /home/ 下唯一
+    // 用户目录拼 .hermes。只在产品（Release，无控制面）构建里做——门禁夹具绝不摸真配置。
+    auto home=uncDisabled
+        ?std::string{}:WslHomeFromHelperPath(stored_.helperPath);
+    if(!uncDisabled&&home.empty()) {
+        WIN32_FIND_DATAW data{};
+        std::wstring homeGlob=L"//wsl$/";
+        for(const char ch:stored_.distro) homeGlob.push_back(static_cast<wchar_t>(ch));
+        homeGlob+=L"/home/*";
+        HANDLE find=FindFirstFileW(homeGlob.c_str(),&data);
+        if(find!=INVALID_HANDLE_VALUE) {
+            std::vector<std::wstring> users;
+            do {
+                if(wcscmp(data.cFileName,L".")&&wcscmp(data.cFileName,L".."))
+                    users.push_back(data.cFileName);
+            } while(FindNextFileW(find,&data));
+            FindClose(find);
+            if(users.size()==1) {
+                home="/home/";
+                for(const wchar_t ch:users[0]) home.push_back(static_cast<char>(ch));
+                home+="/.hermes";
+            }
+        }
+    }
+#endif
+    if(!first) {
+        const auto snapshot=TakeUncSnapshot(distro,home,std::to_string(gatewayPort));
+        if(snapshot.available&&snapshot.configMtime==uncCacheMtime_&&snapshot.configSize==uncCacheSize_
+            &&!uncCacheListJson_.empty()) {
+            if(log_) log_->Info("data","refresh from UNC cache (config unchanged)");
+            auto* result=new DataResult;
+            result->helperErrorValid=true;
+            result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
+            result->state.loading=false;
+            // 灯照常现探：TCP 探活是纯 Windows 侧成本（<20ms），不吃 WSL。
+            FillReachability(result->state,webuiPort,gatewayPort);
+            workerBusy_=false;
+            if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+            return;
+        }
+        if(snapshot.available) {
+            if(log_) log_->Info("data","refresh from UNC snapshot (config mtime="+std::to_string(snapshot.configMtime)+")");
+            uncCacheMtime_=snapshot.configMtime;
+            uncCacheSize_=snapshot.configSize;
+            uncCacheListJson_=snapshot.listJson;
+            // health 的 config 部分从快照合成；gateway systemd 属性 UNC 不可得（DESIGN v1.7）。
+            uncCacheHealthJson_=UncHealthJson();
+            uncCacheValid_=true;
+            auto* result=new DataResult;
+            result->helperErrorValid=true;
+            result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
+            result->state.loading=false;
+            FillReachability(result->state,webuiPort,gatewayPort);
+            workerBusy_=false;
+            if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+            return;
+        }
+        if(log_) log_->Info("data","UNC unavailable ("+snapshot.error+"), falling back to wsl.exe");
+    }
     worker_=std::thread([this,distro,python,path,webuiPort,gatewayPort,first] {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
@@ -956,10 +1056,16 @@ void Application::ApplyDataResult(DataResult* result) {
 void Application::UpdatePollTimer() {
     // The cadence is settings.pollSeconds (the tray menu already exposes it: 30/60/120/300), unless the
     // debug control plane overrode it for a measurement run.
+    // DESIGN v1.7 可见性降频：展开 = 设置的秒数；收起（贴条）= 60s；隐藏 = 停轮询。
+    // 任一可见性变化由 ApplyState 调这里；重新可见的那次刷新由 ApplyState 直接触发。
     if(!panel_) return;
     KillTimer(panel_,kPollTimer);
-    const auto seconds=pollOverrideSeconds_>0?pollOverrideSeconds_:std::clamp(stored_.pollSeconds,5,3600);
-    SetTimer(panel_,kPollTimer,static_cast<UINT>(seconds)*1000,nullptr);
+    if(state_==State::Hidden) return;
+    UINT seconds=0;
+    if(pollOverrideSeconds_>0) seconds=static_cast<UINT>(pollOverrideSeconds_);
+    else seconds=static_cast<UINT>(std::clamp(stored_.pollSeconds,5,3600));
+    if(state_==State::Collapsed) seconds=std::max<UINT>(seconds,60);
+    SetTimer(panel_,kPollTimer,seconds*1000,nullptr);
 }
 bool Application::GatewayStale() const {
     const auto loaded=hermesState_.config.mtime;

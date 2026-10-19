@@ -71,6 +71,7 @@ int wmain(int argc,wchar_t** argv) {
     CreateDirectoryW((std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id).c_str(),nullptr);
     CreateDirectoryW(home.c_str(),nullptr);
     SetEnvironmentVariableW(L"HERMES_WSL_EXE",argv[2]);
+    SetEnvironmentVariableW(L"HERMES_DISABLE_UNC",L"1");
     SetEnvironmentVariableW(L"FAKE_HERMES_HOME",home.c_str());
     auto command=harness::AppCommandLine(argv[1],id);
     STARTUPINFOW startup{sizeof(startup)};

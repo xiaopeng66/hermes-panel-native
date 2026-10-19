@@ -39,6 +39,7 @@ int wmain(int argc,wchar_t** argv) {
     CreateDirectoryW((std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id).c_str(),nullptr);
     CreateDirectoryW(home.c_str(),nullptr);
     SetEnvironmentVariableW(L"HERMES_WSL_EXE",argv[2]);
+    SetEnvironmentVariableW(L"HERMES_DISABLE_UNC",L"1");
     SetEnvironmentVariableW(L"FAKE_HERMES_HOME",home.c_str());
     // 夹具 home 的宽路径 → 窄路径（只含 ASCII，逐字符显式转换，避免 /W4 的收窄警告）。
     std::string logPath;

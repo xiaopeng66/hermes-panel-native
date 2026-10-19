@@ -132,6 +132,7 @@ int wmain(int argc,wchar_t** argv) {
         state<<Fixture().dump(2);
         std::ofstream log(Narrow(home)+"/requests.log",std::ios::trunc);
     }
+    SetEnvironmentVariableW(L"HERMES_DISABLE_UNC",L"1");
     SetEnvironmentVariableW(L"HERMES_WSL_EXE",h::NativePath(argv[2]).c_str());
     SetEnvironmentVariableW(L"FAKE_HERMES_HOME",home.c_str());
     const auto logPath=Narrow(home)+"/requests.log";

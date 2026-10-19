@@ -291,6 +291,10 @@ private:
     };
     bool firstRefresh_=true;          // 第一次刷新：先 ping 捂热冷启动的 WSL，并放宽时限
     std::string helperError_;        // 助手最近一次报错的原因（显示在 chip 与空态里）
+    // DESIGN v1.7：UNC 读路径的 mtime/size 缓存（未变化直接复用上次解析，零文件读取）。
+    long long uncCacheMtime_=0,uncCacheSize_=0;
+    bool uncCacheValid_=false;
+    std::string uncCacheListJson_,uncCacheHealthJson_;
     int pollOverrideSeconds_=0;    // debug control plane `configure`: poll cadence for a measurement run
     int syntheticMods_=0;          // debug `vk mods`: synthetic Ctrl/Alt/Shift state for one keydown
     std::thread worker_;

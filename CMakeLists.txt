@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(/W4 /WX /utf-8 /permissive-)
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 
-add_executable(hermes-panel-native WIN32 assets/hermes.rc src/app/main.cpp src/app/application.cpp src/app/application_data.cpp src/app/application_pages.cpp src/app/application_input.cpp src/app/application_control.cpp src/app/control_pipe.cpp src/app/panel_view.cpp src/data/settings.cpp src/data/log.cpp src/core/geometry_controller.cpp src/core/state.cpp src/render/icons.cpp src/render/widgets.cpp src/render/textfield.cpp src/render/surface.cpp src/data/helper.cpp src/data/state.cpp src/data/probe.cpp src/data/http.cpp src/data/latency.cpp src/data/profiles.cpp src/render/panel.cpp src/render/theme.cpp src/render/layout.cpp)
+add_executable(hermes-panel-native WIN32 assets/hermes.rc src/app/main.cpp src/app/application.cpp src/app/application_data.cpp src/app/application_pages.cpp src/app/application_input.cpp src/app/application_control.cpp src/app/control_pipe.cpp src/app/panel_view.cpp src/data/settings.cpp src/data/log.cpp src/core/geometry_controller.cpp src/core/state.cpp src/render/icons.cpp src/render/widgets.cpp src/render/textfield.cpp src/render/surface.cpp src/data/helper.cpp src/data/state.cpp src/data/probe.cpp src/data/http.cpp src/data/latency.cpp src/data/profiles.cpp src/data/unc_snapshot.cpp src/render/panel.cpp src/render/theme.cpp src/render/layout.cpp)
 # 界面全自绘，没有任何 WebView2/内容运行时（H2a 的剥离）：exe 是自包含的，不链接也不需要随附 DLL。
 target_include_directories(hermes-panel-native PRIVATE third_party src)
 target_link_libraries(hermes-panel-native PRIVATE hermes-geometry user32 shell32 shcore dwmapi d2d1 dwrite ole32 winhttp crypt32 imm32)
@@ -114,6 +114,16 @@ if(BUILD_TESTING)
     target_link_libraries(helper-tests PRIVATE user32)
     add_test(NAME helper COMMAND helper-tests)
     set_tests_properties(helper PROPERTIES TIMEOUT 60)
+    # unc-parity：C++ 行扫描器 vs apply.py `list` 输出逐字段对拍（DESIGN v1.7）。
+    # 第一步 exe 把三种夹具（hermes 2/4 缩进、WebUI 0/2 缩进、边角）的快照 JSON 写到
+    # tmp/unc-parity/；第二步 Python 驱动对同一夹具跑真 apply.py（WSL 内）逐字段比较。
+    add_executable(unc-parity-tests tests/unc_parity_tests.cpp src/data/unc_snapshot.cpp)
+    target_include_directories(unc-parity-tests PRIVATE third_party src)
+    add_test(NAME unc-parity-snapshot COMMAND unc-parity-tests)
+    set_tests_properties(unc-parity-snapshot PROPERTIES TIMEOUT 60)
+    add_test(NAME unc-parity
+        COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/unc_parity_drive.cmake)
+    set_tests_properties(unc-parity PROPERTIES TIMEOUT 240 DEPENDS unc-parity-snapshot)
     add_executable(hermes-state-tests tests/state_tests2.cpp src/data/state.cpp)
     target_include_directories(hermes-state-tests PRIVATE third_party src)
     add_test(NAME hermes-state COMMAND hermes-state-tests)

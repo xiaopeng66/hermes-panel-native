@@ -2551,3 +2551,32 @@ Release PASS 打包 956,416 B、无 DLL、无控制面、能启动
   真机实例已于 13:10 用修复版重启（WSL 已连、18 供应商/3 回退链）。
 - 第一次死亡（约 11:25）无 RM/MSI 事件佐证，归因"外部结束"（含任务管理器），登记于
   `audit/REVIEW-NOTES.md` 追加复审节；640+ 轮压测未复现产品自崩。
+
+## G16 轮询架构换 UNC 直读（DESIGN v1.7，用户批准的 A+B 方案，2026-10-19 14:50–18:50）
+
+- **动机**：轮询每 20 秒拉起 2 个 wsl.exe（6 次/分钟），对 WSL 侧造成 1–2% 单核开销，
+  对安全软件呈现高频拉起行为（无声死亡调查的头号触发面）。
+- **实现**：
+  - `src/data/unc_snapshot.{h,cpp}`：`//wsl$` 9P 直读 + 行扫描器（1:1 复刻 apply.py 的
+    top_blocks/find_block/block_style/entry_ranges/entry_field/sub_range/snap_*/env_read_all，
+    两种缩进风格）。实测 stat 0.57ms、整读 config.yaml 2.87ms——同数据零进程。
+  - `StartRefresh`：UNC 优先；mtime+size 未变 → 直接复用缓存（零读取）；UNC 不可达 →
+    自动降级 wsl.exe（行为与旧版一致）。写入路径完全不动（apply.py 仍是唯一写入者）。
+  - 可见性降频：展开=pollSeconds，收起（贴条）=60s，隐藏=停；重新可见 30ms 延后刷新一次
+    （同步 RefreshData 会 join worker 卡 UI 线程——a-pullout 抓到后改为定时器延后）。
+- **门禁**：
+  - 新增 `unc-parity`（双段 ctest）：C++ 行扫描器 vs 真 apply.py `list` 输出逐字段对拍，
+    三组夹具（hermes 2/4 缩进、WebUI 0/2 缩进、边角引号键）ALL MATCHED。
+  - 夹具污染防护：控制面构建（Debug/门禁）编译期禁用 UNC（`#if HERMES_CONTROL_PLANE`）；
+    Release 才启用 + `HERMES_DISABLE_UNC=1` 逃生旗标。h-models/h-add/h-controls 三门禁
+    因 UNC 读到真机配置而挂 → 关断后回绿。
+  - 终门禁：Regression PASS（h-models/h-settings 单跑回绿，套件内 SKIP=桌面占用环境类）、
+    Audit 160/160（`20261019-184523-176`）、Release 打包可启动（`20261019-184817-652`）。
+  - 暴力压测重跑（stress_violent.py）640+ 轮全绿（贴条×300/托盘×200/悬停提示×60/拖拽×20/
+    RM 演练/换页×60/排队切换）。
+- **真机验证**：Release 实例（cf251d4e…，18:48 起）日志出现 `refresh from UNC snapshot`，
+  之后 20 秒轮询周期内 wsl.exe 调用归零；18/3 供应商状态照常。
+- **无声死亡补充实验**：静默与狂操作两个 Debug 实例都在 4–9 分钟窗口内无声消失（无 WER/
+  无日志/无探针），与操作密度无关；同日真机 Release 实例稳定运行数小时。结论维持
+  「外部软件（头号嫌疑火绒 HIPS）间歇性强杀」，非产品缺陷；已建议用户把面板加入火绒信任区。
+- **产物**：dist exe 956,928 B，sha256 `cf251d4e0bc532a7f109721f4244590540a3ef37d3940a04d31b6d525bd2e94b`。

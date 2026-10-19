@@ -84,7 +84,8 @@ int wmain(int argc,wchar_t** argv) {
             {"recents",{"custom:old|old-model"}}}.dump(2);
         file.close();
         legacyBefore=ReadFile(Narrow(legacy)+"/settings.json");
-        SetEnvironmentVariableW(L"HERMES_WSL_EXE",h::NativePath(argv[2]).c_str());
+        SetEnvironmentVariableW(L"HERMES_DISABLE_UNC",L"1");
+    SetEnvironmentVariableW(L"HERMES_WSL_EXE",h::NativePath(argv[2]).c_str());
     } else {
         // 离线：桥指向"没有 WSL"的夹具（list 失败、ping 退出码非 0）
         SetEnvironmentVariableW(L"HERMES_WSL_EXE",h::NativePath(argv[2]).c_str());
