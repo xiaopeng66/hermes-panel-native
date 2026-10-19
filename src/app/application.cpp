@@ -1342,6 +1342,7 @@ PanelViewModel Application::CurrentView() {
     }
     view.busy=workerBusy_.load();
     view.syncSpinAngle=syncSpinAngle_;
+    view.busySweep=busySweep_;
     view.syncCheck=syncCheckShown_;
     view.pointerX=pointerX_;view.pointerY=pointerY_;view.pointerInside=pointerInside_;
     view.focusControl=focusControl_;
@@ -2276,7 +2277,9 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             return 0;
         }
         if(wparam==kSpinTimer&&!strip) {
-            // 刷新进行中：同步章图标绕中心旋转（真机反馈：不要「读取 WSL 配置…」的文字）。
+            // 刷新进行中：同步章图标绕中心旋转（真机反馈：不要「读取 WSL 配置…」的文字）；
+            // 顶部忙碌条同步流动（busySweep 独立相位，快慢一致 50ms/拍）。
+            busySweep_=std::fmod(busySweep_+12.0f,720.0f);
             if(workerBusy_.load()) { syncSpinAngle_+=30.0f;InvalidateRect(panel_,nullptr,FALSE); }
             else {
                 // 刷新刚结束：对勾显示 800ms 再恢复静态刷新图标。

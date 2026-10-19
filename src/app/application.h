@@ -415,6 +415,7 @@ private:
     Json previewArgs_;
     bool previewRefreshAfter_=false,previewProbe_=false;
     float syncSpinAngle_=0.0f;          // 刷新进行中同步章图标的旋转角（度）
+    float busySweep_=0.0f;              // 顶部不定进度条的流动相位（度，0..720 循环）
     bool syncCheckShown_=false;         // 刷新成功后的对勾（800ms 后恢复刷新图标）
     // 悬停提示（旧版的 title 属性）：悬停 450ms 后弹一个气泡，移开/点击即收。
     int tooltipHover_=0;             // 鼠标停住的控件（0 = ControlId::None，与 hoverControl_ 同一套）

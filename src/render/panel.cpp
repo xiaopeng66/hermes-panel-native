@@ -1668,12 +1668,41 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
             DWRITE_TEXT_ALIGNMENT_LEADING,true);
     }
     if(view.busy) {
-        // .busy: the 2px sweep bar along the top of the page (body.busy .app::before - drawn static,
-        // the old one animated). 忙碌文字已删：反馈由同步章的旋转图标承担（真机反馈：文字与胶囊重叠）。
-        brush_->SetColor(palette.accent);
-        target->FillRectangle(D2D1::RectF(layout.content.left,layout.lampRow.top,
-            layout.content.left+(layout.content.right-layout.content.left)*0.5f,
-            layout.lampRow.top+widgets::kBannerHeight*scale_),brush_.Get());
+        // .busy: the 2px indeterminate sweep bar along the top of the page（旧 body.busy .app::before
+        // 是流动动画；之前被画成静态半根，真机反馈"只有一根没有变化"）。现在复刻流动：
+        // 一段 55% 宽的渐变块在轨道上循环滑动（sin 驱动，无缝循环），尾迹渐隐。
+        const float trackLeft=layout.content.left;
+        const float trackWidth=layout.content.right-layout.content.left;
+        const float trackTop=layout.lampRow.top;
+        const float trackBottom=trackTop+widgets::kBannerHeight*scale_;
+        const float phase=view.busySweep*3.14159265f/180.0f;      // busySweep：0..720 循环（两拍）
+        const float cycle=std::sin(phase);                         // -1..1 → 位置 0..1
+        const float position=(cycle+1.0f)*0.5f;
+        const float block=trackWidth*0.5f;
+        const float head=trackLeft+position*(trackWidth-block);
+        const float tail=head+block;
+        // 三段渐变：透明 → accent → 透明（D2D 线性渐变笔刷按轨道坐标定位）。
+        D2D1_GRADIENT_STOP stops[3];
+        stops[0].position=0.0f; stops[0].color=Fade(palette.accent,0.0f);
+        stops[1].position=0.5f; stops[1].color=palette.accent;
+        stops[2].position=1.0f; stops[2].color=Fade(palette.accent,0.0f);
+        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> collection;
+        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sweep;
+        if(SUCCEEDED(target->CreateGradientStopCollection(stops,3,D2D1_GAMMA_2_2,
+            D2D1_EXTEND_MODE_CLAMP,&collection))) {
+            const D2D1_POINT_2F start{head,trackTop},finish{tail,trackTop};
+            if(FAILED(target->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(start,finish),collection.Get(),&sweep))) {
+                sweep.Reset();
+            }
+        }
+        // 兜底：渐变笔刷创建失败时至少画实心段（不回到"永远半根"的旧观感）。
+        if(sweep) {
+            target->FillRectangle(D2D1::RectF(head,trackTop,tail,trackBottom),sweep.Get());
+        } else {
+            brush_->SetColor(palette.accent);
+            target->FillRectangle(D2D1::RectF(head,trackTop,tail,trackBottom),brush_.Get());
+        }
     }
     Chip(target,layout.chipHelper,view.chipHelper,hovered_(ControlId::ChipHelper),palette);
     Chip(target,layout.chip,view.chip,hovered_(ControlId::Chip),palette);

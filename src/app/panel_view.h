@@ -193,6 +193,7 @@ struct PanelViewModel {
     bool pendingGatewayRestart=false;
     // 刷新进行中同步章图标的旋转角（度，绕图标中心）；刷新成功后短暂显示对勾。
     float syncSpinAngle=0.0f;
+    float busySweep=0.0f;               // 顶部不定进度条的流动相位（度，0..720 循环）
     bool syncCheck=false;
     // G1 贴边挂件：样式、贴边方向与动画相位（收起态绘制用）。
     std::string widgetStyle="beacon";
