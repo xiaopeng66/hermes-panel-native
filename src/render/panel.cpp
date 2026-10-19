@@ -365,27 +365,87 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     }
     target->SetTransform(D2D1::Matrix3x2F::Identity());
     if(!tag.empty()) {
-        // 文字单独画：竖边旋转 90°（从上往下读），横边保持水平 —— 形状的旋转变换会把字镜像。
-        // 胶囊的模型名放在长轴 86% 处（旧延迟数字的位置），其余样式居中。
-        const float along=ch,across=cw;
-        if(style==WidgetStyle::Capsule&&!vertical) {
-            // 横向胶囊：logo 在 canonical y=0 那一端（上贴边→屏幕右端，下贴边→屏幕左端），
-            // 模型名放到相反的一端，避免和 logo/三灯挤在一起。
-            const bool logoAtRight=view.widgetEdge==3;
-            const D2D1_RECT_F box=logoAtRight
-                ?D2D1_RECT_F{Dip(4.0f,scale),Dip(2.0f,scale),width*0.34f,height-Dip(2.0f,scale)}
-                :D2D1_RECT_F{width*0.62f,Dip(2.0f,scale),width-Dip(4.0f,scale),height-Dip(2.0f,scale)};
-            Text(target,tag,box,count_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
-        } else {
-            const float focus=style==WidgetStyle::Capsule?0.86f:0.5f;
-            const auto pivot=vertical?D2D1::Point2F(width*0.5f,height*focus)
-                :D2D1::Point2F(width*0.5f,height*0.5f);
-            if(vertical) target->SetTransform(D2D1::Matrix3x2F::Rotation(90.0f,pivot));
-            const D2D1_RECT_F box{pivot.x-along*0.5f+Dip(3.0f,scale),pivot.y-across*0.5f,
-                pivot.x+along*0.5f-Dip(3.0f,scale),pivot.y+across*0.5f};
-            Text(target,tag,box,count_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
+        // 文字单独画：形状的整体旋转会把字镜像。统一方案：
+        // ① 用与形状层完全相同的三段式矩阵（T(-cw/2,-ch/2)·R(θ)·T(W/2,H/2)，θ 按边）
+        //    把 canonical 段矩形的四角映射成屏幕 bbox —— 位置随边正确翻转，已被形状层验证；
+        // ② 字形角度只由竖/横决定：竖边 90°（从上往下读）、横边 0°，绕屏幕 bbox 中心转；
+        // ③ DrawTextW 的排版盒：横边用屏幕 bbox；竖边用「bbox 的转正矩形」（宽=段长）。
+        // ④ 截断按段长（沿长向）量 —— Measure 是横排宽度，旋转后长度不变。
+        // （历史坑：金丝雀验证过"canonical 盒子直接旋转"会把盒宽当排版宽度截空；
+        //   "转正绝对坐标"方案存在双重偏移把盒子推出窗口。都已被四边截图否决。）
+        const float along=ch;
+        // Tag 样式的三盏灯钉在 canonical 长向底部（ch-Dip7 起向上排）：文字段给灯让位。
+        const float x0=style==WidgetStyle::Capsule?along*0.62f:Dip(3.0f,scale);
+        const float x1=style==WidgetStyle::Capsule?along-Dip(4.0f,scale)
+            :(style==WidgetStyle::Tag?along-Dip(22.0f,scale):along-Dip(3.0f,scale));
+        std::string shown=tag;
+        const float available=x1-x0;
+        if(Measure(count_.Get(),shown).width>available) {
+            const std::string ellipsis="\xE2\x80\xA6";
+            std::size_t low=0,high=shown.size();
+            const auto boundaryAt=[&](std::size_t index) {
+                std::size_t end=std::min(index,shown.size());
+                while(end>0&&end<shown.size()&&(static_cast<unsigned char>(shown[end])&0xC0)==0x80) --end;
+                return end;
+            };
+            const auto fits=[&](std::size_t index) {
+                return Measure(count_.Get(),shown.substr(0,boundaryAt(index))+ellipsis).width<=available;
+            };
+            while(low<high) {
+                const std::size_t mid=low+(high-low+1)/2;
+                if(fits(mid)) low=mid; else high=mid-1;
+            }
+            shown=shown.substr(0,boundaryAt(low))+ellipsis;
         }
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        if(!shown.empty()) {
+            // ① canonical 段矩形（厚向全宽、长向段）四角 → 屏幕 bbox。
+            float tagAngle=0.0f;
+            switch(view.widgetEdge) {
+            case 2: tagAngle=180.0f;break;
+            case 3: tagAngle=90.0f;break;
+            case 4: tagAngle=-90.0f;break;
+            default: break;
+            }
+            const auto tagCentre=D2D1::Point2F(width/2.0f,height/2.0f);
+            const auto mapPoint=[&](float x,float y) {
+                if(tagAngle==0.0f) return D2D1::Point2F(x,y);
+                const auto t=D2D1::Matrix3x2F::Translation(-cw/2.0f,-ch/2.0f)
+                    *D2D1::Matrix3x2F::Rotation(tagAngle)
+                    *D2D1::Matrix3x2F::Translation(tagCentre.x,tagCentre.y);
+                // 行向量约定：(x,y)·M；Matrix3x2F 的数据是 (m11,m12,m21,m22,dx,dy)。
+                return D2D1::Point2F(x*t.m11+y*t.m21+t.dx,x*t.m12+y*t.m22+t.dy);
+            };
+            const D2D1_POINT_2F corners[4]={
+                mapPoint(0.0f,x0),mapPoint(static_cast<float>(cw),x0),
+                mapPoint(static_cast<float>(cw),x1),mapPoint(0.0f,x1)};
+            float minX=corners[0].x,maxX=corners[0].x,minY=corners[0].y,maxY=corners[0].y;
+            for(const auto& corner:corners) {
+                minX=std::min(minX,corner.x);maxX=std::max(maxX,corner.x);
+                minY=std::min(minY,corner.y);maxY=std::max(maxY,corner.y);
+            }
+            const D2D1_RECT_F screenBox{minX,minY,maxX,maxY};
+            // ② 竖边：**逐字符竖排**（每个字符一次 DrawTextW，屏幕坐标、零变换）。
+            //    旋转盒方案在真机上被 PrintWindow 证伪（字形不旋转 + 位置漂移），
+            //    逐字符堆叠完全可控，视觉 = 从上往下读（与旧版一致）。
+            //    右边的段已在 screenBox 里随 180° 翻到窗口上端，读向也从上往下 —— 一致。
+            if(vertical) {
+                const float cellHeight=(screenBox.bottom-screenBox.top)/static_cast<float>(shown.size());
+                brush_->SetColor(palette.text);
+                for(std::size_t index=0;index<shown.size();++index) {
+                    std::string single(1,shown[index]);
+                    const auto converted=Widen(single);
+                    if(converted.empty()) continue;
+                    count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    const D2D1_RECT_F cell{screenBox.left,screenBox.top+cellHeight*static_cast<float>(index),
+                        screenBox.right,screenBox.top+cellHeight*static_cast<float>(index+1)};
+                    target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),
+                        count_.Get(),cell,brush_.Get());
+                }
+            } else {
+                Text(target,shown,screenBox,count_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
+            }
+        }
     }
 }
 std::string PanelRenderer::Ellipsize(IDWriteTextFormat* format,const std::string& value,float width) {    // 旧 CSS 的 text-overflow: ellipsis 等价物。DWrite 自己的 trimming 在真机上没画出省略号
