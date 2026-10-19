@@ -1,0 +1,23 @@
+# 构建产物
+build/
+build-asan/
+dist/
+*.obj
+*.pdb
+*.ilk
+
+# 本机临时与遗留
+tmp/
+projects/
+third_party/webview2/
+tools/__pycache__/
+__pycache__/
+*.pyc
+
+# IDE
+.vs/
+.vscode/
+*.user
+
+# 审查证据截图（体积大，报告 md 保留）
+audit/evidence/

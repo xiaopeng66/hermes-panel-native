@@ -1,0 +1,5 @@
+// Hermes 模型面板 · 资源脚本：只放应用图标（logo = 标题栏那枚 mark，见 tools/make_icon.py）。
+// ID 1 是 shell 取用的「程序图标」：Explorer/任务栏读 exe 里的第一个 ICON 资源。
+#include <windows.h>
+
+1 ICON "hermes.ico"
