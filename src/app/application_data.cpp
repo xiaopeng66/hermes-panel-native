@@ -219,6 +219,7 @@ void Application::StartRefresh() {
             result->helperErrorValid=true;
             result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
             result->state.loading=false;
+            result->state.wsl="up";   // 同快照路径：UNC 可达即 WSL 在线（health 无 status.wsl）
             // 灯照常现探：TCP 探活是纯 Windows 侧成本（<20ms），不吃 WSL。
             FillReachability(result->state,webuiPort,gatewayPort);
             workerBusy_=false;
@@ -237,6 +238,9 @@ void Application::StartRefresh() {
             result->helperErrorValid=true;
             result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
             result->state.loading=false;
+            // 与 wsl.exe 路径同款兜底：UNC 读到 config 本身就是 WSL 活着的信号——
+            // health 里没有 status.wsl 字段，不补的话灯永远停在 unknown（灰"探测中"）。
+            result->state.wsl="up";
             FillReachability(result->state,webuiPort,gatewayPort);
             workerBusy_=false;
             if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;

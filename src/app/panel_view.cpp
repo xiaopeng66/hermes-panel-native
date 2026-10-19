@@ -262,7 +262,9 @@ void AttachStatusView(PanelViewModel& view,const StatusViewInput& input) {
         card.rows.clear();
         card.model=(state.model.provider.empty()?std::string{}:state.model.provider+"/")
             +(state.model.model.empty()?"—":state.model.model);
-        card.rows.push_back({"WSL",wslUp?"在线":(wslDown?"离线":"探测中"),wslUp?0:(wslDown?2:1)});
+        // 灯色语义三处同源（贴条/面板/信息卡）：ok 绿、warn 黄、err 红、**unknown 灰（探测中）**。
+        card.rows.push_back({"WSL",wslUp?"在线":(wslDown?"离线":"探测中"),
+            wslUp?0:(wslDown?2:3)});
         card.rows.push_back({"WebUI",webuiOk?("在线 :"+std::to_string(state.webui.port)):"不可达",
             webuiOk?0:2});
         card.rows.push_back({"网关",gatewayOk?("在线 :"+std::to_string(state.gateway.port)):"不可达",
@@ -270,7 +272,6 @@ void AttachStatusView(PanelViewModel& view,const StatusViewInput& input) {
         card.note=view.pendingGatewayRestart?"网关待重启：点开面板后可重启"
             :(!state.error.empty()?"助手出错：点开面板后重试"
             :(view.chipWarn.present?"配置已改，网关待重启":std::string{}));
-        card.hint="单击展开 · 拖动移动";
         card.sync=view.syncTime;
     }
     // 悬停提示（旧 renderStatus 里的 element.title）：**全部一句话、不换行**（用户要求）。

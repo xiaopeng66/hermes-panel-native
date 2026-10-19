@@ -129,6 +129,8 @@ private:
     unsigned long long panelMotionStart_=0,cardMotionStart_=0,tooltipMotionStart_=0;
     unsigned long long hoverMotionStart_=0,themeMotionStart_=0;
     unsigned long long stripMotionStart_=0,cardExitStart_=0;
+    unsigned long long capsuleDockStart_=0;   // 胶囊贴边↔浮起过渡起点（0=无动画）
+    bool capsuleDocked_=true;                 // 目标态：true=贴边（直角侧）、false=浮起（椭圆）
     bool panelMotionEnter_=true;
     int hoverPrevious_=0;
     bool motionTimer_=false;

@@ -31,6 +31,7 @@ constexpr unsigned kPanelMotionMs=140;    // 面板内容入场
 constexpr unsigned kCardMotionMs=120;     // 悬浮卡入场
 constexpr unsigned kCardExitMs=80;        // 悬浮卡退场淡出
 constexpr unsigned kStripEnterMs=110;     // 收起瞬间贴条淡入
+constexpr unsigned kCapsuleDockMs=160;    // 胶囊贴边↔浮起（椭圆）过渡
 constexpr unsigned kTooltipMotionMs=120;  // 面板内提示气泡淡入
 constexpr unsigned kHoverMotionMs=90;     // 控件悬停过渡
 constexpr unsigned kThemeMotionMs=180;    // 主题交叉淡入

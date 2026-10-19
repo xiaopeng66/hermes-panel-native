@@ -307,9 +307,14 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                 Dip(2.0f,scale),lampAt(static_cast<std::size_t>(index)));
         tag=ModelTag(view.currentModel,4);
     } else if(style==WidgetStyle::Capsule) {
-        // 旧胶囊（保留给一直用它的人）：贴边侧平直、桌面侧全圆角；logo + 三灯 + 竖排模型名。
-        // 延迟数字按真机反馈删掉，换成"当前模型"（收起态真正想知道的信息）。
-        const float r=std::min(radius,cw*0.5f);
+        // 胶囊（真机主力样式）：贴边时贴边侧两角收小、桌面侧全椭圆；拖离贴边（浮起）
+        // 过渡到**完整椭圆**（四角全半径）—— docked 0..1 插值驱动（贴边↔中间切换动画）。
+        // 液态玻璃质感：纵向亮度渐变底 + 顶部高光带 + 内描边 + 贴边侧微投影（与桌面分层）。
+        const float docked=std::clamp(view.motion.capsuleDocked,0.0f,1.0f);
+        const float straight=radius*(1.0f-docked);            // 贴边侧角：docked=1 → 0（直）
+        const float full=cw*0.5f;                             // 桌面侧角：全椭圆
+        // 贴边侧的"直"也留最小圆角，避免 docked 抖动时出现尖刺。
+        const float edgeR=std::max(straight,Dip(3.0f,scale));
         Microsoft::WRL::ComPtr<ID2D1Factory> factory;
         target->GetFactory(factory.GetAddressOf());
         if(factory) {
@@ -317,18 +322,57 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
             Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
             if(SUCCEEDED(factory->CreatePathGeometry(path.GetAddressOf()))
                 &&SUCCEEDED(path->Open(sink.GetAddressOf()))) {
-                sink->BeginFigure(D2D1::Point2F(0.0f,0.0f),D2D1_FIGURE_BEGIN_FILLED);
-                sink->AddLine(D2D1::Point2F(cw-r,0.0f));
-                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(cw,r),D2D1::SizeF(r,r),0.0f,
+                // canonical：x=厚向（贴边侧 x=0）、y=长向。贴边侧=x=0 的两个角。
+                sink->BeginFigure(D2D1::Point2F(edgeR,0.0f),D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine(D2D1::Point2F(cw-full,0.0f));
+                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(cw,full),D2D1::SizeF(full,full),0.0f,
                     D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
-                sink->AddLine(D2D1::Point2F(cw,ch-r));
-                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(cw-r,ch),D2D1::SizeF(r,r),0.0f,
+                sink->AddLine(D2D1::Point2F(cw,ch-full));
+                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(cw-full,ch),D2D1::SizeF(full,full),0.0f,
                     D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
-                sink->AddLine(D2D1::Point2F(0.0f,ch));
+                sink->AddLine(D2D1::Point2F(edgeR,ch));
+                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(0.0f,ch-edgeR),D2D1::SizeF(edgeR,edgeR),0.0f,
+                    D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
+                sink->AddLine(D2D1::Point2F(0.0f,edgeR));
+                sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(edgeR,0.0f),D2D1::SizeF(edgeR,edgeR),0.0f,
+                    D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
-                brush_->SetColor(Blend(palette.stripTop,palette.stripBottom,0.5f));
-                target->FillGeometry(path.Get(),brush_.Get());
+                // 液态玻璃底：纵向（厚向）亮→暗 渐变，模拟受光面。
+                D2D1_GRADIENT_STOP glass[2];
+                glass[0].position=0.0f; glass[0].color=palette.stripTop;
+                glass[1].position=1.0f; glass[1].color=palette.stripBottom;
+                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassStops;
+                if(SUCCEEDED(target->CreateGradientStopCollection(glass,2,D2D1_GAMMA_2_2,
+                    D2D1_EXTEND_MODE_CLAMP,&glassStops))) {
+                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassBrush;
+                    if(SUCCEEDED(target->CreateLinearGradientBrush(
+                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(cw,0)),
+                        glassStops.Get(),&glassBrush))) {
+                        target->FillGeometry(path.Get(),glassBrush.Get());
+                    } else {
+                        brush_->SetColor(Blend(palette.stripTop,palette.stripBottom,0.5f));
+                        target->FillGeometry(path.Get(),brush_.Get());
+                    }
+                }
+                // 内描边（玻璃边缘的折射线）：上缘亮、下缘暗。
+                brush_->SetColor(Fade(palette.text,0.14f));
+                target->DrawGeometry(path.Get(),brush_.Get(),1.0f);
+                // 顶部高光带：玻璃受光面（长向上 8%..20% 的一条柔光）。
+                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sheenStops;
+                D2D1_GRADIENT_STOP sheen[3];
+                sheen[0].position=0.0f; sheen[0].color=Fade(palette.text,0.0f);
+                sheen[1].position=0.5f; sheen[1].color=Fade(palette.text,0.16f);
+                sheen[2].position=1.0f; sheen[2].color=Fade(palette.text,0.0f);
+                if(SUCCEEDED(target->CreateGradientStopCollection(sheen,3,D2D1_GAMMA_2_2,
+                    D2D1_EXTEND_MODE_CLAMP,&sheenStops))) {
+                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sheenBrush;
+                    if(SUCCEEDED(target->CreateLinearGradientBrush(
+                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,Dip(2,scale)),
+                            D2D1::Point2F(0,Dip(9,scale))),sheenStops.Get(),&sheenBrush))) {
+                        target->FillGeometry(path.Get(),sheenBrush.Get());
+                    }
+                }
             }
         }
         const float logo=Dip(14.0f,scale);
@@ -425,24 +469,27 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
             }
             const D2D1_RECT_F screenBox{minX,minY,maxX,maxY};
             // ② 竖边：**逐字符竖排**（每个字符一次 DrawTextW，屏幕坐标、零变换）。
-            //    旋转盒方案在真机上被 PrintWindow 证伪（字形不旋转 + 位置漂移），
-            //    逐字符堆叠完全可控，视觉 = 从上往下读（与旧版一致）。
-            //    右边的段已在 screenBox 里随 180° 翻到窗口上端，读向也从上往下 —— 一致。
+            //    读向（真机约定"左顶右底"）：左边第一个字符在顶（从上往下读）；
+            //    右边第一个字符在底（从下往上读）—— 与形状层 180° 旋转后的 logo 端
+            //    （右边 logo 在底）同向，整条挂件的"起点端"一致。
             if(vertical) {
+                const bool reverse=view.widgetEdge==2;   // 右边：从下往上
                 const float cellHeight=(screenBox.bottom-screenBox.top)/static_cast<float>(shown.size());
                 brush_->SetColor(palette.text);
                 for(std::size_t index=0;index<shown.size();++index) {
+                    const std::size_t slot=reverse?shown.size()-1-index:index;
                     std::string single(1,shown[index]);
                     const auto converted=Widen(single);
                     if(converted.empty()) continue;
                     count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                     count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    const D2D1_RECT_F cell{screenBox.left,screenBox.top+cellHeight*static_cast<float>(index),
-                        screenBox.right,screenBox.top+cellHeight*static_cast<float>(index+1)};
+                    const D2D1_RECT_F cell{screenBox.left,screenBox.top+cellHeight*static_cast<float>(slot),
+                        screenBox.right,screenBox.top+cellHeight*static_cast<float>(slot+1)};
                     target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),
                         count_.Get(),cell,brush_.Get());
                 }
             } else {
+                // 横边：水平排（上顶下底已由段映射保证：上边段在左端、下边段在右端）。
                 Text(target,shown,screenBox,count_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
             }
         }
@@ -2044,10 +2091,9 @@ void PanelRenderer::DrawHoverCard(ID2D1RenderTarget* target,IDWriteFactory* text
             palette.dim,DWRITE_TEXT_ALIGNMENT_TRAILING,true);
         y+=dip(20);
     }
-    Text(target,card.hint,D2D1::RectF(dip(14),y+dip(2),size.width-dip(14),y+dip(20)),
-        caption_.Get(),palette.dim,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+    // hint 已按真机反馈移除（"单击展开 · 拖动移动"对熟手是噪声）；note 存在时它顶替这个位置。
     if(!card.note.empty())
-        Text(target,card.note,D2D1::RectF(dip(14),y+dip(20),size.width-dip(14),y+dip(38)),
+        Text(target,card.note,D2D1::RectF(dip(14),y+dip(2),size.width-dip(14),y+dip(20)),
             caption_.Get(),palette.warn,DWRITE_TEXT_ALIGNMENT_LEADING,true);
 }
 }

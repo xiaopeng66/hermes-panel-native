@@ -710,6 +710,11 @@ void Application::DockNearest() {
     const auto previous=state_;
     model_.edge=edge;
     model_.anchor=edge==Edge::Left||edge==Edge::Right?rect.y:rect.x;
+    // 胶囊贴边过渡：浮起椭圆 → 贴边直角。
+    if(stored_.widgetStyle=="capsule") {
+        capsuleDocked_=true;
+        if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
+    }
     state_=NextState(state_,Event::DropDocked,edge);
     geometry_.Place(model_,monitor_.geometry,state_,"dock");
     ApplyState("dock",previous);
@@ -719,6 +724,11 @@ void Application::Undock() {
     if(model_.edge==Edge::None) return;
     const auto previous=state_;
     model_.edge=Edge::None;
+    // 胶囊浮起过渡：贴边直角 → 完整椭圆（DESIGN v1.8 真机反馈）。
+    if(stored_.widgetStyle=="capsule") {
+        capsuleDocked_=false;
+        if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
+    }
     if(floatingRemembered_) {
         const auto size=TierSize(model_,monitor_.geometry.dpi);
         model_.floating=ClampFloating(floatingBeforeDock_,size,monitor_.geometry.work);
@@ -827,6 +837,8 @@ void Application::MotionTick() {
     else cardMotionStart_=0;
     if(active(stripMotionStart_,kStripEnterMs)) { any=true;if(strip_) InvalidateRect(strip_,nullptr,FALSE); }
     else stripMotionStart_=0;
+    if(active(capsuleDockStart_,kCapsuleDockMs)) { any=true;if(strip_) InvalidateRect(strip_,nullptr,FALSE); }
+    else capsuleDockStart_=0;
     if(active(cardExitStart_,kCardExitMs)) { any=true;if(hoverCard_) InvalidateRect(hoverCard_,nullptr,FALSE); }
     else if(cardExitStart_) {
         cardExitStart_=0;
@@ -1114,6 +1126,14 @@ void Application::CommitStripDrop() {
         monitor_.geometry);
     model_.edge=snap.edge;
     model_.anchor=snap.anchor;
+    // 胶囊落点动画：贴上边（直角）↔ 拖到中途浮起（椭圆）——按新旧 edge 是否为贴边切换。
+    if(stored_.widgetStyle=="capsule") {
+        const bool nowDocked=snap.edge!=Edge::None;
+        if(nowDocked!=capsuleDocked_) {
+            capsuleDocked_=nowDocked;
+            if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
+        }
+    }
     const auto previous=state_;
     state_=State::Collapsed;
     geometry_.Place(model_,monitor_.geometry,state_,"strip-drop");
@@ -1308,6 +1328,14 @@ PanelViewModel Application::CurrentView() {
         else input.motion.cardAlpha=progress(cardMotionStart_,kCardMotionMs);
         input.motion.cardOffsetDip=(1.0f-progress(cardMotionStart_,kCardMotionMs))*4.0f;
         input.motion.stripAlpha=progress(stripMotionStart_,kStripEnterMs);
+        // 胶囊贴边度：目标态向 0/1 过渡（1=贴边直角、0=浮起椭圆）。动画中逐帧插值。
+        {
+            const float target=capsuleDocked_?1.0f:0.0f;
+            const auto started=capsuleDockStart_;
+            input.motion.capsuleDocked=started==0?target
+                :capsuleDocked_?progress(started,kCapsuleDockMs)
+                :1.0f-progress(started,kCapsuleDockMs);
+        }
         input.motion.tooltipAlpha=progress(tooltipMotionStart_,kTooltipMotionMs);
         input.motion.hoverPrevious=hoverPrevious_;
         input.motion.hoverAmount=progress(hoverMotionStart_,kHoverMotionMs);
