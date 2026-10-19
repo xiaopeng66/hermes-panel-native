@@ -2527,3 +2527,27 @@ Release PASS 打包 956,416 B、无 DLL、无控制面、能启动
 
 证据：`evidence/20261019-095243-043-Pages.txt`、`20261019-081856-489-Regression.txt`、
 `20261019-083608-514-Audit.txt`、`20261019-083834-496-Release.txt`、`20261019-080252-839-Unit.txt`。
+
+## G15 真机闪退专案（2026-10-19 11:40–13:10）：F-021 + 暴力压测
+
+- **取证**：用户「点贴条闪退」→ 事件日志（RM 会话 11:34:24→11:36:26 + 11:31:26 MSI 安装完成、
+  无 WER）→ app.log 逐行 flush 且无任何退出日志 → crash-probe 未更新（非 SEH）→
+  结论：RestartManager 强杀。控制窗 message-only 收不到会话广播，面板/贴条未处理
+  `WM_ENDSESSION` → 同意询问后不退出 → RM 超时 TerminateProcess。
+- **修复（FIX-021）**：DESIGN v1.6 先记录契约；`application.cpp` 顶层窗口处理
+  `WM_QUERYENDSESSION`（保存 + 同意）与 `WM_ENDSESSION`（保存 + 干净退出）。
+- **回归**：`lifecycle` 新增「RestartManager session end exits cleanly」（按 PID 过滤窗口，
+  绝不碰真机实例）。
+- **暴力压测**（`tmp/hermes-panel-native/stress/stress_violent.py`，修复后全绿）：
+  S1 贴条点击 ×300、S2 显示/隐藏 ×200、S3 悬停提示气泡+点设置 ×60、S4 拖拽换边 ×20、
+  S5 RM 演练（修复前 FAIL→修复后 PASS）、S6 快速换页 ×60、S7 慢助手排队切换；
+  全程 3s 心跳零停摆、零 `[error]`、零崩溃。
+- **门禁**：Lifecycle 4/4（`20261019-121529-241-Lifecycle.txt`）、Regression 23/23
+  （`20261019-121539-936-Regression.txt`，dpi SKIP=桌面占用环境类）、Audit 160/160
+  （`20261019-121813-225-Audit.txt`）、Release 打包可启动
+  （`20261019-130606-323-Release.txt`）。
+- **产物**：dist `HermesModelPanelNative.exe` 956,928 B
+  sha256 `58b24b08f06f60539c133a1a87b77d48414f2341383f4360332640c83eee3894`；
+  真机实例已于 13:10 用修复版重启（WSL 已连、18 供应商/3 回退链）。
+- 第一次死亡（约 11:25）无 RM/MSI 事件佐证，归因"外部结束"（含任务管理器），登记于
+  `audit/REVIEW-NOTES.md` 追加复审节；640+ 轮压测未复现产品自崩。

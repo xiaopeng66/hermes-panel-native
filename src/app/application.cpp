@@ -2352,6 +2352,18 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
     case WM_SIZE: surface.Resize();if(card) RenderHoverCard();else if(strip) RenderStrip();InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_MOUSEACTIVATE: if(strip) return MA_NOACTIVATE;break;
     case WM_CLOSE: Hide();return 0;
+    case WM_QUERYENDSESSION:
+        // 安装器 RestartManager / 系统关机的关闭询问（DESIGN v1.6）。控制窗是 message-only
+        // 窗口收不到这类广播，只有这里的顶层窗口被问到：保存设置并同意。若只同意而下面的
+        // WM_ENDSESSION 不退出，RM 等待超时后会 TerminateProcess（真机 2026-10-19 的闪退）。
+        if(window==panel_) PersistSettings(true);
+        return TRUE;
+    case WM_ENDSESSION:
+        if(wparam&&window==panel_) {
+            if(log_) log_->Info("app","session end requested, exiting cleanly");
+            PostMessageW(control_,WM_CLOSE,0,0);   // → DestroyWindow → PostQuitMessage → 走正常退出与日志
+        }
+        return 0;
     }
     return DefWindowProcW(window,message,wparam,lparam);
 }

@@ -216,3 +216,21 @@
 - 回滚：还原该文件。
 - 用户可感知：最小化后再操作面板，不会留下错误日志/异常几何。
 - 违反 DESIGN 不变量：否（这是让 INV1 重新成立）。
+
+
+### FIX-021 ← F-021（P1）系统/安装器请求关闭时必须优雅退出
+- 根因（已证实）：`WM_QUERYENDSESSION/WM_ENDSESSION` 只发给普通顶层窗口（控制窗是
+  message-only），面板/贴条窗口过程未处理 → 同意询问后不退出 → RestartManager 超时强杀。
+- 方案：`Application::WindowMessage` 增加两个 case——`WM_QUERYENDSESSION`（面板窗口：
+  `PersistSettings(true)` + 返回 TRUE）、`WM_ENDSESSION(wParam=TRUE)`（日志 + 
+  `PostMessageW(control_, WM_CLOSE)` → 走正常退出路径：销毁窗口 → 消息循环退出 →
+  保存设置 → 移除托盘）。DESIGN.md v1.6 先记录契约。
+- 涉及文件：`src/app/application.cpp`、`DESIGN.md`、`tests/lifecycle_tests.cpp`（回归）。
+- 测试：lifecycle 新用例（按 PID 过滤找面板窗口，发两个会话消息，断言 5s 内 exit 0）；
+  压测 S5 同场景。
+- 门禁：Lifecycle（4/4，证据 `20261019-121529-241-Lifecycle.txt`）+ Regression
+  （23/23，`20261019-121539-936-Regression.txt`）+ Audit（160/160，
+  `20261019-121813-225-Audit.txt`）+ Release（`20261019-130606-323-Release.txt`）。
+- 回滚：还原上述两个源文件。
+- 用户可感知：安装器/关机时面板优雅退出（保存设置、托盘图标正常移除），不再被强杀。
+- 违反 DESIGN 不变量：否（新增外壳契约，DESIGN v1.6 先行记录）。

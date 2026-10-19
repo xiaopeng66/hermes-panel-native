@@ -212,6 +212,7 @@ hermes-panel-native.exe（C++/Win32，单进程）
 
 | 版本 | 说明 |
 |---|---|
+| v1.6（2026-10-19） | **系统/安装器请求关闭时必须优雅退出（新增外壳契约）**。真机事故：安装程序的 RestartManager 会话（事件日志 11:34:24→11:36:26）向面板的顶层窗口发 `WM_QUERYENDSESSION`→`WM_ENDSESSION(wParam=TRUE)`，面板此前只由 `DefWindowProc` 默默同意前者、对后者不做任何事——进程不退出，RM 等待超时后 `TerminateProcess` 强杀，表现为"闪退"且不留任何崩溃记录（无 WER、无探针、无日志）。契约：面板/贴条收到 `WM_QUERYENDSESSION` 时保存设置并同意；收到 `WM_ENDSESSION(wParam=TRUE)` 时保存设置、移除托盘图标并干净退出（退出码 0，日志留 `message loop finished`）。控制窗是 message-only 窗口收不到这类广播，因此这两个消息必须由面板/贴条窗口过程自己处理。 ||
 | v1.5（2026-10-19） | 审计收口：§2 与 §4.8 #34 的“8 DIP 细条”更新为 G11 已验收的 10/14/16/30 DIP 挂件（beacon/tag/flag/capsule）；§4.2 #4 的“异常灯体可点击重试”落地（点击任一灯 = 重新读取并探活）；§4.9 #36 的 Tab 焦点链与 F5 刷新落地。命令/事件与旧版契约保持一致（fallback-move 的 to、delete-provider 的 purge_key/remove_fallbacks）。 ||
 | v0.1（2026-10-15） | 初稿：技术栈与不变量、视觉 token 表（取自旧 `styles.css`）、36 项逐项对照表、25 通道映射、待定项与风险。 |
 | v0.2（2026-10-15） | 细化：补 §5.1 写入守卫与禁用态、模型行数据源与重绘去抖规则；契约（助手 stdin/stdout JSON 协议、19 verb、状态字段）落到 `PLAN.md` §2【实测】。 |

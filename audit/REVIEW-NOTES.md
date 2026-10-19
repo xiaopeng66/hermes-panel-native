@@ -257,3 +257,47 @@ ame` → 请求 `{'cmd':'probe','model':'quote"model\name'}` 合法，延迟记�
 | F-018 | `DESIGN.md` v1.5 已更新 | 通过 |
 | F-019 | `settings` 单测：`futureKey`/`another` 往返保留 | 通过 |
 | F-020 | `-Gate Audit` 160/160；随机点击命中最小化后不再产生 `[error]` | 通过 |
+
+## 追加复审（2026-10-19，真机闪退专案）
+
+用户报告「点了几次贴条后闪退」。按 AUDIT-PLAN 模板追加一条 finding 与一轮暴力压测记录。
+
+### F-021（P1）系统/安装器请求关闭时进程被 RestartManager 强杀（"闪退"）
+
+- **现象**：真机 2026-10-19 上午，面板在安装程序运行期间从屏幕上消失；进程确认死亡。
+- **复现**：`tmp/hermes-panel-native/stress/stress_violent.py` S5——向面板窗口
+  `SendMessageTimeout(WM_QUERYENDSESSION, 1, ENDSESSION_CLOSEAPP)` → 应用回答 TRUE；
+  随后 `WM_ENDSESSION(wParam=TRUE)` → 修复前进程**继续运行**（RM 等待超时后 TerminateProcess）。
+- **证据**：
+  - Windows 事件日志：11:31:26 MSI 安装完成（MsiInstaller 1040/1033/1042/11707）；
+    11:34:24 RestartManager 会话启动 → 11:36:26 会话结束，面板进程在此前后消失；
+    全天**无 Application Error**（WER 对本产品有效，02:42/05:52 两条是测试 exe）。
+  - `%LOCALAPPDATA%\HermesModelPanelNative\logspp.log`（逐行 flush，可信）：最后一行
+    11:32:44 `data: refresh started`，无 error、无 `message loop finished`、无 `exiting with`。
+  - `logs/crash-probe.txt` 停留 2026-10-18 21:43（旧记录）→ 本次不是 SEH 崩溃。
+- **根因（已证实）**：控制窗是 `HWND_MESSAGE` message-only 窗口，收不到
+  `WM_QUERYENDSESSION/WM_ENDSESSION` 广播；面板/贴条窗口过程未处理这两个消息，
+  `DefWindowProc` 对询问回答 TRUE（同意关闭）但 `WM_ENDSESSION` 后进程不退出 →
+  RestartManager 等待超时后强杀。外部强杀 = 无 WER、无日志、无探针，与全部证据吻合。
+- **影响面**：任何安装器/更新器（RestartManager）或系统关机都会强杀面板；被强杀时
+  设置可能未保存、托盘图标可能残留。
+- **建议方向**：顶层窗口处理两个会话消息（保存设置 + 干净退出）；lifecycle 门禁加回归。
+- **另记（第一次死亡，约 11:25）**：其时间窗内无任何 RM/MSI 事件，UI 日志在 11:25:00 后
+  停更——证据只支持"进程被外部结束（含任务管理器强杀）"，无法归因到产品缺陷；
+  640+ 轮暴力压测未使产品崩溃/停摆。归入环境/外部类。
+
+### 暴力压测（stress_violent.py，修复后全绿）
+
+| 场景 | 轮次 | 结果 |
+|---|---|---|
+| S1 贴条单击展开/收起 | 300 | 300/300，进程存活，零 error |
+| S2 显示/隐藏（托盘左键/热键同路径） | 200 | 200/200 |
+| S3 展开→悬停设置标签 3.2s（提示气泡）→点击 | 60 | 60/60 |
+| S4 贴条拖拽换边（四边轮转） | 20 | 20/20 |
+| S5 RestartManager 关闭演练 | — | 修复后：同意询问 + 干净退出（exit 0） |
+| S6 快速换页 + 轮询并发 | 60 | 60/60 |
+| S7 慢助手（1.5s）+ 12 次连点排队切换 | — | 队列排空，busy=false pending=false |
+| 全程心跳（UI 停摆探测 3s 超时） | 每 10 轮 | 零停摆 |
+
+修复后复核：`lifecycle` 门禁新增用例「RestartManager session end exits cleanly」通过；
+Lifecycle 4/4、Regression 23/23、Audit 160/160、Release 打包可启动（见 evidence/）。
