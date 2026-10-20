@@ -38,9 +38,12 @@ void BoxBlurPass(const std::vector<unsigned int>& in,std::vector<unsigned int>& 
                 :in[static_cast<std::size_t>(addIndex)*width+line];
             const auto remove=horizontal?in[static_cast<std::size_t>(line)*width+removeIndex]
                 :in[static_cast<std::size_t>(removeIndex)*width+line];
-            red+=(add&0xFF)-(remove&0xFF);
-            green+=((add>>8)&0xFF)-((remove>>8)&0xFF);
-            blue+=((add>>16)&0xFF)-((remove>>16)&0xFF);
+            // 通道先转有符号再相减：add/remove 是 unsigned int，直接相减在像素变暗时会
+            // 按 32 位无符号回绕成 ~4.29e9 再加进累加器 —— 模糊结果会变成彩色噪点
+            // （真机 2026-10-20「玻璃像噪点」的根因：平滑壁纸 2.2 → 模糊后 66.5）。
+            red+=static_cast<long long>(add&0xFF)-static_cast<long long>(remove&0xFF);
+            green+=static_cast<long long>((add>>8)&0xFF)-static_cast<long long>((remove>>8)&0xFF);
+            blue+=static_cast<long long>((add>>16)&0xFF)-static_cast<long long>((remove>>16)&0xFF);
         }
     }
 }
@@ -110,6 +113,23 @@ unsigned Surface::BackdropMean() const {
         |(static_cast<unsigned>(green/count)<<8)
         |static_cast<unsigned>(blue/count);
 }
+float Surface::BackdropNoise() const {
+    if(backdrop_.empty()||backdropWidth_<=1) return 0.0f;
+    // 只采横向相邻差（快照是 1D 细条，横向就是"厚度方向"），够判断有没有糊开。
+    long long total=0;
+    std::size_t samples=0;
+    for(int y=0;y<backdropHeight_;++y) {
+        for(int x=0;x+1<backdropWidth_;++x) {
+            const auto a=backdrop_[static_cast<std::size_t>(y)*backdropWidth_+x];
+            const auto b=backdrop_[static_cast<std::size_t>(y)*backdropWidth_+x+1];
+            total+=std::abs(static_cast<int>(a&0xFF)-static_cast<int>(b&0xFF));
+            total+=std::abs(static_cast<int>((a>>8)&0xFF)-static_cast<int>((b>>8)&0xFF));
+            total+=std::abs(static_cast<int>((a>>16)&0xFF)-static_cast<int>((b>>16)&0xFF));
+            ++samples;
+        }
+    }
+    return samples?static_cast<float>(total)/static_cast<float>(samples*3):0.0f;
+}
 void Surface::EnsureBackdrop(HWND window) {
     if(!backdrop_.empty()) return;
     CaptureBackdrop(window);
@@ -175,7 +195,25 @@ bool Surface::CaptureBackdrop(HWND window) {
         }
     }
     if(captured&&!backdrop_.empty()) {
-        BoxBlur(backdrop_,width,height,std::max(4,std::min(width,height)/4));
+        // 诊断：模糊前后的横向噪声（相邻像素差）。抓屏通路在个别机器上会回读垃圾数据，
+        // 这一对数字是判断"源数据可疑"还是"模糊没生效"的唯一依据。
+        const auto noiseOf=[&](const std::vector<unsigned int>& pixels) {
+            long long total=0;std::size_t samples=0;
+            for(int y=0;y<height;++y)
+                for(int x=0;x+1<width;++x) {
+                    const auto a=pixels[static_cast<std::size_t>(y)*width+x];
+                    const auto b=pixels[static_cast<std::size_t>(y)*width+x+1];
+                    total+=std::abs(static_cast<int>(a&0xFF)-static_cast<int>(b&0xFF));
+                    total+=std::abs(static_cast<int>((a>>8)&0xFF)-static_cast<int>((b>>8)&0xFF));
+                    total+=std::abs(static_cast<int>((a>>16)&0xFF)-static_cast<int>((b>>16)&0xFF));
+                    ++samples;
+                }
+            return samples?static_cast<float>(total)/static_cast<float>(samples*3):0.0f;
+        };
+        backdropNoiseBefore_=noiseOf(backdrop_);
+        // 半径取厚度方向的 1/5（60px 宽 → 12px ≈ 6 DIP）：既抹掉高频纹理，又保留一点
+        // 背后内容的明暗走向；半径过大就退化成一块纯色，失去"玻璃"的意义。
+        BoxBlur(backdrop_,width,height,std::clamp(std::min(width,height)/5,4,24));
         backdropWidth_=width;backdropHeight_=height;
         ++backdropGeneration_;
     } else {

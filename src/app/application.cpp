@@ -11,6 +11,7 @@
 #include "data/probe.h"
 #include "render/widgets.h"
 #include <windowsx.h>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -703,6 +704,24 @@ void Application::RenderStrip() {
             view.backdrop.width=stripContext_.surface.BackdropWidth();
             view.backdrop.height=stripContext_.surface.BackdropHeight();
             view.backdrop.generation=stripContext_.surface.BackdropGeneration();
+        }
+        // 玻璃快照只在代次变化时记一行：真机上"抓没抓到、抓到了什么"必须能从日志判断
+        // （真机 2026-10-20 报"玻璃像噪点"，就是靠这行定位到快照缺失的）。
+        if(log_&&view.backdrop.generation!=loggedBackdropGeneration_) {
+            loggedBackdropGeneration_=view.backdrop.generation;
+            log_->Info("paint",std::string("strip backdrop gen=")
+                +std::to_string(view.backdrop.generation)+" size="
+                +std::to_string(view.backdrop.width)+"x"+std::to_string(view.backdrop.height)
+                +" mean=0x"+[this] {
+                    char buffer[16]{};
+                    std::snprintf(buffer,sizeof(buffer),"%06X",stripContext_.surface.BackdropMean());
+                    return std::string(buffer);
+                }()+" noise="+[this] {
+                    char buffer[32]{};
+                    std::snprintf(buffer,sizeof(buffer),"%.1f->%.1f",
+                        stripContext_.surface.BackdropNoiseBefore(),stripContext_.surface.BackdropNoise());
+                    return std::string(buffer);
+                }());
         }
         stripContext_.surface.PaintStrip(strip_,view,palette_);
     } catch(const std::exception& error) {

@@ -132,6 +132,7 @@ private:
     unsigned long long capsuleDockStart_=0;   // 胶囊贴边↔浮起过渡起点（0=无动画）
     bool capsuleDocked_=true;                 // 目标态：true=贴边（直角侧）、false=浮起（椭圆）
     float capsuleDockOverride_=-1.0f;         // 拖动中按离边距离实时插值（<0=走动画状态）
+    unsigned loggedBackdropGeneration_=0;     // 玻璃快照诊断日志去重（只在代次变化时记一行）
     bool panelMotionEnter_=true;
     int hoverPrevious_=0;
     bool motionTimer_=false;

@@ -244,8 +244,13 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     };
     const auto worst=LampColour(WorstLamp(view.lamps),palette);
     const auto dot=[&](float x,float y,float dotRadius,const D2D1_COLOR_F& colour) {
-        brush_->SetColor(Fade(colour,0.18f));
-        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),dotRadius*2.4f,dotRadius*2.4f),brush_.Get());
+        // 光晕在深色底上要"发光"（同色低透明），在浅色底上同色低透明会变成一圈灰盘 ——
+        // 浅色主题把色相压向 text（浅色主题里 text 是深色）并收小环、压低透明度。
+        const auto halo=palette.light?Blend(colour,palette.text,0.30f):colour;
+        const float haloScale=palette.light?1.9f:2.4f;
+        brush_->SetColor(Fade(halo,palette.light?0.22f:0.18f));
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),dotRadius*haloScale,
+            dotRadius*haloScale),brush_.Get());
         brush_->SetColor(colour);
         target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),dotRadius,dotRadius),brush_.Get());
     };
@@ -376,7 +381,8 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                     }
                 }
                 // ② 玻璃底色：深色 ink 打底保对比度，再叠半透明主题渐变（受光面厚、背面薄）。
-                brush_->SetColor(Fade(palette.ink,0.34f));
+                // 浅色主题的"压暗"要轻得多：0.34 的深底会把 porcelain 压成灰片。
+                brush_->SetColor(Fade(palette.ink,palette.light?0.22f:0.34f));
                 target->FillGeometry(path.Get(),brush_.Get());
                 D2D1_GRADIENT_STOP glass[3];
                 glass[0].position=0.0f; glass[0].color=Fade(palette.stripTop,0.55f);

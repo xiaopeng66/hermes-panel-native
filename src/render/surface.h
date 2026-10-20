@@ -33,11 +33,17 @@ public:
     unsigned BackdropGeneration() const { return backdropGeneration_; }
     // 门禁诊断：缓存快照的平均色（0x00RRGGBB）。黑玻璃/白玻璃对照实验用。
     unsigned BackdropMean() const;
+    // 诊断：模糊后的快照还剩多少高频（相邻像素平均差，0..255）。玻璃"像噪点"时用它判断
+    // 是快照没糊开还是绘制阶段出了问题。
+    float BackdropNoise() const;
+    // 诊断：模糊之前的原始噪声（同上）。两者一起看能区分"源数据是垃圾"与"模糊没生效"。
+    float BackdropNoiseBefore() const { return backdropNoiseBefore_; }
 private:
     bool EnsureLayered(UINT32 width,UINT32 height);
     bool CaptureBackdrop(HWND window);
     std::vector<unsigned int> backdrop_;
     int backdropWidth_=0,backdropHeight_=0;
+    float backdropNoiseBefore_=0.0f;
     unsigned backdropGeneration_=0;
     void ReleaseLayered();
     Microsoft::WRL::ComPtr<ID2D1Factory> factory_;

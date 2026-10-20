@@ -2630,3 +2630,19 @@ hover/state/geometry/settings/widget/unc-parity 9/9 绿。
 真机：settings theme=porcelain（用户点过未生效留下的值），换包重启后贴条按 porcelain 渲染
 （mean 162,163,151；灯 (10,124,85)；文字深色）——tmp/hermes-panel-native/diag/live_strip_3x.png。
 dist 26f4cb61。
+
+## G20 修「玻璃像彩色噪点」（2026-10-20，真机问"这好看吗"）
+
+**现象**：porcelain 贴条里是一层彩色静电噪点，相邻像素差 13~20（深色主题同样）。
+**定位**：加诊断日志 `strip backdrop ... noise=模糊前->模糊后`。真机读数为
+`mean=0xDDBE7D noise=2.2->66.5` —— 抓屏本身是平滑的（2.2），**模糊把它搅坏了**。
+**根因**：`BoxBlurPass` 滑动窗口更新 `red += (add&0xFF) - (remove&0xFF);`。两边都是
+`unsigned int`，像素变暗时差值先按 32 位无符号回绕成 ~4.29e9 再加进 `long long` 累加器，
+此后每个平均值都是垃圾。CSS blur 从来没在这个宽度上跑过（旧挂件是纯色），所以潜伏至今。
+**修复**：三通道各自先转 `long long` 再相减；半径回到厚度 1/5（clamp 4..24），既去高频
+又保留背景明暗走向。修复后真机日志 `noise=2.3->0.6`，渲染相邻像素差 13.1 → 2.1。
+**同步打磨**（浅色主题可读性）：浅色下灯的光晕从"浅绿低透明"（叠在浅玻璃上变灰盘）改为
+压向 text 的深绿、环缩到 1.9×、alpha 0.22；玻璃压暗层 0.34 → 0.22（porcelain 不再灰片）。
+**证据**：tmp/hermes-panel-native/diag/theme-{dark,porcelain4,slate4}.png；
+live_strip_3x.png（浮起胶囊停在主屏中央，浅磨砂平滑）；门禁 8/8
+（widget/motion/hover/drag/shell/state/geometry/settings）。dist 见 package 输出。
