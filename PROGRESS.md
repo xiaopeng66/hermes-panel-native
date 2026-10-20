@@ -2685,3 +2685,23 @@ live_strip_3x.png（浮起胶囊停在主屏中央，浅磨砂平滑）；门禁
 5. 形变动画换 **smoothstep**（t²(3−2t)）并把 `kCapsuleDockMs` 240→280ms，两端更柔。
 **证据**：diag/v4-porcelain.png、v4-slate.png、final-drag.png（拖动中椭圆实心）；
 真机 live_strip_3x.png（贴顶边横向形态）；`drag` 门禁 5/5（含真实指针段）。
+
+## G23 闪退证据链 + 内容固定朝向 + 60fps 流动高光（2026-10-20）
+
+**闪退**：24 小时内 Application 日志无 WER/崩溃事件；crash-probe 最后写入 10-18；10:58 实例在
+11:00:43 后无任何结束记录即消失。找到并修掉一条**真正的无声死亡通路**：6 个工作线程
+（refresh/action/switch/read/latency/profile）与控制管道线程都没有 try/catch，异常逃出线程会
+`std::terminate → abort → __fastfail`，**绕过** `SetUnhandledExceptionFilter`，于是无日志、
+无探针、无 WER。现在：全部线程体包 try/catch（清 busy + 写 `[error] worker: ...`）；
+`std::set_terminate` 先写 crash-probe（含 what）再以退出码 3 结束。下次再"闪退"可区分
+"内部未捕获异常"与"外部 TerminateProcess（什么都不留）"。
+
+**内容固定朝向**（真机要求，替换"随贴条刚性旋转"）：内容改在**屏幕空间**布局。
+水平边（上/下）：模型名在左、三灯 WSL/WebUI/网关 左→右、logo 在右；垂直边（左/右）：
+logo 在上、三灯 网关/WebUI/WSL 上→下、模型名在下（文字逆时针 90°，从下往上读）。
+logo 永远横向正着。平边始终贴屏幕边。四边截图 diag/orient-{top,bottom,left,right}.png。
+
+**流动高光**：玻璃内部一条宽 30% 的柔光带沿长向循环扫过（≈3.7s/圈），由贴条自己的
+16ms 计时器驱动（仅收起态 + 可见 + 动画开启时运行）。流动帧复用缓存视图、每 60 帧全量重建，
+并在背景快照代次变化时强制重建（避免裸指针悬垂）。真机 Release 实测 CPU ≈3.4–5.2%。
+**门禁**：drag 5/5（含真实指针段）。

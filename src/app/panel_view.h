@@ -160,6 +160,7 @@ struct MotionView {
     float cardAlpha=1.0f;         // 贴条悬浮卡透明度
     float cardOffsetDip=0.0f;     // 悬浮卡内容垂直位移（DIP，正=向下）
     float stripAlpha=1.0f;        // 贴条淡入（收起瞬间贴条出现）
+    float glassPhase=0.0f;        // 玻璃流动高光相位（0..1，沿长向循环扫过）
     float capsuleDocked=1.0f;     // 胶囊"贴边度"0..1：1=贴边（贴边侧直角）、0=浮起（完整椭圆）
     float tooltipAlpha=1.0f;      // 面板内提示气泡透明度
     int hoverPrevious=0;          // 上一个 hover 控件（淡出）

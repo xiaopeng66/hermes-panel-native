@@ -249,6 +249,7 @@ void Application::StartRefresh() {
         if(log_) log_->Info("data","UNC unavailable ("+snapshot.error+"), falling back to wsl.exe");
     }
     worker_=std::thread([this,distro,python,path,webuiPort,gatewayPort,first] {
+        try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
         bridge.SetLogSink([this](const std::string& line) { if(log_) log_->Info("helper",line); });
@@ -310,6 +311,15 @@ void Application::StartRefresh() {
         // 没反应就是这个静默丢包）。
         workerBusy_=false;
         if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("refresh: ")+error.what());
+            workerBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","refresh: unknown exception");
+            workerBusy_=false;
+        }
     });
 }
 void Application::ShowToast(const std::string& text,int kind) {
@@ -372,6 +382,7 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
     if(log_) log_->Info("data","action "+verb+" started");
     worker_=std::thread([this,distro,python,path,verb,args,successToast,refreshAfter,probeFallbacks,wantsPreview] {
+        try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
 #if HERMES_CONTROL_PLANE
@@ -603,6 +614,15 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
         // 没反应就是这个静默丢包）。
         workerBusy_=false;
         if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("action: ")+error.what());
+            workerBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","action: unknown exception");
+            workerBusy_=false;
+        }
     });
 }
 void Application::StartQueuedSwitch() {
@@ -634,6 +654,7 @@ void Application::StartSwitch(const std::string& providerId,const std::string& m
     switchingModel_=model;
     InvalidateAll();
     worker_=std::thread([this,distro,python,path,providerId,model] {
+        try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
 #if HERMES_CONTROL_PLANE
@@ -671,6 +692,15 @@ void Application::StartSwitch(const std::string& providerId,const std::string& m
         // 没反应就是这个静默丢包）。
         workerBusy_=false;
         if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("switch: ")+error.what());
+            workerBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","switch: unknown exception");
+            workerBusy_=false;
+        }
     });
 }
 void Application::StartReadHelper(const std::string& cmd) {
@@ -693,6 +723,7 @@ void Application::StartReadHelper(const std::string& cmd) {
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
     if(log_) log_->Info("data","read "+cmd+" started");
     worker_=std::thread([this,distro,python,path,cmd,token] {
+        try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
         bridge.SetLogSink([this](const std::string& line) { if(log_) log_->Info("read",line); });
@@ -709,6 +740,15 @@ void Application::StartReadHelper(const std::string& cmd) {
         if(stopping_.load()) { workerBusy_=false;delete result;return; }
         workerBusy_=false;
         if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("read: ")+error.what());
+            workerBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","read: unknown exception");
+            workerBusy_=false;
+        }
     });
 }
 void Application::UpdateLatencyTimer() {
@@ -741,6 +781,7 @@ void Application::StartLatencyProbe(bool manual) {
     if(log_) log_->Info("data","latency probe started ("+(manual?std::string("manual"):std::string("timer"))
         +", "+std::to_string(targets.size())+" model(s))");
     latencyWorker_=std::thread([this,distro,python,path,targets] {
+        try {
         std::vector<LatencyResult> results;
         for(const auto& target:targets) {
             HelperBridge bridge;
@@ -769,6 +810,15 @@ void Application::StartLatencyProbe(bool manual) {
         auto* heap=new std::vector<LatencyResult>(std::move(results));
         latencyBusy_=false;
         if(PostMessageW(panel_,kLatencyMessage,0,reinterpret_cast<LPARAM>(heap))==FALSE) delete heap;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("latency: ")+error.what());
+            latencyBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","latency: unknown exception");
+            latencyBusy_=false;
+        }
     });
 }
 void Application::HandleLatencyResults(std::vector<LatencyResult>* results) {
@@ -815,6 +865,7 @@ void Application::StartProfileApply(const std::string& name) {
     const int fallbackCount=static_cast<int>(hermesState_.fallbacks.size());
     if(log_) log_->Info("data","profile apply started: "+profile.name);
     profileWorker_=std::thread([this,distro,python,path,profile,fallbackCount] {
+        try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
 #if HERMES_CONTROL_PLANE
@@ -847,6 +898,15 @@ void Application::StartProfileApply(const std::string& name) {
         if(stopping_.load()) { profileBusy_=false;delete result;return; }
         profileBusy_=false;
         if(PostMessageW(panel_,kProfileMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+        } catch(const std::exception& error) {
+            // 任何异常都必须在这里落地：逃出线程会走 std::terminate → __fastfail，
+            // 绕过 SetUnhandledExceptionFilter，表现为"无日志、无探针、无 WER"的闪退。
+            if(log_) log_->Error("worker",std::string("profile: ")+error.what());
+            profileBusy_=false;
+        } catch(...) {
+            if(log_) log_->Error("worker","profile: unknown exception");
+            profileBusy_=false;
+        }
     });
 }
 void Application::HandleProfileResult(ProfileApplyResult* result) {

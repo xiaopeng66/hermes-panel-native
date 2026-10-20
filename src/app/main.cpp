@@ -206,8 +206,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // test that loses the process learns why instead of seeing a bare timeout.
     g_log = &log;
     std::set_terminate([] {
+        // 先留证据再退出：std::abort 走 __fastfail，SetUnhandledExceptionFilter 收不到，
+        // 真机上就是"无日志、无探针、无 WER"的闪退。这里写 crash-probe 并给出专用退出码 3，
+        // 下次能区分"未捕获异常"与"被外部 TerminateProcess（什么都留不下）"。
         if (g_log) g_log->Error("app", "std::terminate called");
-        std::abort();
+        {
+            std::ofstream probe(g_crashProbePath, std::ios::app);
+            probe << "terminate";
+            try {
+                const auto current = std::current_exception();
+                if (current) std::rethrow_exception(current);
+            } catch (const std::exception& error) {
+                probe << " what=" << error.what();
+            } catch (...) {
+                probe << " what=<non-std>";
+            }
+            probe << std::endl;
+            probe.flush();
+        }
+        std::_Exit(3);
     });
     MSG message{};
     BOOL status = 0;

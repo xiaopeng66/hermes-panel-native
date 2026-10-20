@@ -464,6 +464,31 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         }
                     }
                 }
+                // ③b 流动高光：一条柔和亮带沿长向来回扫（外壳以 60fps 推进 glassPhase）。
+                //    它画在玻璃内部、贴着曲面走向，是"液体在动"最直观的线索。
+                {
+                    const float flowPhase=std::clamp(view.motion.glassPhase,0.0f,1.0f);
+                    const float flowCentre=ch*(0.10f+flowPhase*0.80f);
+                    const float flowHalf=ch*0.15f;
+                    const float alpha=palette.light?0.17f:0.24f;
+                    D2D1_GRADIENT_STOP flow[5];
+                    flow[0].position=0.0f; flow[0].color=D2D1::ColorF(1,1,1,0.0f);
+                    flow[1].position=0.36f; flow[1].color=D2D1::ColorF(1,1,1,alpha*0.35f);
+                    flow[2].position=0.50f; flow[2].color=D2D1::ColorF(1,1,1,alpha);
+                    flow[3].position=0.64f; flow[3].color=D2D1::ColorF(1,1,1,alpha*0.35f);
+                    flow[4].position=1.0f; flow[4].color=D2D1::ColorF(1,1,1,0.0f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(flow,5,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(
+                                D2D1::Point2F(0,flowCentre-flowHalf),D2D1::Point2F(0,flowCentre+flowHalf)),
+                            stops.Get(),&brush))) {
+                            target->FillGeometry(path.Get(),brush.Get());
+                        }
+                    }
+                }
                 // ④ 长向单向受光：光从"起点端"打过来（0..10% 亮），末端（90..100%）压暗。
                 //    对称的双端亮光是错的 —— 那样只像一根发亮的棍子，没有方向就没有立体。
                 {
@@ -509,14 +534,56 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                 }
             }
         }
-        const float logo=Dip(14.0f,scale);
-        const float cx=cw/2.0f;
-        Icon(target,D2D1::RectF(cx-logo/2.0f,Dip(9.0f,scale),cx+logo/2.0f,Dip(9.0f,scale)+logo),
-            IconId::Activity,palette.accentStrong,1.8f);
-        for(int index=0;index<3;++index)
-            dot(cx,ch*0.36f+ch*0.115f*static_cast<float>(index),Dip(3.4f,scale),
-                lampAt(static_cast<std::size_t>(index)));
-        tag=ModelTag(view.currentModel,4);
+        // ---- 内容：按**屏幕空间**布局（真机要求：内容朝向不随贴条旋转）----
+        // 水平边（上/下）：模型名在左 → 三灯 WSL/WebUI/网关 从左到右 → logo 在右；
+        // 垂直边（左/右）：logo 在上 → 三灯 网关/WebUI/WSL 从上到下 → 模型名在下；
+        // logo 永远横向正着；只有文字在垂直边时转 90°（从下往上读）。
+        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        {
+            const float logo=Dip(14.0f,scale);
+            const float dotR=Dip(3.4f,scale);
+            const auto label=ModelTag(view.currentModel,4);
+            if(view.widgetVertical) {
+                Icon(target,D2D1::RectF(width/2.0f-logo/2.0f,Dip(9.0f,scale),
+                    width/2.0f+logo/2.0f,Dip(9.0f,scale)+logo),
+                    IconId::Activity,palette.accentStrong,1.8f);
+                for(int index=0;index<3;++index)
+                    dot(width/2.0f,height*0.36f+height*0.115f*static_cast<float>(index),dotR,
+                        lampAt(static_cast<std::size_t>(2-index)));   // 从上到下：网关/WebUI/WSL
+                const float y0=height*0.62f,y1=height-Dip(4.0f,scale);
+                const float limit=std::max(1.0f,y1-y0);
+                auto shown=label;
+                if(Measure(count_.Get(),shown).width>limit)
+                    shown=Ellipsize(count_.Get(),shown,limit);
+                const auto converted=Widen(shown);
+                if(!converted.empty()) {
+                    count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    brush_->SetColor(palette.text);
+                    target->SetTransform(D2D1::Matrix3x2F::Rotation(-90.0f)
+                        *D2D1::Matrix3x2F::Translation(0.0f,y1));
+                    target->DrawTextW(converted.c_str(),
+                        static_cast<UINT32>(converted.size()),count_.Get(),
+                        D2D1::RectF(0.0f,0.0f,limit,width),brush_.Get());
+                    target->SetTransform(D2D1::Matrix3x2F::Identity());
+                }
+            } else {
+                Icon(target,D2D1::RectF(width-Dip(9.0f,scale)-logo,height/2.0f-logo/2.0f,
+                    width-Dip(9.0f,scale),height/2.0f+logo/2.0f),
+                    IconId::Activity,palette.accentStrong,1.8f);
+                for(int index=0;index<3;++index)
+                    dot(width*0.47f+width*0.105f*static_cast<float>(index),height/2.0f,dotR,
+                        lampAt(static_cast<std::size_t>(index)));     // 从左到右：WSL/WebUI/网关
+                const float x0=Dip(4.0f,scale),x1=width*0.40f;
+                const float limit=std::max(1.0f,x1-x0);
+                auto shown=label;
+                if(Measure(count_.Get(),shown).width>limit)
+                    shown=Ellipsize(count_.Get(),shown,limit);
+                Text(target,shown,D2D1::RectF(x0,0.0f,x1,height),count_.Get(),palette.text,
+                    DWRITE_TEXT_ALIGNMENT_CENTER,true);
+            }
+        }
+        tag.clear();   // 内容已在屏幕空间画完，通用文字块跳过
     } else {
         const auto field=Blend(worst,palette.surf,0.55f);
         fill({0.0f,0.0f,cw,ch-tail},radius,field);

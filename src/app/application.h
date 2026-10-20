@@ -383,9 +383,19 @@ private:
     // G1 贴边挂件动画（声波/光环）：收起态下 120ms 一帧。
     float widgetPhase_=0.0f;
     void UpdateWidgetTimer();
+    // 贴条玻璃的流动高光：只在收起态且贴条可见时跑 60fps 计时器，隐藏/展开立即停。
+    void UpdateStripFlowTimer();
+    float glassPhase_=0.0f;
+    bool stripFlowTimer_=false;
+    // 流动帧复用上一次的视图：60fps 每帧重建整个 PanelViewModel（含模型列表布局）
+    // 是纯浪费；只改相位，另外每 60 帧强制重建一次兜底。
+    PanelViewModel stripFlowView_;
+    bool stripFlowViewValid_=false;
+    unsigned stripFlowFrames_=0;
     bool HitStripShape(POINT client) const;
     // 分层窗口不靠 InvalidateRect/WM_PAINT 出画面：状态/动画变化时直接合成并 UpdateLayeredWindow。
     void RenderStrip();
+    void RenderStripFlowFrame();   // 流动高光的单帧（复用缓存视图）
     void AddPageClick(float x,float y);
     void BackupPageClick(float x,float y);
     void SettingsPageClick(float x,float y);

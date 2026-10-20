@@ -29,7 +29,15 @@ bool ControlPipe::Start(HWND owner,UINT message,const std::wstring& pipeName,Han
     owner_=owner;message_=message;name_=pipeName;handler_=std::move(handler);
     stopEvent_=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if(!stopEvent_) return false;
-    thread_=std::thread([this]{ Serve(); });
+    // 管道线程同样不能把异常漏出线程（std::terminate → __fastfail 会绕过崩溃探针）。
+    thread_=std::thread([this] {
+        try { Serve(); }
+        catch(const std::exception& error) {
+            OutputDebugStringA((std::string("control pipe failed: ")+error.what()).c_str());
+        } catch(...) {
+            OutputDebugStringA("control pipe failed: unknown exception");
+        }
+    });
     return true;
 }
 void ControlPipe::Stop() {

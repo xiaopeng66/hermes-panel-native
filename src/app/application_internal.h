@@ -23,6 +23,9 @@ constexpr UINT_PTR kCheckTimer=7;         // one-shot: 刷新成功后对勾显�
 constexpr UINT_PTR kLatencyTimer=8;       // 周期：延迟探测（settings.latencyProbe）
 constexpr UINT_PTR kWidgetTimer=9;        // 周期：贴边挂件动画（声波/光环的呼吸）
 constexpr UINT_PTR kStripCardTimer=11;    // one-shot：贴条悬浮信息卡的延迟（300ms 静止）
+constexpr UINT_PTR kStripFlowTimer=13;    // 周期：贴条玻璃流动高光（60fps，仅贴条可见时）
+constexpr unsigned kStripFlowMs=16;
+constexpr float kStripFlowStep=0.0045f;   // 每帧相位增量 → 约 3.7 秒一个循环
 constexpr UINT kStripCardDelayMs=300;
 // 动效（移植自 balance-panel-native）：统一 ease-out 进度 + 一个只在动画期间存在的 16ms 计时器。
 constexpr UINT_PTR kMotionTimer=12;
