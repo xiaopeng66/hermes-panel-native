@@ -2705,3 +2705,28 @@ logo 永远横向正着。平边始终贴屏幕边。四边截图 diag/orient-{t
 16ms 计时器驱动（仅收起态 + 可见 + 动画开启时运行）。流动帧复用缓存视图、每 60 帧全量重建，
 并在背景快照代次变化时强制重建（避免裸指针悬垂）。真机 Release 实测 CPU ≈3.4–5.2%。
 **门禁**：drag 5/5（含真实指针段）。
+
+## G24 拖动预览朝向 + 拖动卡顿根因 + 镜像高光（2026-10-20，真机）
+
+**拖动预览**：`UpdateStripDrag` 每次移动都算最近边（`StripSnapDecision`），写进 `previewEdge_`；
+`CurrentView` 用它决定 `widgetEdge/widgetVertical`，朝向变了就把窗口转置（竖条↔横条，
+围绕当前中心、重算抓取偏移）。所以向顶部拖时内容与流动**立刻**按上边排，向两侧拖时变成
+竖条按左/右流动，松手仍由 `CommitStripDrop` 吸附最近边。证据：`diag/preview-top.png`
+（拖动中已是 272×60 横条）、`preview-mid.png`（拖动中 60×272 竖条）。
+
+**拖动卡顿（真机"非常卡"）—— 三个真根因，全部修掉**：
+1. `WM_NCHITTEST` 每次鼠标移动都 `ComputeLayout(CurrentView())`：系统移动循环里等于每帧
+   重建整个界面布局（实测面板拖动 36.7% CPU）。拖动/拉伸期间直接返回 HTCAPTION。
+2. 拖动帧每帧重建整份 `PanelViewModel`（胶囊拖动 30–43% CPU）。新增
+   `RenderStripDragFrame`（复用缓存视图，只改预览边/圆角/相位）与面板的 `panelDragView_`
+   缓存（拖动中 WM_PAINT 直接复用）。
+3. 每次移动都 `ReadMonitor`（GetMonitorInfo + GetDpiForMonitor）。按 HMONITOR 缓存，跨屏才重读。
+另：拖动期间停掉 60fps 流动定时器（否则一帧画两次），相位改由拖动帧按真实时间推进；
+拖动重绘 30Hz + 事件驱动（换边/圆角变化立即画），窗口位置仍逐条跟手。
+实测（真机 Release）：胶囊拖动 30.5% → 11.7%；跟手延迟 30ms 采样多数为 0px。
+（本机跑着 Android 模拟器，CPU 采样噪声大，故以跟手误差为准。）
+
+**镜像高光**：宽带（16% 长、peak 0.20/0.26）+ 窄芯（4.5% 长、peak 0.26/0.34）同步扫过，
+60fps；真机帧间差 2008 px（max 59），肉眼可见"反光在走"。
+
+**门禁**：drag 5/5（含拉伸、真实指针贴条拖动、悬浮卡）。

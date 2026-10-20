@@ -464,30 +464,36 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         }
                     }
                 }
-                // ③b 流动高光：一条柔和亮带沿长向来回扫（外壳以 60fps 推进 glassPhase）。
-                //    它画在玻璃内部、贴着曲面走向，是"液体在动"最直观的线索。
+                // ③b 动态镜像高光：一条宽柔光 + 一条窄亮芯同步沿长向扫过。
+                //    宽带负责"液体感"，窄芯负责"镜面反射"——只有宽带会像雾，
+                //    只有窄芯会像一道划痕，两层叠加才是玻璃上的反光在移动。
                 {
-                    const float flowPhase=std::clamp(view.motion.glassPhase,0.0f,1.0f);
-                    const float flowCentre=ch*(0.10f+flowPhase*0.80f);
-                    const float flowHalf=ch*0.15f;
-                    const float alpha=palette.light?0.17f:0.24f;
-                    D2D1_GRADIENT_STOP flow[5];
-                    flow[0].position=0.0f; flow[0].color=D2D1::ColorF(1,1,1,0.0f);
-                    flow[1].position=0.36f; flow[1].color=D2D1::ColorF(1,1,1,alpha*0.35f);
-                    flow[2].position=0.50f; flow[2].color=D2D1::ColorF(1,1,1,alpha);
-                    flow[3].position=0.64f; flow[3].color=D2D1::ColorF(1,1,1,alpha*0.35f);
-                    flow[4].position=1.0f; flow[4].color=D2D1::ColorF(1,1,1,0.0f);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(flow,5,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                    const float flowPhase = std::clamp(view.motion.glassPhase, 0.0f, 1.0f);
+                    const float flowCentre = ch * (0.06f + flowPhase * 0.88f);
+                    const float softHalf = ch * 0.16f;
+                    const float coreHalf = ch * 0.045f;
+                    const float soft = palette.light ? 0.20f : 0.26f;
+                    const float core = palette.light ? 0.26f : 0.34f;
+                    const auto drawBand = [&](float centre, float half, float peak) {
+                        if (centre + half < 0.0f || centre - half > ch) return;
+                        D2D1_GRADIENT_STOP band[5];
+                        band[0].position = 0.0f; band[0].color = D2D1::ColorF(1, 1, 1, 0.0f);
+                        band[1].position = 0.34f; band[1].color = D2D1::ColorF(1, 1, 1, peak * 0.30f);
+                        band[2].position = 0.50f; band[2].color = D2D1::ColorF(1, 1, 1, peak);
+                        band[3].position = 0.66f; band[3].color = D2D1::ColorF(1, 1, 1, peak * 0.30f);
+                        band[4].position = 1.0f; band[4].color = D2D1::ColorF(1, 1, 1, 0.0f);
+                        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                        if (FAILED(target->CreateGradientStopCollection(band, 5, D2D1_GAMMA_2_2,
+                            D2D1_EXTEND_MODE_CLAMP, &stops))) return;
                         Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                        if (FAILED(target->CreateLinearGradientBrush(
                             D2D1::LinearGradientBrushProperties(
-                                D2D1::Point2F(0,flowCentre-flowHalf),D2D1::Point2F(0,flowCentre+flowHalf)),
-                            stops.Get(),&brush))) {
-                            target->FillGeometry(path.Get(),brush.Get());
-                        }
-                    }
+                                D2D1::Point2F(0, centre - half), D2D1::Point2F(0, centre + half)),
+                            stops.Get(), &brush))) return;
+                        target->FillGeometry(path.Get(), brush.Get());
+                    };
+                    drawBand(flowCentre, softHalf, soft);
+                    drawBand(flowCentre, coreHalf, core);
                 }
                 // ④ 长向单向受光：光从"起点端"打过来（0..10% 亮），末端（90..100%）压暗。
                 //    对称的双端亮光是错的 —— 那样只像一根发亮的棍子，没有方向就没有立体。

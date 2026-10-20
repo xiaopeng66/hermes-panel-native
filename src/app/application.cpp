@@ -746,8 +746,34 @@ void Application::RenderStrip() {
         if(log_) log_->Error("paint",std::string("strip: ")+error.what());
     }
 }
+void Application::RenderStripDragFrame() {
+    if(!strip_||state_!=State::Collapsed) return;
+    // 第一次拖动帧先全量建一次缓存视图（此时 stripDragging_ 已为 true，视图不带快照）。
+    if(!stripFlowViewValid_) { RenderStrip();return; }
+    const auto now=GetTickCount64();
+    if(lastDragPhaseTick_!=0&&now>lastDragPhaseTick_) {
+        glassPhase_+=static_cast<float>(now-lastDragPhaseTick_)/3700.0f;
+        if(glassPhase_>=1.0f) glassPhase_-=1.0f;
+    }
+    lastDragPhaseTick_=now;
+    auto& cached=stripFlowView_;
+    cached.widgetEdge=static_cast<int>(previewEdge_);
+    cached.widgetVertical=previewEdge_==1||previewEdge_==2;
+    cached.backdrop={};                    // 拖动中不透背景（窗口在动，快照必过期）
+    cached.motion.capsuleDocked=capsuleDockOverride_>=0.0f?capsuleDockOverride_:1.0f;
+    cached.motion.stripAlpha=1.0f;
+    cached.motion.glassPhase=glassPhase_;
+    try {
+        stripContext_.surface.PaintStrip(strip_,cached,palette_);
+    } catch(const std::exception& error) {
+        stripFlowViewValid_=false;
+        if(log_) log_->Error("paint",std::string("strip drag: ")+error.what());
+    }
+}
 void Application::RenderStripFlowFrame() {
     if(!strip_||state_!=State::Collapsed) return;
+    // 拖动中由拖动帧自己推进相位并重绘：两条通路同时画会让拖动成本翻倍（真机卡顿根因）。
+    if(stripDragging_) return;
     // 每 60 帧全量重建一次：兜住任何"数据变了但没人调 RenderStrip"的路径；
     // 其余帧只推进相位并复用缓存视图（省掉整份 PanelViewModel 的构建）。
     // 缓存视图里 backdrop.pixels 是 Surface 持有的裸指针：快照一旦重建（代次变化）就必须
@@ -1016,6 +1042,7 @@ void Application::BeginSystemDrag() {
     LogEvent("begin-drag");
     if(dragging_ || state_==State::Hidden) return;
     dragging_=true;
+    panelDragViewValid_=false;
     const auto startRect=GeometryController::Read(panel_);
     dragStartOrigin_={startRect.x,startRect.y};
     if(dragPressValid_) {
@@ -1062,6 +1089,7 @@ void Application::CommitDrop() {
     const auto snap=SnapDecision(anchored,lastDrop_.start,monitor_.geometry,model_.edge);
     const auto previous=state_;
     dragging_=false;
+    panelDragViewValid_=false;
     dragPressValid_=false;
     lastDrop_.finalRect=anchored;
     lastDrop_.cursor={cursor.x,cursor.y};
@@ -1179,15 +1207,37 @@ void Application::UpdateStripDrag(POINT screenPoint) {
         if(std::abs(screenPoint.x-stripPressScreen_.x)<=threshold
             &&std::abs(screenPoint.y-stripPressScreen_.y)<=threshold) return;
         stripDragging_=true;
+        lastDragPhaseTick_=GetTickCount64();
         HideHoverCard();
         LogEvent("strip-drag-begin",screenPoint);
     }
+    // 每 8ms 一次的鼠标移动里反复 ReadMonitor（GetMonitorInfo + GetDpiForMonitor）是纯浪费：
+    // 只有跨到另一台显示器时才需要重读。真机实测这是拖动卡顿的主要成本之一。
+    const auto targetHandle=MonitorFromPoint(screenPoint,MONITOR_DEFAULTTONEAREST);
+    if(targetHandle!=monitor_.handle) monitor_=ReadMonitor(targetHandle);
+    const auto& work=monitor_.geometry.work;
+    // 预览边：跟着挂件中心选最近的边。**朝向在松手前就跟着变**（真机要求），
+    // 这样向上拖到上边框附近时，内容与流动立刻按"上边"排；落点仍由 CommitStripDrop 决定。
     RECT window{};
     if(!GetWindowRect(strip_,&window)) return;
-    const int width=window.right-window.left,height=window.bottom-window.top;
+    const int centreX=window.left+(window.right-window.left)/2;
+    const int centreY=window.top+(window.bottom-window.top)/2;
+    const auto snap=StripSnapDecision({centreX,centreY},TierSize(model_,monitor_.geometry.dpi),
+        monitor_.geometry);
+    previewEdge_=static_cast<int>(snap.edge);
+    // 朝向换了就把窗口转置（竖条 ↔ 横条），围绕当前中心，保证内容不被裁掉。
+    const bool wantVertical=snap.edge==Edge::Left||snap.edge==Edge::Right;
+    int width=window.right-window.left,height=window.bottom-window.top;
+    const bool isVertical=height>=width;
+    if(wantVertical!=isVertical) {
+        const int cx=window.left+width/2,cy=window.top+height/2;
+        std::swap(width,height);
+        const int nx=cx-width/2,ny=cy-height/2;
+        SetWindowPos(strip_,nullptr,nx,ny,width,height,SWP_NOACTIVATE|SWP_NOZORDER);
+        stripDragOffset_={screenPoint.x-nx,screenPoint.y-ny};
+        if(!GetWindowRect(strip_,&window)) return;
+    }
     // 拖动限制在目标显示器的工作区内（余额面板同款）：不会把挂件拖到屏幕外。
-    const auto target=ReadMonitor(MonitorFromPoint(screenPoint,MONITOR_DEFAULTTONEAREST));
-    const auto& work=target.geometry.work;
     const int maxX=std::max(work.x,work.x+work.width-width);
     const int maxY=std::max(work.y,work.y+work.height-height);
     const int x=std::clamp<int>(static_cast<int>(screenPoint.x)-stripDragOffset_.x,work.x,maxX);
@@ -1197,16 +1247,22 @@ void Application::UpdateStripDrag(POINT screenPoint) {
     // kCapsuleDockMs 的过渡动画收回贴边直角（落点永远吸附最近边）。
     int nearest=std::min(x-work.x,work.right()-(x+width));
     nearest=std::min(nearest,std::min(y-work.y,work.bottom()-(y+height)));
-    const int band=ScaleDip(96,target.geometry.dpi);
+    const int band=ScaleDip(96,monitor_.geometry.dpi);
     capsuleDockOverride_=1.0f-std::clamp(static_cast<float>(nearest)
         /static_cast<float>(std::max(1,band)),0.0f,1.0f);
-    // 重绘限 60Hz：鼠标 125/250Hz 上报时，逐条 WM_MOUSEMOVE 整帧重绘会让 D2D 每帧建
-    // 十来个 COM 对象（渐变/路径），既浪费 CPU，也把驱动放到最高频的分配/销毁节奏上。
-    // 位置本身仍然逐条跟手（SetWindowPos 在上面无条件执行）。
+    // 重绘限 60Hz。**关键**：拖动帧复用缓存视图，不再每帧重建整份 PanelViewModel
+    // （真机实测：逐帧重建让胶囊拖动吃掉 43% CPU、肉眼可见卡顿）。
+    // 重绘节奏：拖动时窗口位置由 SetWindowPos 逐条跟手，重绘只负责"形状/朝向"。
+    // 60Hz 全帧重绘在真机上让拖动吃掉 30% CPU 且明显跟手变差；改成 ~30Hz + 事件驱动
+    // （朝向切换、圆角变化超过 3.5% 立即重绘），视觉上仍是连续形变。
     const auto now=GetTickCount64();
-    if(now-stripDragRenderTick_>=16) {
+    const bool edgeChanged=previewEdge_!=lastDragEdge_;
+    const bool shapeChanged=std::abs(capsuleDockOverride_-lastDragDocked_)>0.035f;
+    if(edgeChanged||shapeChanged||now-stripDragRenderTick_>=33) {
         stripDragRenderTick_=now;
-        RenderStrip();
+        lastDragEdge_=previewEdge_;
+        lastDragDocked_=capsuleDockOverride_;
+        RenderStripDragFrame();
     }
 }
 void Application::CommitStripDrop() {
@@ -1228,6 +1284,7 @@ void Application::CommitStripDrop() {
     model_.anchor=snap.anchor;
     capsuleDockOverride_=-1.0f;
     // 胶囊落点动画：拖动中的完整椭圆 → 贴边直角（240ms）。松手必贴边，目标恒为贴边。
+    previewEdge_=0;      // 落点确定：预览边交还给 model_.edge
     if(stored_.widgetStyle=="capsule"&&!capsuleDocked_) {
         capsuleDocked_=true;
         if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
@@ -1304,6 +1361,10 @@ LRESULT Application::HitTest(POINT screen) {
     GetClientRect(panel_,&bounds);
     if(client.x<0||client.y<0||client.x>=bounds.right||client.y>=bounds.bottom) return HTNOWHERE;
     const auto dpi=monitor_.geometry.dpi;
+    // 系统移动循环里每动一下都会发一次 WM_NCHITTEST：每次重建整份视图 + 布局是
+    // 真机上"面板拖动很卡"的根因（实测 36.7% CPU）。拖动/拉伸期间窗口已经抓在手里，
+    // 直接按标题栏处理，不做任何布局。
+    if(dragging_||resizing_) return HTCAPTION;
     if(state_!=State::Hidden) {
         // Buttons inside the title bar must receive the click, the rest of the bar drags the window.
         const auto layout=ComputeLayout(CurrentView(),static_cast<float>(bounds.right),
@@ -1748,8 +1809,11 @@ PanelViewModel Application::CurrentView() {
     view.fallbackScroll=fallbackScroll_;
     // G1：收起态挂件（strip 窗口）用同一份视图绘制。
     view.widgetStyle=stored_.widgetStyle;
-    view.widgetEdge=static_cast<int>(model_.edge);
-    view.widgetVertical=model_.edge==Edge::Left||model_.edge==Edge::Right;
+    // 拖动中按**即将贴上的边**渲染（真机要求：向上拖到上边框附近就该按上边流动，
+    // 而不是等贴上去才变）。previewEdge_ 只影响绘制，落点仍由 CommitStripDrop 决定。
+    const auto shownEdge=previewEdge_?static_cast<Edge>(previewEdge_):model_.edge;
+    view.widgetEdge=static_cast<int>(shownEdge);
+    view.widgetVertical=shownEdge==Edge::Left||shownEdge==Edge::Right;
     view.widgetPhase=widgetPhase_;
     view.focusedFormField=FormFieldIndexOf(focusedField_);
     if(activePage_==0) {
@@ -2080,6 +2144,13 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             // 悬停气泡挂在控件下方：锚点由 LayoutForInput 从布局里取（它同时把 tooltipView_ 填好）。
             // 先跑一次布局，再把带锚点的气泡并进这一帧的视图 —— 直接读上一步缓存的 tooltipView_
             // 会拿到"气泡还没显示时"的空锚点（真机上就是 dump 说可见、画面上却没有）。
+            if(!card&&!strip&&dragging_&&panelDragViewValid_) {
+                // 系统移动循环里每一帧都完整重建视图（含列表布局）会明显拖慢拖动
+                // （真机实测面板拖动 14% CPU 且跟手变差）；拖动期间内容不变，直接复用。
+                surface.Paint(window,false,panelDragView_,palette_,&search_);
+                EndPaint(window,&paint);
+                return 0;
+            }
             auto view=CurrentView();
             if(card) {
                 surface.PaintHoverCard(window,view,palette_);
@@ -2089,6 +2160,7 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             } else {
                 LayoutForInput();
                 view.tooltip=tooltipView_;
+                if(dragging_) { panelDragView_=view;panelDragViewValid_=true; }
                 surface.Paint(window,false,std::move(view),palette_,&search_);
             }
         } catch(...) { EndPaint(window,&paint);throw; }
