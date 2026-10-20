@@ -20,6 +20,7 @@ public:
     void Invalidate() {
         brush_.Reset();owner_=nullptr;arcStyle_.Reset();styleFactory_.Reset();
         strip_.Reset();stripOwner_=nullptr;fade_.Reset();fadeOwner_=nullptr;
+        backdrop_.Reset();backdropGeneration_=0;
     }
     void Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const PanelViewModel& view,
         D2D1_SIZE_F size,float scale,const ThemePalette& palette,bool strip,
@@ -117,6 +118,9 @@ private:
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> arcStyle_;
     Microsoft::WRL::ComPtr<ID2D1Factory> styleFactory_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> strip_,fade_;
+    // 液态玻璃的桌面快照（由 Surface 抓取+模糊，这里按 generation 缓存成 D2D 位图）。
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> backdrop_;
+    unsigned backdropGeneration_=0;
     ID2D1RenderTarget* stripOwner_=nullptr;
     ID2D1RenderTarget* fadeOwner_=nullptr;
     IDWriteFactory* factoryText_=nullptr;

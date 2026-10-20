@@ -139,8 +139,8 @@ if(BUILD_TESTING)
     add_test(NAME h-fallback COMMAND h-fallback-tests $<TARGET_FILE:hermes-panel-native>
         $<TARGET_FILE:fake-hermes>)
     set_tests_properties(h-fallback PROPERTIES TIMEOUT 120)
-    add_executable(h-pages-tests tests/h_pages_tests.cpp)
-    target_include_directories(h-pages-tests PRIVATE third_party tests)
+    add_executable(h-pages-tests tests/h_pages_tests.cpp src/render/theme.cpp)
+    target_include_directories(h-pages-tests PRIVATE third_party tests src)
     target_link_libraries(h-pages-tests PRIVATE user32 ws2_32)
     foreach(scenario add backup settings)
         add_test(NAME h-${scenario} COMMAND h-pages-tests $<TARGET_FILE:hermes-panel-native>

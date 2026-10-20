@@ -25,6 +25,8 @@ nlohmann::json ToJson(const Settings& settings) {
         {"edge",static_cast<int>(settings.edge)},
         {"tier",static_cast<int>(settings.tier)},
         {"float",{settings.floating.x,settings.floating.y}},
+        {"stripFloat",settings.stripFloat},
+        {"stripFloatPos",{settings.stripFloatPos.x,settings.stripFloatPos.y}},
         {"anchor",settings.anchor},
         {"height",settings.heightDip},
         {"monitorId",settings.monitorId},
@@ -74,6 +76,12 @@ Settings FromJson(const nlohmann::json& value) {
     if(value.contains("float")&&value["float"].is_array()&&value["float"].size()==2
         &&value["float"][0].is_number()&&value["float"][1].is_number()) {
         settings.floating={value["float"][0].get<int>(),value["float"][1].get<int>()};
+    }
+    settings.stripFloat=BoolOr(value,"stripFloat",false);
+    if(value.contains("stripFloatPos")&&value["stripFloatPos"].is_array()
+        &&value["stripFloatPos"].size()==2&&value["stripFloatPos"][0].is_number()
+        &&value["stripFloatPos"][1].is_number()) {
+        settings.stripFloatPos={value["stripFloatPos"][0].get<int>(),value["stripFloatPos"][1].get<int>()};
     }
     settings.anchor=IntOr(value,"anchor",0);
     // 高度落盘只做静态范围检查；具体显示器的上限在初始化/拉伸时按工作区再夹一次。
@@ -134,7 +142,8 @@ Settings SettingsStore::Load() {
         input>>value;
         if(value.is_object()) {
             // 审计 F-019：记录这一版不认识的键，保存时原样写回（向前兼容）。
-            static const char* kKnown[]={"version","edge","tier","float","anchor","height",
+            static const char* kKnown[]={"version","edge","tier","float","stripFloat","stripFloatPos",
+                "anchor","height",
                 "monitorId","topmost","pollSeconds","theme","distro","pythonExe","helperPath",
                 "readHelperPath","webuiPort","gatewayPort","favorites","recents","closeAction",
                 "hotLoadedMtime","hotkey","previewDiff","autoReloadGateway","latencyProbe",

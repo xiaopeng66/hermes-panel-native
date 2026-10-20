@@ -165,6 +165,14 @@ struct MotionView {
     int hoverPrevious=0;          // 上一个 hover 控件（淡出）
     float hoverAmount=1.0f;       // hover 过渡进度（0..1）
 };
+// 液态玻璃的背景快照（窗口像素，BGRA，已模糊）：只给胶囊贴条用。
+// 指针/尺寸由 Surface 持有，视图只借用；generation 变化时渲染层重建 D2D 位图。
+struct BackdropView {
+    const unsigned int* pixels=nullptr;
+    int width=0;
+    int height=0;
+    unsigned generation=0;
+};
 struct PanelViewModel {
     Tier tier=Tier::Full;
     bool lightTheme=false;
@@ -175,6 +183,7 @@ struct PanelViewModel {
     std::vector<StatusItemView> statuses;
     bool statusCenterOpen=false;         // 状态中心浮层（>=2 项时由 StatusPill 打开）
     HoverCardView hoverCard;             // 贴条悬浮信息卡（独立小窗）
+    BackdropView backdrop;               // 胶囊贴条的玻璃背景（可空：空=退回不透明渐变）
     MotionView motion;                   // 动效状态（绘制用；不影响模型/几何/命中）
     // 当前正在显示的气泡（外壳填 visible/text/anchor，渲染层画）。锚点用 4 个 float，
     // 这里不引 D2D1 头（panel_view 是纯视图层，widget-tests 也编它）。

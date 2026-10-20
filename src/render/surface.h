@@ -3,6 +3,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
+#include <vector>
 #include "app/panel_view.h"
 #include "core/geometry.h"
 #include "render/panel.h"
@@ -22,8 +23,22 @@ public:
     void PaintHoverCard(HWND window,const PanelViewModel& view,const ThemePalette& palette);
     void SetCaretOn(bool on) { renderer_.SetCaretOn(on); }
     void Resize();
+    // 液态玻璃：抓取贴条窗口背后的桌面像素并做盒式模糊。窗口在抓取期间短暂隐藏，
+    // 所以只在显示/落位/换显示器时调用；轮询重绘直接复用缓存。
+    void EnsureBackdrop(HWND window);
+    void InvalidateBackdrop();
+    const std::vector<unsigned int>& BackdropPixels() const { return backdrop_; }
+    int BackdropWidth() const { return backdropWidth_; }
+    int BackdropHeight() const { return backdropHeight_; }
+    unsigned BackdropGeneration() const { return backdropGeneration_; }
+    // 门禁诊断：缓存快照的平均色（0x00RRGGBB）。黑玻璃/白玻璃对照实验用。
+    unsigned BackdropMean() const;
 private:
     bool EnsureLayered(UINT32 width,UINT32 height);
+    bool CaptureBackdrop(HWND window);
+    std::vector<unsigned int> backdrop_;
+    int backdropWidth_=0,backdropHeight_=0;
+    unsigned backdropGeneration_=0;
     void ReleaseLayered();
     Microsoft::WRL::ComPtr<ID2D1Factory> factory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> textFactory_;

@@ -11,6 +11,7 @@
 #include "harness/input.h"
 #include "harness/no_modal_asserts.h"
 #include "harness/paths.h"
+#include "render/theme.h"
 
 namespace {
 using Json=nlohmann::json;
@@ -636,6 +637,16 @@ int wmain(int argc,wchar_t** argv) {
                         (std::string(test.id)+" segment is marked").c_str());
                     h::Require(snapshot["themeLight"].get<bool>()==test.light,
                         (std::string(test.id)+" has the expected light/dark base").c_str());
+                    // **画出来的颜色**必须等于该主题解析后的 ink：只看 stored.theme 会让
+                    // "主题切换失效"这类回归溜过去（真机 2026-10-20 的报障）。
+                    const auto expected=hermes::ResolveTheme(test.id);
+                    const auto channel=[](float value) {
+                        return static_cast<int>(std::lround(std::clamp(value,0.0f,1.0f)*255.0f));
+                    };
+                    const int expectedInk=(channel(expected.ink.r)<<16)|(channel(expected.ink.g)<<8)
+                        |channel(expected.ink.b);
+                    h::Require(snapshot["palette"]["ink"].get<int>()==expectedInk,
+                        (std::string(test.id)+" did not reach the renderer palette").c_str());
                 }
             }
             std::cout<<"PASS h-settings: the four modern themes apply live"<<std::endl;

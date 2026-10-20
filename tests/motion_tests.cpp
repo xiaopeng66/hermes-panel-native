@@ -108,15 +108,31 @@ int wmain(int argc,wchar_t** argv) {
         harness::Require(!Dump(client)["data"]["hoverCard"]["windowVisible"].get<bool>(),
             "hover card window was not hidden after its exit fade");
 
-        // 5) 主题交叉淡入（180ms）。
+        // 5) 主题交叉淡入（180ms）。断言必须看**调色板颜色**，不能只看 light 布尔：
+        //    宿系统主题恰好是浅色时 light 恒真，主题切换失效也能全绿（真机 2026-10-20 回归）。
+        client.Request({{"command","configure"},{"theme","dark"}});
+        WaitMotionDone(client,"themeStart","theme settle to dark");
+        const auto darkPalette=Dump(client)["palette"];
         client.Request({{"command","configure"},{"theme","light"}});
         snapshot=Dump(client);
-        harness::Require(snapshot["themeLight"].get<bool>(),"theme did not switch to light");
         harness::Require(snapshot["motion"]["themeStart"].get<unsigned long long>()!=0,
             "theme crossfade did not start");
+        // 淡入过程中 palette 还是旧色（这是交叉淡入的定义）；收尾后必须落到浅色。
         WaitMotionDone(client,"themeStart","theme crossfade");
+        const auto lit=Dump(client)["palette"];
+        snapshot=Dump(client);
+        harness::Require(snapshot["themeLight"].get<bool>(),"theme did not switch to light");
+        harness::Require(lit["ink"].get<int>()!=darkPalette["ink"].get<int>()
+            &&lit["surf"].get<int>()!=darkPalette["surf"].get<int>(),
+            "the palette did not actually change on the light switch");
         client.Request({{"command","configure"},{"theme","dark"}});
         WaitMotionDone(client,"themeStart","theme crossfade back");
+        const auto back=Dump(client)["palette"];
+        harness::Require(back["ink"].get<int>()==darkPalette["ink"].get<int>()
+            &&back["surf"].get<int>()==darkPalette["surf"].get<int>(),
+            "switching back to dark did not restore the dark palette");
+        harness::Require(lit["ink"].get<int>()!=back["ink"].get<int>(),
+            "light and dark palettes are indistinguishable");
 
         // 6) 贴条点击展开：面板入场从收起方向也必须启动。
         client.Request({{"command","place"},{"state",4},{"edge",1},{"anchor",400}});

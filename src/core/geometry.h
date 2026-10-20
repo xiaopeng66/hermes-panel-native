@@ -46,6 +46,10 @@ struct GeometryModel {
     // 始终贴在窗口底边，切页不跳动；正文超高由页内滚动条承担。
     int heightDip = 634;
     WidgetStyle widget = WidgetStyle::Beacon;   // 贴边收起时的挂件样式
+    // 浮起的胶囊（DESIGN v1.8）：收起态不贴边，停在用户拖到的位置。与浮动面板的 floating
+    // 分开存：edge=None 时两者语义不同（stripFloating=面板还是收起态）。
+    bool stripFloating = false;
+    Point stripFloatingPos{200, 120};
 };
 // 手动拉伸的合理范围（DIP）：420 保住标题栏+寄存器+导航和一屏列表；960 在 1080p/125%
 // 的工作区里仍能整窗放下。实际运行时还会再夹到显示器工作区高度。

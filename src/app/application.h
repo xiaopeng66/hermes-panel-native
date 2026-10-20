@@ -123,7 +123,7 @@ private:
     void StartCardMotion();
     void StartStripMotion();
     void StartTooltipMotion();
-    void StartThemeMotion();
+    void StartThemeMotion(const ThemePalette& target);
     void MotionTick();
     void SetHoverControl(int id);
     unsigned long long panelMotionStart_=0,cardMotionStart_=0,tooltipMotionStart_=0;
@@ -131,6 +131,7 @@ private:
     unsigned long long stripMotionStart_=0,cardExitStart_=0;
     unsigned long long capsuleDockStart_=0;   // 胶囊贴边↔浮起过渡起点（0=无动画）
     bool capsuleDocked_=true;                 // 目标态：true=贴边（直角侧）、false=浮起（椭圆）
+    float capsuleDockOverride_=-1.0f;         // 拖动中按离边距离实时插值（<0=走动画状态）
     bool panelMotionEnter_=true;
     int hoverPrevious_=0;
     bool motionTimer_=false;

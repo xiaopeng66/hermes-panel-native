@@ -271,9 +271,12 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     }
     // D2D 矩阵是行向量约定：A*B 表示"先 A 后 B"。所以顺序必须是
     // 平移到原点 → 旋转 → 平移到窗口中心（写反会把整块形状转出窗口，只剩文字）。
-    if(angle!=0.0f) target->SetTransform(D2D1::Matrix3x2F::Translation(-cw/2.0f,-ch/2.0f)
-        *D2D1::Matrix3x2F::Rotation(angle)
-        *D2D1::Matrix3x2F::Translation(centre.x,centre.y));
+    const auto stripTransform=angle!=0.0f
+        ?D2D1::Matrix3x2F::Translation(-cw/2.0f,-ch/2.0f)
+            *D2D1::Matrix3x2F::Rotation(angle)
+            *D2D1::Matrix3x2F::Translation(centre.x,centre.y)
+        :D2D1::Matrix3x2F::Identity();
+    if(angle!=0.0f) target->SetTransform(stripTransform);
     // 像素对齐：形状边界落在半像素上会被抗锯齿糊成灰边（真机截图可见）。
     std::string tag;
     if(style==WidgetStyle::Beacon) {
@@ -311,10 +314,11 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
         // 过渡到**完整椭圆**（四角全半径）—— docked 0..1 插值驱动（贴边↔中间切换动画）。
         // 液态玻璃质感：纵向亮度渐变底 + 顶部高光带 + 内描边 + 贴边侧微投影（与桌面分层）。
         const float docked=std::clamp(view.motion.capsuleDocked,0.0f,1.0f);
-        const float straight=radius*(1.0f-docked);            // 贴边侧角：docked=1 → 0（直）
-        const float full=cw*0.5f;                             // 桌面侧角：全椭圆
-        // 贴边侧的"直"也留最小圆角，避免 docked 抖动时出现尖刺。
-        const float edgeR=std::max(straight,Dip(3.0f,scale));
+        const float full=cw*0.5f;                             // 全椭圆半径 = 半个厚度
+        // 贴边侧两角：docked=1 → 近乎直角（留 2 DIP 防尖刺），docked=0 → **也是全半径**，
+        // 四角同半径才是真正的椭圆。以前浮起时贴边侧仍只收 3 DIP，看起来还是一头平一头圆。
+        const float edgeR=docked<=0.001f?full
+            :std::max(full*(1.0f-docked),Dip(2.0f,scale));
         Microsoft::WRL::ComPtr<ID2D1Factory> factory;
         target->GetFactory(factory.GetAddressOf());
         if(factory) {
@@ -338,39 +342,120 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                     D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
-                // 液态玻璃底：纵向（厚向）亮→暗 渐变，模拟受光面。
-                D2D1_GRADIENT_STOP glass[2];
-                glass[0].position=0.0f; glass[0].color=palette.stripTop;
-                glass[1].position=1.0f; glass[1].color=palette.stripBottom;
+                // ---- 液态玻璃（真背景 + 分层高光）----
+                // ① 桌面快照（Surface 已抓取并模糊）**放大 6% 画进胶囊**：磨砂玻璃的
+                //    折射感来自"背后内容被透镜放大"，1:1 只是透明、放大才有玻璃味。
+                if(view.backdrop.pixels&&view.backdrop.width>0&&view.backdrop.height>0) {
+                    if(!backdrop_||backdropGeneration_!=view.backdrop.generation) {
+                        backdrop_.Reset();
+                        const auto properties=D2D1::BitmapProperties(
+                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE));
+                        if(SUCCEEDED(target->CreateBitmap(D2D1::SizeU(
+                            static_cast<UINT32>(view.backdrop.width),
+                            static_cast<UINT32>(view.backdrop.height)),view.backdrop.pixels,
+                            static_cast<UINT32>(view.backdrop.width)*4u,properties,
+                            backdrop_.GetAddressOf()))) {
+                            backdropGeneration_=view.backdrop.generation;
+                        }
+                    }
+                    Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> screenPath;
+                    if(backdrop_&&SUCCEEDED(factory->CreateTransformedGeometry(path.Get(),
+                        stripTransform,screenPath.GetAddressOf()))) {
+                        target->SetTransform(D2D1::Matrix3x2F::Identity());
+                        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),
+                            screenPath.Get(),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),nullptr);
+                        // 以窗口中心为锚放大：快照 1.06× 绘制，边缘多出来的 3% 被胶囊裁掉。
+                        const float zoom=1.06f;
+                        const auto zoomed=D2D1::RectF(
+                            width/2.0f*(1.0f-zoom),height/2.0f*(1.0f-zoom),
+                            width/2.0f*(1.0f+zoom),height/2.0f*(1.0f+zoom));
+                        target->DrawBitmap(backdrop_.Get(),zoomed,1.0f,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                        target->PopLayer();
+                        target->SetTransform(stripTransform);
+                    }
+                }
+                // ② 玻璃底色：深色 ink 打底保对比度，再叠半透明主题渐变（受光面厚、背面薄）。
+                brush_->SetColor(Fade(palette.ink,0.34f));
+                target->FillGeometry(path.Get(),brush_.Get());
+                D2D1_GRADIENT_STOP glass[3];
+                glass[0].position=0.0f; glass[0].color=Fade(palette.stripTop,0.55f);
+                glass[1].position=0.5f; glass[1].color=Fade(palette.stripTop,0.38f);
+                glass[2].position=1.0f; glass[2].color=Fade(palette.stripBottom,0.52f);
                 Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassStops;
-                if(SUCCEEDED(target->CreateGradientStopCollection(glass,2,D2D1_GAMMA_2_2,
+                if(SUCCEEDED(target->CreateGradientStopCollection(glass,3,D2D1_GAMMA_2_2,
                     D2D1_EXTEND_MODE_CLAMP,&glassStops))) {
                     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassBrush;
                     if(SUCCEEDED(target->CreateLinearGradientBrush(
                         D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(cw,0)),
                         glassStops.Get(),&glassBrush))) {
                         target->FillGeometry(path.Get(),glassBrush.Get());
-                    } else {
-                        brush_->SetColor(Blend(palette.stripTop,palette.stripBottom,0.5f));
-                        target->FillGeometry(path.Get(),brush_.Get());
                     }
                 }
-                // 内描边（玻璃边缘的折射线）：上缘亮、下缘暗。
-                brush_->SetColor(Fade(palette.text,0.14f));
-                target->DrawGeometry(path.Get(),brush_.Get(),1.0f);
-                // 顶部高光带：玻璃受光面（长向上 8%..20% 的一条柔光）。
-                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sheenStops;
-                D2D1_GRADIENT_STOP sheen[3];
-                sheen[0].position=0.0f; sheen[0].color=Fade(palette.text,0.0f);
-                sheen[1].position=0.5f; sheen[1].color=Fade(palette.text,0.16f);
-                sheen[2].position=1.0f; sheen[2].color=Fade(palette.text,0.0f);
-                if(SUCCEEDED(target->CreateGradientStopCollection(sheen,3,D2D1_GAMMA_2_2,
-                    D2D1_EXTEND_MODE_CLAMP,&sheenStops))) {
-                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sheenBrush;
+                // ③ 贴边侧内阴影：贴边时给玻璃一道"厚度"，浮起时按 docked 淡出。
+                if(docked>0.01f) {
+                    D2D1_GRADIENT_STOP shade[2];
+                    shade[0].position=0.0f;
+                    shade[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.44f*docked);
+                    shade[1].position=1.0f; shade[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> shadeStops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(shade,2,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&shadeStops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> shadeBrush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                                D2D1::Point2F(cw*0.62f,0)),shadeStops.Get(),&shadeBrush))) {
+                            target->FillGeometry(path.Get(),shadeBrush.Get());
+                        }
+                    }
+                }
+                // ④ 边缘折射线：桌面侧最亮、贴边侧衰减（1.25px 内描边）。
+                D2D1_GRADIENT_STOP rim[3];
+                rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.05f);
+                rim[1].position=0.55f; rim[1].color=Fade(palette.text,0.15f);
+                rim[2].position=1.0f; rim[2].color=Fade(palette.text,0.42f);
+                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> rimStops;
+                if(SUCCEEDED(target->CreateGradientStopCollection(rim,3,D2D1_GAMMA_2_2,
+                    D2D1_EXTEND_MODE_CLAMP,&rimStops))) {
+                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> rimBrush;
                     if(SUCCEEDED(target->CreateLinearGradientBrush(
-                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,Dip(2,scale)),
-                            D2D1::Point2F(0,Dip(9,scale))),sheenStops.Get(),&sheenBrush))) {
-                        target->FillGeometry(path.Get(),sheenBrush.Get());
+                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                            D2D1::Point2F(cw,0)),rimStops.Get(),&rimBrush))) {
+                        target->DrawGeometry(path.Get(),rimBrush.Get(),1.25f);
+                    }
+                }
+                // ⑤ 镜面高光：厚度方向的一条窄亮带（玻璃的"液体"弧面），竖向再补一条
+                //    长向顶部的柔光（受光面），两层叠出"液体"的体积。
+                D2D1_GRADIENT_STOP specular[3];
+                specular[0].position=0.0f; specular[0].color=Fade(palette.text,0.0f);
+                specular[1].position=0.5f; specular[1].color=Fade(palette.text,0.18f);
+                specular[2].position=1.0f; specular[2].color=Fade(palette.text,0.0f);
+                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> specularStops;
+                if(SUCCEEDED(target->CreateGradientStopCollection(specular,3,D2D1_GAMMA_2_2,
+                    D2D1_EXTEND_MODE_CLAMP,&specularStops))) {
+                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> specularBrush;
+                    if(SUCCEEDED(target->CreateLinearGradientBrush(
+                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(cw*0.58f,0),
+                            D2D1::Point2F(cw*0.94f,0)),specularStops.Get(),&specularBrush))) {
+                        target->FillGeometry(path.Get(),specularBrush.Get());
+                    }
+                }
+                // ⑥ 长向顶部柔光：玻璃受光面的"高光扫过"——贴边方向顶部 2..14 DIP 的一条
+                //    斜向亮带（透明→亮→透明），随 docked 淡出（贴边时被内阴影顶掉大半）。
+                {
+                    D2D1_GRADIENT_STOP sweep[3];
+                    sweep[0].position=0.0f; sweep[0].color=Fade(palette.text,0.0f);
+                    sweep[1].position=0.5f; sweep[1].color=Fade(palette.text,0.10f*(1.0f-docked*0.55f));
+                    sweep[2].position=1.0f; sweep[2].color=Fade(palette.text,0.0f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sweepStops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,3,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&sweepStops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sweepBrush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,Dip(2,scale)),
+                                D2D1::Point2F(0,Dip(16,scale))),sweepStops.Get(),&sweepBrush))) {
+                            target->FillGeometry(path.Get(),sweepBrush.Get());
+                        }
                     }
                 }
             }
@@ -409,14 +494,10 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     }
     target->SetTransform(D2D1::Matrix3x2F::Identity());
     if(!tag.empty()) {
-        // 文字单独画：形状的整体旋转会把字镜像。统一方案：
-        // ① 用与形状层完全相同的三段式矩阵（T(-cw/2,-ch/2)·R(θ)·T(W/2,H/2)，θ 按边）
-        //    把 canonical 段矩形的四角映射成屏幕 bbox —— 位置随边正确翻转，已被形状层验证；
-        // ② 字形角度只由竖/横决定：竖边 90°（从上往下读）、横边 0°，绕屏幕 bbox 中心转；
-        // ③ DrawTextW 的排版盒：横边用屏幕 bbox；竖边用「bbox 的转正矩形」（宽=段长）。
-        // ④ 截断按段长（沿长向）量 —— Measure 是横排宽度，旋转后长度不变。
-        // （历史坑：金丝雀验证过"canonical 盒子直接旋转"会把盒宽当排版宽度截空；
-        //   "转正绝对坐标"方案存在双重偏移把盒子推出窗口。都已被四边截图否决。）
+        // 文字与贴条是**同一个刚体**：竖边把整串字放进一个横排盒，整体旋转 90° 后再套上
+        // 贴条自身的旋转矩阵 —— 左边 = 横向 DEEP 左转 90°（从下往上读、字顶朝屏幕边），
+        // 右边是它的 180° 镜像（从上往下读、字顶朝桌面）。横边仍横排（不把字倒过来）。
+        // 截断按段长量：Measure 是横排宽度，旋转后长度不变。
         const float along=ch;
         // Tag 样式的三盏灯钉在 canonical 长向底部（ch-Dip7 起向上排）：文字段给灯让位。
         const float x0=style==WidgetStyle::Capsule?along*0.62f:Dip(3.0f,scale);
@@ -441,20 +522,29 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
             }
             shown=shown.substr(0,boundaryAt(low))+ellipsis;
         }
-        if(!shown.empty()) {
-            // ① canonical 段矩形（厚向全宽、长向段）四角 → 屏幕 bbox。
-            float tagAngle=0.0f;
-            switch(view.widgetEdge) {
-            case 2: tagAngle=180.0f;break;
-            case 3: tagAngle=90.0f;break;
-            case 4: tagAngle=-90.0f;break;
-            default: break;
+        if(!shown.empty()&&vertical) {
+            // 局部排版盒：宽=段长（阅读方向），高=厚度；旋转 −90°（视觉左转）后
+            // (u,v)→(v,−u)，再平移 (0,x1) 落进 canonical 段 [x0,x1]。
+            const float length=x1-x0;
+            const auto local=D2D1::Matrix3x2F::Rotation(-90.0f)
+                *D2D1::Matrix3x2F::Translation(0.0f,x1);
+            target->SetTransform(local*stripTransform);
+            brush_->SetColor(palette.text);
+            count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const auto converted=Widen(shown);
+            if(!converted.empty()) {
+                target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),
+                    count_.Get(),D2D1::RectF(0.0f,0.0f,length,cw),brush_.Get());
             }
+            target->SetTransform(D2D1::Matrix3x2F::Identity());
+        } else if(!shown.empty()) {
+            // 横边：canonical 段矩形四角 → 屏幕 bbox，直接横排（上边段在左端、下边段在右端）。
             const auto tagCentre=D2D1::Point2F(width/2.0f,height/2.0f);
             const auto mapPoint=[&](float x,float y) {
-                if(tagAngle==0.0f) return D2D1::Point2F(x,y);
+                if(angle==0.0f) return D2D1::Point2F(x,y);
                 const auto t=D2D1::Matrix3x2F::Translation(-cw/2.0f,-ch/2.0f)
-                    *D2D1::Matrix3x2F::Rotation(tagAngle)
+                    *D2D1::Matrix3x2F::Rotation(angle)
                     *D2D1::Matrix3x2F::Translation(tagCentre.x,tagCentre.y);
                 // 行向量约定：(x,y)·M；Matrix3x2F 的数据是 (m11,m12,m21,m22,dx,dy)。
                 return D2D1::Point2F(x*t.m11+y*t.m21+t.dx,x*t.m12+y*t.m22+t.dy);
@@ -467,31 +557,8 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                 minX=std::min(minX,corner.x);maxX=std::max(maxX,corner.x);
                 minY=std::min(minY,corner.y);maxY=std::max(maxY,corner.y);
             }
-            const D2D1_RECT_F screenBox{minX,minY,maxX,maxY};
-            // ② 竖边：**逐字符竖排**（每个字符一次 DrawTextW，屏幕坐标、零变换）。
-            //    读向（真机约定"左顶右底"）：左边第一个字符在顶（从上往下读）；
-            //    右边第一个字符在底（从下往上读）—— 与形状层 180° 旋转后的 logo 端
-            //    （右边 logo 在底）同向，整条挂件的"起点端"一致。
-            if(vertical) {
-                const bool reverse=view.widgetEdge==2;   // 右边：从下往上
-                const float cellHeight=(screenBox.bottom-screenBox.top)/static_cast<float>(shown.size());
-                brush_->SetColor(palette.text);
-                for(std::size_t index=0;index<shown.size();++index) {
-                    const std::size_t slot=reverse?shown.size()-1-index:index;
-                    std::string single(1,shown[index]);
-                    const auto converted=Widen(single);
-                    if(converted.empty()) continue;
-                    count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    const D2D1_RECT_F cell{screenBox.left,screenBox.top+cellHeight*static_cast<float>(slot),
-                        screenBox.right,screenBox.top+cellHeight*static_cast<float>(slot+1)};
-                    target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),
-                        count_.Get(),cell,brush_.Get());
-                }
-            } else {
-                // 横边：水平排（上顶下底已由段映射保证：上边段在左端、下边段在右端）。
-                Text(target,shown,screenBox,count_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
-            }
+            Text(target,shown,D2D1::RectF(minX,minY,maxX,maxY),count_.Get(),palette.text,
+                DWRITE_TEXT_ALIGNMENT_CENTER,true);
         }
     }
 }

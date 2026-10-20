@@ -167,6 +167,10 @@ Json Application::Dump() const {
         {"panelHwnd",reinterpret_cast<std::uintptr_t>(panel_)},
         {"stripHwnd",reinterpret_cast<std::uintptr_t>(strip_)},
         {"writes",geometry_.Writes()},{"violations",geometry_.Violations()},
+        {"backdrop",{{"generation",stripContext_.surface.BackdropGeneration()},
+            {"pixels",static_cast<int>(stripContext_.surface.BackdropPixels().size())},
+            {"mean",stripContext_.surface.BackdropMean()},
+            {"size",{stripContext_.surface.BackdropWidth(),stripContext_.surface.BackdropHeight()}}}},
         {"drops",drops_},{"tierWrites",tierWrites_},
         // 动效状态（门禁断言「展开会启动入场、动画结束后计时器停掉」；不影响几何）。
         {"motion",{{"enabled",animOverride_},{"panelStart",panelMotionStart_},
@@ -174,6 +178,20 @@ Json Application::Dump() const {
             {"cardExit",cardExitStart_},{"themeStart",themeMotionStart_},{"timer",motionTimer_}}},
         {"stripMoves",stripMoves_},{"panelMoves",panelMoves_},{"panelLeaves",panelLeaves_},{"graces",graces_},
         {"wakeCount",wakeCount_},{"themeLight",palette_.light},
+        // 真实调色板（0xRRGGBB）：门禁据此断言"切换主题后**画出来的颜色**真的变了"。
+        // 以前只暴露 light 布尔，宿系统恰好是浅色时它恒为 true，主题切换失效也能全绿
+        // （真机 2026-10-20 的「主题切换失效」正是这样漏掉的）。
+        {"palette",[this] {
+            const auto hex=[](const D2D1_COLOR_F& colour) {
+                const auto channel=[](float value) {
+                    return static_cast<int>(std::lround(std::clamp(value,0.0f,1.0f)*255.0f));
+                };
+                return (channel(colour.r)<<16)|(channel(colour.g)<<8)|channel(colour.b);
+            };
+            return Json{{"ink",hex(palette_.ink)},{"surf",hex(palette_.surf)},
+                {"text",hex(palette_.text)},{"stripTop",hex(palette_.stripTop)},
+                {"light",palette_.light}};
+        }()},
         {"settingsPath",Narrow(settings_?settings_->Path():L"")},
         {"stored",{{"webuiPort",stored_.webuiPort},{"pollSeconds",stored_.pollSeconds},
             {"theme",stored_.theme},{"hotkey",stored_.hotkey},{"distro",stored_.distro},
@@ -420,6 +438,9 @@ Json Application::Command(const Json& request) {
         geometry_.Place(model_,monitor_.geometry,state_,"place");
         geometry_.Visibility(state_);
         geometry_.Validate(model_,monitor_.geometry,state_);
+        // 位置变了桌面就变了：与真实拖动落点同一条重抓规则。
+        stripContext_.surface.InvalidateBackdrop();
+        if(state_==State::Collapsed) RenderStrip();
         return Dump();
     }
     if(command=="state") return Dump();
@@ -823,6 +844,7 @@ Json Application::Command(const Json& request) {
                 hoverMotionStart_=themeMotionStart_=0;
                 stripMotionStart_=0;
                 cardExitStart_=0;
+                capsuleDockStart_=0;
                 themeStartValid_=false;
                 if(hoverCard_&&!cardVisible_) ShowWindow(hoverCard_,SW_HIDE);
             }

@@ -21,3 +21,4 @@ __pycache__/
 
 # 审查证据截图（体积大，报告 md 保留）
 audit/evidence/
+Testing/

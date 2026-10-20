@@ -647,11 +647,9 @@ void Application::SetSetting(const std::string& key,const std::string& value) {
     // 设置页的动作（旧 setSetting）：写进本地设置文件，热键与主题要立刻生效。
     if(key=="theme") {
         stored_.theme=value;
-        // 主题交叉淡入：旧调色板 → 新主题，180ms 内混合（绘制层只认一份 palette）。
-        previousPalette_=palette_;
-        targetPalette_=ResolveTheme(stored_.theme);
-        StartThemeMotion();
-        if(!themeStartValid_) palette_=targetPalette_;
+        // 主题交叉淡入：当前调色板 → 新主题，180ms 内混合（绘制层只认一份 palette）。
+        // 目标在这里显式交进去：StartThemeMotion 不再拿 palette_ 当目标。
+        StartThemeMotion(ResolveTheme(stored_.theme));
     }
     else if(key=="distro") stored_.distro=value;
     else if(key=="webuiPort") { stored_.webuiPort=std::clamp(atoi(value.c_str()),1,65535); }

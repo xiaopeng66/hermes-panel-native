@@ -2580,3 +2580,53 @@ Release PASS 打包 956,416 B、无 DLL、无控制面、能启动
   无日志/无探针），与操作密度无关；同日真机 Release 实例稳定运行数小时。结论维持
   「外部软件（头号嫌疑火绒 HIPS）间歇性强杀」，非产品缺陷；已建议用户把面板加入火绒信任区。
 - **产物**：dist exe 956,928 B，sha256 `cf251d4e0bc532a7f109721f4244590540a3ef37d3940a04d31b6d525bd2e94b`。
+
+## G17 胶囊贴条三件套（2026-10-19，真机反馈第二批）
+
+**反馈**：①信息卡删掉提示行后底部留白；②贴条内容没跟着贴条旋转（用户要"横向 DEEP 左转 90°"）；
+③拖到屏幕中间没有完整椭圆、没有动画；④液态玻璃没有立体感。
+
+**修复**（DESIGN v1.8）：
+- 信息卡高度 = 62 + 20×行数 + note + 10，动态计算（`PositionHoverCard`），drag 门禁同步断言。
+- 贴条文字改"横排盒 + 局部 −90° 旋转 + stripTransform"（`panel.cpp` tag 绘制），
+  竖边=从下往上读的整串横排；四边截图验收（capture_widgets.py 全矩阵）。
+- `CommitStripDrop`：落点离四边 >48 DIP → `stripFloating`（GeometryModel 新字段，
+  settings 新键 stripFloat/stripFloatPos），完整椭圆 + 160ms 过渡；拖动中按离边距离实时插值
+  （`capsuleDockOverride_`）；`Undock` 对浮起胶囊=展开浮动面板；启动恢复浮起位置。
+- 液态玻璃：`Surface::CaptureBackdrop`（隐藏窗口 → BitBlt，全黑环境 GetPixel 兜底 → 盒式模糊×2），
+  胶囊路径 = 桌面快照 + ink 压暗 + 半透明主题渐变 + 贴边侧内阴影 + 折射边 + 镜面高光。
+
+**证据**：`widgets-v2-shots.png`（4 样式 ×4 边 ×2 主题）；drag 门禁 5/5
+（近边吸附/中央浮起/浮起停点/信息卡尺寸/点击展开）；state 32、settings 25、geometry 17433、
+widget 570、motion/hover/shell/lifecycle/unc-parity 全绿（ctest 9/9）。
+
+## G18 液态玻璃 v2（2026-10-20，用户"继续优化效果"）
+
+- **折射**：桌面快照以窗口中心放大 6% 画进胶囊（透镜感；1:1 只是透明）。
+- **磨砂**：ink 压暗 0.22→0.34；主题渐变改三段透明度（0.55/0.38/0.52）——中间最透、两侧厚。
+- **高光双层**：厚向镜面带 0.14→0.18，新增长向顶部 2..16 DIP 的受光柔光（随 docked 淡出）。
+- **更"液"的过渡**：kCapsuleDockMs 160→240；模糊半径 min/5→min/4。
+- 证据：drag 5/5、hover 6/6、shell 2/2、lifecycle 4/4 全绿；真机截图
+  tmp/hermes-panel-native/diag/live_strip_3x.png（玻璃纹理清晰可见）；dist d7df966a。
+
+## G19 修复「主题切换失效」（2026-10-20，真机报障）
+
+**根因**：`StartThemeMotion()` 内 `targetPalette_=palette_;` 把调用方刚 `ResolveTheme()` 出来的
+新主题覆盖回旧调色板 → 交叉淡入变成"旧→旧"，收尾时 `MotionTick` 再把 `palette_` 锁回旧值。
+只有 `animations=false`（走立即落地分支）时正常，所以全部门禁一直是绿的（harness 启动即关动画，
+且 motion 只断言 `themeLight` 布尔，宿系统恰好浅色时恒真）。该行自初始提交就存在，非本轮引入。
+
+**修复**：`StartThemeMotion(const ThemePalette& target)` 显式接收目标；无动画分支直接
+`palette_=targetPalette_`；两个调用点（设置页/托盘 `SetSetting("theme")`、`WM_SETTINGCHANGE`
+跟随系统）改为直接传 `ResolveTheme(...)`。
+
+**门禁加固**：`dump` 新增 `palette.{ink,surf,text,stripTop,light}`（0xRRGGBB）。
+- `motion`：断言淡入启动 → 收尾后调色板**颜色**变化 → 切回深色逐色还原；
+- `h-settings`：点四套现代主题后，dump 的 `palette.ink` 必须等于 `ResolveTheme(id).ink`。
+
+**证据**：像素 A/B（贴条截图，动画开启）：深色 mean (28.7,39.4,41.9) vs 浅色 (104.3,113.6,117.4)，
+max|diff|=213（修复前为 0）；动画关路径与开路径终值逐像素一致；motion/h-settings/h-shell/drag/
+hover/state/geometry/settings/widget/unc-parity 9/9 绿。
+真机：settings theme=porcelain（用户点过未生效留下的值），换包重启后贴条按 porcelain 渲染
+（mean 162,163,151；灯 (10,124,85)；文字深色）——tmp/hermes-panel-native/diag/live_strip_3x.png。
+dist 26f4cb61。

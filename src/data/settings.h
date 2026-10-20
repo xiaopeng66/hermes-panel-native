@@ -11,6 +11,9 @@ struct Settings {
     Edge edge=Edge::None;
     Tier tier=Tier::Full;
     Point floating{200,120};
+    // 浮起胶囊（DESIGN v1.8）：收起态不贴边时停在 stripFloatPos；与浮动面板的 floating 分开。
+    bool stripFloat=false;
+    Point stripFloatPos{200,120};
     int anchor=0;
     // 完整档的固定窗口高度（DIP）：拖底边可改，落盘后切页/重启都保持同一高度。
     int heightDip=kPanelDefaultHeightDip;

@@ -108,7 +108,14 @@ WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
     Rect panel{model.floating.x,model.floating.y,size.width,size.height};
     const auto& work = monitor.work;
     switch(model.edge) {
-    case Edge::None: return {panel,std::nullopt};
+    case Edge::None: {
+        // 浮起的胶囊：收起态没有贴边，窗口就停在用户拖到的位置（竖条，不旋转）。
+        if(model.stripFloating) {
+            const auto pos=ClampFloating(model.stripFloatingPos,{widget.width,widget.height},work);
+            return {panel,Rect{pos.x,pos.y,widget.width,widget.height}};
+        }
+        return {panel,std::nullopt};
+    }
     case Edge::Left:
     case Edge::Right: {
         panel.x = model.edge==Edge::Left ? work.x : work.right()-size.width;
