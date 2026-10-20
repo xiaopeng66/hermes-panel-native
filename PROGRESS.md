@@ -2730,3 +2730,19 @@ logo 永远横向正着。平边始终贴屏幕边。四边截图 diag/orient-{t
 60fps；真机帧间差 2008 px（max 59），肉眼可见"反光在走"。
 
 **门禁**：drag 5/5（含拉伸、真实指针贴条拖动、悬浮卡）。
+
+## G25 去掉动态扫光 + 揪出 33Hz 轮询死循环（2026-10-20）
+
+**用户决定**：镜像扫光"没啥用，去掉吧" → 删除 ③b 整段（宽带+窄芯），连同
+`kStripFlowTimer / glassPhase_ / RenderStripFlowFrame / UpdateStripFlowTimer` 一并移除。
+贴条恢复为完全静止（两次截图逐像素相同），空闲 CPU 回到 0%。
+
+**顺带揪出真正的卡顿放大器**：`ApplyState` 在可见性变化后用 `SetTimer(kPollTimer,30)`
+做"立即刷新一次"。`kPollTimer` 是**周期**定时器（正常为 pollSeconds），所以任何一次展开/收起
+之后，轮询被永久改成 **33Hz**：日志里同一秒内几十条 `refresh started`，CPU 空转 25–32%，
+拖动自然卡。修法：新增一次性 `kPollNowTimer`（WM_TIMER 里先 KillTimer 再 StartRefresh），
+`kPollTimer` 只负责正常节奏。
+
+**实测**（真机 Release，修复后）：空闲 0.00%（两次采样），可见性变化后仍 0.00%，
+胶囊拖动 ≈17%、面板拖动 ≈15.6%（qemu 在跑，采样噪声仍在；此前 30–36% 里有一大半是轮询）。
+**门禁**：drag 5/5。

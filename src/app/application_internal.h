@@ -16,6 +16,9 @@ constexpr UINT kTrayId=1;
 constexpr UINT_PTR kTrayGraceTimer=1;
 constexpr UINT_PTR kCaretTimer=2;         // the 530ms caret blink - lives only while a field is focused
 constexpr UINT_PTR kPollTimer=3;          // the refresh cadence (settings.pollSeconds)
+// 可见性变化后的"立刻刷新一次"必须是**一次性**定时器：直接用 kPollTimer 设 30ms 会把它
+// 永久改成 33Hz 轮询（真机 2026-10-20：任何一次展开/收起后 CPU 空转 25%，拖动卡顿）。
+constexpr UINT_PTR kPollNowTimer=14;
 constexpr UINT_PTR kToastTimer=4;         // one-shot: the toast clears itself after kToastMilliseconds
 constexpr UINT_PTR kTooltipTimer=5;       // one-shot: 悬停 450ms 后显示提示（旧 title 的等价物）
 constexpr UINT_PTR kSpinTimer=6;          // 周期：刷新进行中同步章图标的旋转动画
@@ -23,9 +26,6 @@ constexpr UINT_PTR kCheckTimer=7;         // one-shot: 刷新成功后对勾显�
 constexpr UINT_PTR kLatencyTimer=8;       // 周期：延迟探测（settings.latencyProbe）
 constexpr UINT_PTR kWidgetTimer=9;        // 周期：贴边挂件动画（声波/光环的呼吸）
 constexpr UINT_PTR kStripCardTimer=11;    // one-shot：贴条悬浮信息卡的延迟（300ms 静止）
-constexpr UINT_PTR kStripFlowTimer=13;    // 周期：贴条玻璃流动高光（60fps，仅贴条可见时）
-constexpr unsigned kStripFlowMs=16;
-constexpr float kStripFlowStep=0.0045f;   // 每帧相位增量 → 约 3.7 秒一个循环
 constexpr UINT kStripCardDelayMs=300;
 // 动效（移植自 balance-panel-native）：统一 ease-out 进度 + 一个只在动画期间存在的 16ms 计时器。
 constexpr UINT_PTR kMotionTimer=12;

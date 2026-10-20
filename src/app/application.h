@@ -135,7 +135,6 @@ private:
     unsigned loggedBackdropGeneration_=0;     // 玻璃快照诊断日志去重（只在代次变化时记一行）
     unsigned long long stripDragRenderTick_=0; // 拖动重绘节流（位置逐条跟手，重绘 ~20Hz）
     float lastDragDocked_=-2.0f;
-    unsigned long long lastDragPhaseTick_=0;
     int lastDragEdge_=-1;
     bool panelMotionEnter_=true;
     int hoverPrevious_=0;
@@ -386,24 +385,17 @@ private:
     // G1 贴边挂件动画（声波/光环）：收起态下 120ms 一帧。
     float widgetPhase_=0.0f;
     void UpdateWidgetTimer();
-    // 贴条玻璃的流动高光：只在收起态且贴条可见时跑 60fps 计时器，隐藏/展开立即停。
-    void UpdateStripFlowTimer();
-    float glassPhase_=0.0f;
-    // 拖动中的预览边（0=无）：让胶囊在松手前就按最近边的方向流动/排版。
+    // 拖动中的预览边（0=无）：让胶囊在松手前就按最近边的方向排版/受光。
     int previewEdge_=0;
-    bool stripFlowTimer_=false;
-    // 流动帧复用上一次的视图：60fps 每帧重建整个 PanelViewModel（含模型列表布局）
-    // 是纯浪费；只改相位，另外每 60 帧强制重建一次兜底。
+    // 拖动帧复用上一次的视图：逐帧重建整个 PanelViewModel（含模型列表布局）是纯浪费。
     PanelViewModel stripFlowView_;
     // 面板拖动期间复用上一帧视图（拖动中内容不变，重建视图只会拖慢跟手）。
     PanelViewModel panelDragView_;
     bool panelDragViewValid_=false;
     bool stripFlowViewValid_=false;
-    unsigned stripFlowFrames_=0;
     bool HitStripShape(POINT client) const;
     // 分层窗口不靠 InvalidateRect/WM_PAINT 出画面：状态/动画变化时直接合成并 UpdateLayeredWindow。
     void RenderStrip();
-    void RenderStripFlowFrame();   // 流动高光的单帧（复用缓存视图）
     void RenderStripDragFrame();   // 拖动中的单帧（复用缓存视图 + 预览边）
     void AddPageClick(float x,float y);
     void BackupPageClick(float x,float y);

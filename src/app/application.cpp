@@ -151,7 +151,6 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     geometry_.Place(model_,monitor_.geometry,state_,"startup");
     geometry_.Visibility(state_);
     geometry_.Validate(model_,monitor_.geometry,state_);
-    UpdateStripFlowTimer();
     if(state_==State::Collapsed) RenderStrip();
     SyncTopmostStyle();
     MigrateLegacySettings();
@@ -604,9 +603,8 @@ void Application::ApplyState(const char* reason,State previous) {
     // 处理里同步调它会让「点贴条展开」体感卡顿甚至超时（a-pullout/a-edge 门禁抓到）。
     if(VisibleFor(previous)!=VisibleFor(state_)) {
         UpdatePollTimer();
-        if(state_!=State::Hidden) SetTimer(panel_,kPollTimer,30,nullptr);
+        if(state_!=State::Hidden) SetTimer(panel_,kPollNowTimer,30,nullptr);
     }
-    UpdateStripFlowTimer();
     if(state_==State::Collapsed) {
         // 贴条重新出现：玻璃背景可能已经变了（换了窗口/壁纸/显示器），重抓一次。
         if(VisibleFor(previous)!=VisibleFor(state_)) stripContext_.surface.InvalidateBackdrop();
@@ -614,14 +612,6 @@ void Application::ApplyState(const char* reason,State previous) {
     }
     HideHoverCard();   // 状态/几何变了：卡片内容和位置都作废，下次悬停重新计算
     (void)reason;
-}
-void Application::UpdateStripFlowTimer() {
-    if(!strip_) return;
-    const bool wanted=state_==State::Collapsed&&IsWindowVisible(strip_)&&AnimationsEnabled();
-    if(wanted==stripFlowTimer_) return;
-    stripFlowTimer_=wanted;
-    if(wanted) SetTimer(strip_,kStripFlowTimer,kStripFlowMs,nullptr);
-    else KillTimer(strip_,kStripFlowTimer);
 }
 void Application::UpdateWidgetTimer() {
     if(!panel_) return;
@@ -739,7 +729,7 @@ void Application::RenderStrip() {
                     return std::string(buffer);
                 }());
         }
-        stripFlowView_=view;      // 供 60fps 流动帧复用（只改 motion.glassPhase）
+        stripFlowView_=view;      // 供拖动帧复用（只改预览边/圆角）
         stripFlowViewValid_=true;
         stripContext_.surface.PaintStrip(strip_,view,palette_);
     } catch(const std::exception& error) {
@@ -750,45 +740,17 @@ void Application::RenderStripDragFrame() {
     if(!strip_||state_!=State::Collapsed) return;
     // 第一次拖动帧先全量建一次缓存视图（此时 stripDragging_ 已为 true，视图不带快照）。
     if(!stripFlowViewValid_) { RenderStrip();return; }
-    const auto now=GetTickCount64();
-    if(lastDragPhaseTick_!=0&&now>lastDragPhaseTick_) {
-        glassPhase_+=static_cast<float>(now-lastDragPhaseTick_)/3700.0f;
-        if(glassPhase_>=1.0f) glassPhase_-=1.0f;
-    }
-    lastDragPhaseTick_=now;
     auto& cached=stripFlowView_;
     cached.widgetEdge=static_cast<int>(previewEdge_);
     cached.widgetVertical=previewEdge_==1||previewEdge_==2;
     cached.backdrop={};                    // 拖动中不透背景（窗口在动，快照必过期）
     cached.motion.capsuleDocked=capsuleDockOverride_>=0.0f?capsuleDockOverride_:1.0f;
     cached.motion.stripAlpha=1.0f;
-    cached.motion.glassPhase=glassPhase_;
     try {
         stripContext_.surface.PaintStrip(strip_,cached,palette_);
     } catch(const std::exception& error) {
         stripFlowViewValid_=false;
         if(log_) log_->Error("paint",std::string("strip drag: ")+error.what());
-    }
-}
-void Application::RenderStripFlowFrame() {
-    if(!strip_||state_!=State::Collapsed) return;
-    // 拖动中由拖动帧自己推进相位并重绘：两条通路同时画会让拖动成本翻倍（真机卡顿根因）。
-    if(stripDragging_) return;
-    // 每 60 帧全量重建一次：兜住任何"数据变了但没人调 RenderStrip"的路径；
-    // 其余帧只推进相位并复用缓存视图（省掉整份 PanelViewModel 的构建）。
-    // 缓存视图里 backdrop.pixels 是 Surface 持有的裸指针：快照一旦重建（代次变化）就必须
-    // 先全量重建视图，否则会画到已释放的内存。
-    if(!stripFlowViewValid_||(++stripFlowFrames_%60u)==0u
-        ||stripFlowView_.backdrop.generation!=stripContext_.surface.BackdropGeneration()) {
-        RenderStrip();
-        return;
-    }
-    stripFlowView_.motion.glassPhase=glassPhase_;
-    try {
-        stripContext_.surface.PaintStrip(strip_,stripFlowView_,palette_);
-    } catch(const std::exception& error) {
-        stripFlowViewValid_=false;
-        if(log_) log_->Error("paint",std::string("strip flow: ")+error.what());
     }
 }
 void Application::Show() {
@@ -1207,7 +1169,6 @@ void Application::UpdateStripDrag(POINT screenPoint) {
         if(std::abs(screenPoint.x-stripPressScreen_.x)<=threshold
             &&std::abs(screenPoint.y-stripPressScreen_.y)<=threshold) return;
         stripDragging_=true;
-        lastDragPhaseTick_=GetTickCount64();
         HideHoverCard();
         LogEvent("strip-drag-begin",screenPoint);
     }
@@ -1492,7 +1453,6 @@ PanelViewModel Application::CurrentView() {
         else input.motion.cardAlpha=progress(cardMotionStart_,kCardMotionMs);
         input.motion.cardOffsetDip=(1.0f-progress(cardMotionStart_,kCardMotionMs))*4.0f;
         input.motion.stripAlpha=progress(stripMotionStart_,kStripEnterMs);
-        input.motion.glassPhase=glassPhase_;
         // 胶囊贴边度：目标态向 0/1 过渡（1=贴边直角、0=浮起椭圆）。动画中逐帧插值。
         {
             // 形状过渡用 smoothstep（t*t*(3-2t)）而不是 ease-out cubic：椭圆与直边的起止
@@ -2452,14 +2412,9 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
     case WM_TIMER:
         if(wparam==kMotionTimer&&!strip) { MotionTick();return 0; }
         if(strip&&wparam==kStripCardTimer) { ShowHoverCard();return 0; }
-        if(strip&&wparam==kStripFlowTimer) {
-            glassPhase_+=kStripFlowStep;
-            if(glassPhase_>=1.0f) glassPhase_-=1.0f;
-            RenderStripFlowFrame();
-            return 0;
-        }
         if(wparam==kTrayGraceTimer&&!strip) { GraceExpired();return 0; }
         if(wparam==kCaretTimer&&!strip) { caretOn_=!caretOn_;panelContext_.surface.SetCaretOn(caretOn_);InvalidateRect(panel_,nullptr,FALSE);return 0; }
+        if(wparam==kPollNowTimer&&!strip) { KillTimer(panel_,kPollNowTimer);StartRefresh();return 0; }
         if(wparam==kPollTimer&&!strip) { StartRefresh();return 0; }
         if(wparam==kWidgetTimer&&!strip) {
             // 声波/光环的呼吸：只重绘收起态的挂件窗口，不碰面板。
