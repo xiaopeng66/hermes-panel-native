@@ -3,6 +3,7 @@
 #include <dwmapi.h>
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <stdexcept>
 
 namespace hermes {
@@ -96,6 +97,32 @@ bool Surface::EnsureLayered(UINT32 width,UINT32 height) {
     Check(dcTarget_->BindDC(layeredDc_,&bounds),"BindDC");
     layeredWidth_=width;layeredHeight_=height;
     return true;
+}
+bool Surface::SaveLayeredBmp(const std::wstring& path) const {
+    if(!layeredDc_||!layeredBitmap_||layeredWidth_==0||layeredHeight_==0) return false;
+    const UINT32 width=layeredWidth_,height=layeredHeight_;
+    BITMAPFILEHEADER file{};
+    BITMAPINFOHEADER info{};
+    info.biSize=sizeof(info);
+    info.biWidth=static_cast<LONG>(width);
+    info.biHeight=static_cast<LONG>(height);      // 正：BMP 自下而上，GetDIBits 会翻转
+    info.biPlanes=1;
+    info.biBitCount=32;
+    info.biCompression=BI_RGB;
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width)*height*4);
+    const int rows=GetDIBits(layeredDc_,layeredBitmap_,0,height,pixels.data(),
+        reinterpret_cast<BITMAPINFO*>(&info),DIB_RGB_COLORS);
+    if(rows<=0) return false;
+    file.bfType=0x4D42;
+    file.bfOffBits=sizeof(file)+sizeof(info);
+    file.bfSize=file.bfOffBits+static_cast<DWORD>(pixels.size());
+    std::ofstream out(path,std::ios::binary|std::ios::trunc);
+    if(!out) return false;
+    out.write(reinterpret_cast<const char*>(&file),sizeof(file));
+    out.write(reinterpret_cast<const char*>(&info),sizeof(info));
+    out.write(reinterpret_cast<const char*>(pixels.data()),
+        static_cast<std::streamsize>(pixels.size()));
+    return out.good();
 }
 void Surface::InvalidateBackdrop() {
     backdrop_.clear();

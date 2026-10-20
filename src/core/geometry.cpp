@@ -57,6 +57,13 @@ Size WidgetSize(WidgetStyle style, Edge edge, unsigned dpi) {
     if(edge==Edge::Top||edge==Edge::Bottom) std::swap(width,height);
     return {ScaleDip(width,dpi),ScaleDip(height,dpi)};
 }
+int StripShadowMarginDip(WidgetStyle style) {
+    // 10 DIP 够画三层柔和衰减；再大窗口就明显超出工作区了。
+    return style==WidgetStyle::Capsule?10:0;
+}
+int StripShadowMargin(WidgetStyle style,unsigned dpi) {
+    return ScaleDip(StripShadowMarginDip(style),dpi);
+}
 WidgetMetrics WidgetMetricsFor(WidgetStyle style,unsigned dpi) {
     // 绘制与命中（GDI 区域）共用同一份几何参数：两边各写一套必然漂移。
     WidgetMetrics metrics;
@@ -105,6 +112,7 @@ WidgetStyle WidgetStyleFromName(const std::string& name) {
 WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
     const auto size = TierSize(model,monitor.dpi);
     const auto widget = WidgetSize(model.widget,model.edge,monitor.dpi);
+    const int margin = StripShadowMargin(model.widget,monitor.dpi);
     Rect panel{model.floating.x,model.floating.y,size.width,size.height};
     const auto& work = monitor.work;
     switch(model.edge) {
@@ -116,7 +124,8 @@ WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
         // 挂件挂在面板停靠段的中线上（不再占满整条边），并夹进工作区。
         const int x = model.edge==Edge::Left ? work.x : work.right()-widget.width;
         const int y = Clamp(panel.y+panel.height/2-widget.height/2,work.y,work.bottom()-widget.height);
-        return {panel,Rect{x,y,widget.width,widget.height}};
+        // 可见胶囊仍贴屏幕边；窗口对称外扩 margin，贴边那一侧因此伸到屏幕外（看不到也没关系）。
+        return {panel,Rect{x-margin,y-margin,(widget.width+2*margin),(widget.height+2*margin)}};
     }
     case Edge::Top:
     case Edge::Bottom: {
@@ -124,7 +133,7 @@ WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
         panel.y = model.edge==Edge::Top ? work.y : work.bottom()-size.height;
         const int x = Clamp(panel.x+panel.width/2-widget.width/2,work.x,work.right()-widget.width);
         const int y = model.edge==Edge::Top ? work.y : work.bottom()-widget.height;
-        return {panel,Rect{x,y,widget.width,widget.height}};
+        return {panel,Rect{x-margin,y-margin,(widget.width+2*margin),(widget.height+2*margin)}};
     }
     }
     throw std::invalid_argument("Unknown edge");

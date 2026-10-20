@@ -228,9 +228,13 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     const float width=size.width,height=size.height;
     if(width<=0.0f||height<=0.0f) return;
     const bool vertical=view.widgetVertical;
-    const float cw=vertical?width:height;          // 厚度（10–16 DIP）
-    const float ch=vertical?height:width;          // 长轴
     const auto style=WidgetStyleFromName(view.widgetStyle);
+    // 胶囊窗口每边多出 margin 专门画外投影：可见形状用扣掉 margin 的尺寸，
+    // 旋转/居中仍以**窗口中心**为锚（margin 对称，所以形状依然居中）。
+    const float margin=(vertical?width:height)>0.0f
+        ?Dip(static_cast<float>(StripShadowMarginDip(style)),scale):0.0f;
+    const float cw=(vertical?width:height)-2.0f*margin;   // 厚度（10–16 DIP）
+    const float ch=(vertical?height:width)-2.0f*margin;   // 长轴
     const auto metrics=WidgetMetricsFor(style,static_cast<unsigned>(std::lround(scale*96.0f)));
     const float radius=static_cast<float>(metrics.radius);
     const float gap=static_cast<float>(metrics.gap);
@@ -293,6 +297,11 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
             *D2D1::Matrix3x2F::Translation(centre.x,centre.y)
         :D2D1::Matrix3x2F::Identity();
     if(angle!=0.0f) target->SetTransform(stripTransform);
+    else if(margin>0.5f) {
+        // 0°（左贴边）没有旋转来"顺带居中"：canonical 原点必须自己让出投影外边，
+        // 否则形状贴在窗口左上角、外投影被画到窗口外（真机 2026-10-20 实测：阴影完全不可见）。
+        target->SetTransform(D2D1::Matrix3x2F::Translation(margin,margin));
+    }
     // 像素对齐：形状边界落在半像素上会被抗锯齿糊成灰边（真机截图可见）。
     std::string tag;
     if(style==WidgetStyle::Beacon) {
@@ -358,6 +367,25 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                     D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
+                // ⓪ 外投影：窗口为胶囊外扩了 margin，这里用同一路径做多层外扩填充近似高斯衰减。
+                //    没有模糊特效（DC 渲染目标不支持 Effect），多层低透明叠加已经足够柔。
+                if(margin>0.5f) {
+                    const auto shadowCentre=D2D1::Point2F(cw/2.0f,ch/2.0f);
+                    const int layers=6;
+                    for(int layer=layers;layer>=1;--layer) {
+                        const float grow=margin*static_cast<float>(layer)/static_cast<float>(layers);
+                        const float scaleX=(cw+2.0f*grow)/std::max(1.0f,cw);
+                        const float scaleY=(ch+2.0f*grow)/std::max(1.0f,ch);
+                        Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> grown;
+                        const auto expand=D2D1::Matrix3x2F::Translation(-shadowCentre.x,-shadowCentre.y)
+                            *D2D1::Matrix3x2F::Scale(scaleX,scaleY)
+                            *D2D1::Matrix3x2F::Translation(shadowCentre.x,shadowCentre.y+0.5f);
+                        if(FAILED(factory->CreateTransformedGeometry(path.Get(),expand,
+                            grown.GetAddressOf()))) continue;
+                        brush_->SetColor(D2D1::ColorF(0.0f,0.0f,0.0f,palette.light?0.045f:0.065f));
+                        target->FillGeometry(grown.Get(),brush_.Get());
+                    }
+                }
                 // ---- 液态玻璃（真背景 + 分层高光）----
                 // 拖动中不抓快照（窗口每帧在动，抓取要隐藏窗口→会闪）：这时用**接近不透明**
                 // 的主题底色撑住实体感，落手后重新抓取、玻璃再把桌面透出来。
@@ -486,18 +514,42 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         }
                     }
                 }
+                // ④b 贴边侧的第二条镜面：真实玻璃管两侧都会反光。更细、更弱；
+                //    只有单侧高光时，整块读起来像"被照亮的板"而不是圆管。
+                {
+                    D2D1_GRADIENT_STOP side[3];
+                    side[0].position=0.0f; side[0].color=D2D1::ColorF(1,1,1,0.0f);
+                    side[1].position=0.5f; side[1].color=D2D1::ColorF(1,1,1,palette.light?0.09f:0.13f);
+                    side[2].position=1.0f; side[2].color=D2D1::ColorF(1,1,1,0.0f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(side,3,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(cw*0.10f,0),
+                                D2D1::Point2F(cw*0.40f,0)),stops.Get(),&brush))) {
+                            target->FillGeometry(path.Get(),brush.Get());
+                        }
+                    }
+                }
                 // ⑤ 1px 细边：只用来锁住轮廓，不做"厚边"。亮边在桌面侧最强，贴边侧几乎无。
                 //    浅色主题用 text（深）低透明，深色主题用白色低透明 —— 都不是黑色粗框。
                 {
-                    D2D1_GRADIENT_STOP rim[4];
-                    rim[0].position=0.0f; rim[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    rim[1].position=0.45f; rim[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    rim[2].position=0.80f;
-                    rim[2].color=palette.light?Fade(palette.text,0.10f):D2D1::ColorF(1,1,1,0.14f);
-                    rim[3].position=1.0f;
-                    rim[3].color=palette.light?Fade(palette.text,0.24f):D2D1::ColorF(1,1,1,0.34f);
+                    // 冷暖分离的折射边：厚玻璃会把边缘光散成两侧色相——贴边侧偏冷、桌面侧偏暖。
+                    // 只有 1px，alpha 压在 0.13/0.12 以下，过了就像 RGB 错位。
+                    const auto cool=palette.light?D2D1::ColorF(0.30f,0.62f,0.92f,0.10f)
+                        :D2D1::ColorF(0.62f,0.82f,1.0f,0.14f);
+                    const auto warm=palette.light?D2D1::ColorF(0.92f,0.60f,0.26f,0.09f)
+                        :D2D1::ColorF(1.0f,0.86f,0.66f,0.13f);
+                    D2D1_GRADIENT_STOP rim[5];
+                    rim[0].position=0.0f; rim[0].color=cool;
+                    rim[1].position=0.28f; rim[1].color=D2D1::ColorF(cool.r,cool.g,cool.b,0.0f);
+                    rim[2].position=0.55f; rim[2].color=Fade(palette.text,0.0f);
+                    rim[3].position=0.82f;
+                    rim[3].color=palette.light?Fade(palette.text,0.10f):D2D1::ColorF(1,1,1,0.14f);
+                    rim[4].position=1.0f; rim[4].color=warm;
                     Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
+                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,5,D2D1_GAMMA_2_2,
                         D2D1_EXTEND_MODE_CLAMP,&stops))) {
                         Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
                         if(SUCCEEDED(target->CreateLinearGradientBrush(
@@ -506,6 +558,44 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                             target->DrawGeometry(path.Get(),brush.Get(),1.0f);
                         }
                     }
+                }
+                // ⑥ 端头弧面高光（meniscus）：两个圆头内侧各一道弧光，像液体在管端的
+                //    弯月面。只在圆头区域，中段不画，避免和长向受光打架。
+                {
+                    const float r=cw*0.5f-Dip(2.4f,scale);
+                    const auto capAlpha=palette.light?0.16f:0.20f;
+                    const auto arc=[&](float centreY,bool upper) {
+                        Microsoft::WRL::ComPtr<ID2D1PathGeometry> arcPath;
+                        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+                        if(FAILED(factory->CreatePathGeometry(arcPath.GetAddressOf()))
+                            ||FAILED(arcPath->Open(sink.GetAddressOf()))) return;
+                        const float direction=upper?-1.0f:1.0f;
+                        sink->BeginFigure(D2D1::Point2F(cw*0.5f-r,centreY),D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddArc(D2D1::ArcSegment(
+                            D2D1::Point2F(cw*0.5f,centreY+direction*r),D2D1::SizeF(r,r),0.0f,
+                            upper?D2D1_SWEEP_DIRECTION_CLOCKWISE:D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                            D2D1_ARC_SIZE_SMALL));
+                        sink->AddArc(D2D1::ArcSegment(
+                            D2D1::Point2F(cw*0.5f+r,centreY),D2D1::SizeF(r,r),0.0f,
+                            upper?D2D1_SWEEP_DIRECTION_CLOCKWISE:D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                            D2D1_ARC_SIZE_SMALL));
+                        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                        if(FAILED(sink->Close())) return;
+                        D2D1_GRADIENT_STOP stopsData[3];
+                        stopsData[0].position=0.0f; stopsData[0].color=D2D1::ColorF(1,1,1,0.0f);
+                        stopsData[1].position=0.5f; stopsData[1].color=D2D1::ColorF(1,1,1,capAlpha);
+                        stopsData[2].position=1.0f; stopsData[2].color=D2D1::ColorF(1,1,1,0.0f);
+                        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                        if(FAILED(target->CreateGradientStopCollection(stopsData,3,D2D1_GAMMA_2_2,
+                            D2D1_EXTEND_MODE_CLAMP,&stops))) return;
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(FAILED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(cw*0.2f,0),
+                                D2D1::Point2F(cw*0.8f,0)),stops.Get(),&brush))) return;
+                        target->DrawGeometry(arcPath.Get(),brush.Get(),Dip(2.0f,scale));
+                    };
+                    arc(cw*0.5f,true);
+                    arc(ch-cw*0.5f,false);
                 }
             }
         }
