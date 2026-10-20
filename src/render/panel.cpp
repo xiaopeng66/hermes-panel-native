@@ -244,15 +244,26 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     };
     const auto worst=LampColour(WorstLamp(view.lamps),palette);
     const auto dot=[&](float x,float y,float dotRadius,const D2D1_COLOR_F& colour) {
-        // 光晕在深色底上要"发光"（同色低透明），在浅色底上同色低透明会变成一圈灰盘 ——
-        // 浅色主题把色相压向 text（浅色主题里 text 是深色）并收小环、压低透明度。
-        const auto halo=palette.light?Blend(colour,palette.text,0.30f):colour;
-        const float haloScale=palette.light?1.9f:2.4f;
-        brush_->SetColor(Fade(halo,palette.light?0.22f:0.18f));
-        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),dotRadius*haloScale,
-            dotRadius*haloScale),brush_.Get());
+        // 光晕必须是**连续衰减**的：硬边圆环（同色 18% 画一个更大的圆）看着像"圆点套圈"。
+        // 用径向渐变从中心 30% 一路淡到 0，边缘完全消失，才是光。
+        const auto centre=D2D1::Point2F(x,y);
+        const float haloRadius=dotRadius*(palette.light?1.9f:2.2f);
+        D2D1_GRADIENT_STOP halo[3];
+        halo[0].position=0.0f; halo[0].color=Fade(colour,0.26f);
+        halo[1].position=0.50f; halo[1].color=Fade(colour,0.07f);
+        halo[2].position=1.0f; halo[2].color=Fade(colour,0.0f);
+        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+        if(SUCCEEDED(target->CreateGradientStopCollection(halo,3,D2D1_GAMMA_2_2,
+            D2D1_EXTEND_MODE_CLAMP,&stops))) {
+            Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glow;
+            if(SUCCEEDED(target->CreateRadialGradientBrush(
+                D2D1::RadialGradientBrushProperties(centre,D2D1::Point2F(0,0),
+                    haloRadius,haloRadius),stops.Get(),&glow))) {
+                target->FillEllipse(D2D1::Ellipse(centre,haloRadius,haloRadius),glow.Get());
+            }
+        }
         brush_->SetColor(colour);
-        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),dotRadius,dotRadius),brush_.Get());
+        target->FillEllipse(D2D1::Ellipse(centre,dotRadius,dotRadius),brush_.Get());
     };
     const auto fill=[&](const D2D1_RECT_F& rect,float r,const D2D1_COLOR_F& colour) {
         brush_->SetColor(colour);
@@ -384,96 +395,115 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         target->SetTransform(stripTransform);
                     }
                 }
-                // ② 玻璃底色：深色 ink 打底保对比度，再叠半透明主题渐变（受光面厚、背面薄）。
-                // 浅色主题的"压暗"要轻得多：0.34 的深底会把 porcelain 压成灰片。
-                // 没有快照（拖动中）时整层抬到接近不透明，避免变成一层能看见桌面的薄膜。
-                const float inkAlpha=(palette.light?0.22f:0.34f)+(hasBackdrop?0.0f:0.30f);
-                brush_->SetColor(Fade(palette.ink,inkAlpha));
-                target->FillGeometry(path.Get(),brush_.Get());
-                D2D1_GRADIENT_STOP glass[3];
-                glass[0].position=0.0f; glass[0].color=Fade(palette.stripTop,hasBackdrop?0.55f:0.99f);
-                glass[1].position=0.5f; glass[1].color=Fade(palette.stripTop,hasBackdrop?0.38f:0.96f);
-                glass[2].position=1.0f; glass[2].color=Fade(palette.stripBottom,hasBackdrop?0.52f:0.99f);
-                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassStops;
-                if(SUCCEEDED(target->CreateGradientStopCollection(glass,3,D2D1_GAMMA_2_2,
-                    D2D1_EXTEND_MODE_CLAMP,&glassStops))) {
-                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> glassBrush;
-                    if(SUCCEEDED(target->CreateLinearGradientBrush(
-                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(cw,0)),
-                        glassStops.Get(),&glassBrush))) {
-                        target->FillGeometry(path.Get(),glassBrush.Get());
-                    }
-                }
-                // ③ 贴边侧内阴影：贴边时给玻璃一道"厚度"，浮起时按 docked 淡出。
-                if(docked>0.01f) {
-                    D2D1_GRADIENT_STOP shade[2];
-                    shade[0].position=0.0f;
-                    shade[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.44f*docked);
-                    shade[1].position=1.0f; shade[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> shadeStops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(shade,2,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&shadeStops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> shadeBrush;
+                // ② 主体：把圆柱明暗**烘焙进渐变**（不是均匀底色上叠高光——那样在浅色底上
+                //    必然看起来是一块平板）。顺序：贴边侧暗（受屏幕遮挡）→ 中间本色 →
+                //    桌面侧渐亮 → 一条极窄的高光线 → 回落到略亮。
+                //    六段停靠点保证连续过渡，没有任何硬边。
+                {
+                    const auto mixTo=[&](const D2D1_COLOR_F& base,float target,float t) {
+                        return D2D1::ColorF(base.r+(target-base.r)*t,base.g+(target-base.g)*t,
+                            base.b+(target-base.b)*t,1.0f);
+                    };
+                    const auto base=palette.stripTop;
+                    const float darkT=palette.light?0.30f:0.34f;   // 暗缘强度
+                    const auto dark=mixTo(base,0.0f,darkT);
+                    const auto dim=mixTo(base,0.0f,darkT*0.45f);
+                    const auto lit=mixTo(base,1.0f,0.30f);
+                    const auto hot=mixTo(base,1.0f,0.52f);
+                    const float bodyAlpha=hasBackdrop?(palette.light?0.86f:0.84f):1.0f;
+                    D2D1_GRADIENT_STOP body[6];
+                    body[0].position=0.0f; body[0].color=Fade(dark,bodyAlpha);
+                    body[1].position=0.10f; body[1].color=Fade(dim,bodyAlpha);
+                    body[2].position=0.42f; body[2].color=Fade(base,bodyAlpha);
+                    body[3].position=0.76f; body[3].color=Fade(lit,bodyAlpha);
+                    body[4].position=0.90f; body[4].color=Fade(hot,bodyAlpha);
+                    body[5].position=1.0f; body[5].color=Fade(lit,bodyAlpha);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(body,6,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> bodyBrush;
                         if(SUCCEEDED(target->CreateLinearGradientBrush(
                             D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(cw*0.62f,0)),shadeStops.Get(),&shadeBrush))) {
-                            target->FillGeometry(path.Get(),shadeBrush.Get());
+                                D2D1::Point2F(cw,0)),stops.Get(),&bodyBrush))) {
+                            target->FillGeometry(path.Get(),bodyBrush.Get());
                         }
                     }
                 }
-                // ④ 边缘折射线：**先深后亮**的双层描边 —— 外侧一圈深色把玻璃从任何
-                //    背景下"切"出来（浅色主题压在浅色桌面上时，单靠亮边完全看不出轮廓），
-                //    内侧再一道 1.1px 的亮折射线（桌面侧最亮、贴边侧衰减）。
-                brush_->SetColor(D2D1::ColorF(0.0f,0.0f,0.0f,palette.light?0.34f:0.30f));
-                target->DrawGeometry(path.Get(),brush_.Get(),2.2f);
-                D2D1_GRADIENT_STOP rim[3];
-                rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.05f);
-                rim[1].position=0.55f; rim[1].color=Fade(palette.text,0.15f);
-                rim[2].position=1.0f; rim[2].color=Fade(palette.text,0.42f);
-                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> rimStops;
-                if(SUCCEEDED(target->CreateGradientStopCollection(rim,3,D2D1_GAMMA_2_2,
-                    D2D1_EXTEND_MODE_CLAMP,&rimStops))) {
-                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> rimBrush;
-                    if(SUCCEEDED(target->CreateLinearGradientBrush(
-                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                            D2D1::Point2F(cw,0)),rimStops.Get(),&rimBrush))) {
-                        target->DrawGeometry(path.Get(),rimBrush.Get(),1.1f);
-                    }
-                }
-                // ⑤ 镜面高光：厚度方向的一条窄亮带（玻璃的"液体"弧面），竖向再补一条
-                //    长向顶部的柔光（受光面），两层叠出"液体"的体积。
-                D2D1_GRADIENT_STOP specular[3];
-                specular[0].position=0.0f; specular[0].color=Fade(palette.text,0.0f);
-                specular[1].position=0.5f; specular[1].color=Fade(palette.text,0.18f);
-                specular[2].position=1.0f; specular[2].color=Fade(palette.text,0.0f);
-                Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> specularStops;
-                if(SUCCEEDED(target->CreateGradientStopCollection(specular,3,D2D1_GAMMA_2_2,
-                    D2D1_EXTEND_MODE_CLAMP,&specularStops))) {
-                    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> specularBrush;
-                    if(SUCCEEDED(target->CreateLinearGradientBrush(
-                        D2D1::LinearGradientBrushProperties(D2D1::Point2F(cw*0.58f,0),
-                            D2D1::Point2F(cw*0.94f,0)),specularStops.Get(),&specularBrush))) {
-                        target->FillGeometry(path.Get(),specularBrush.Get());
-                    }
-                }
-                // ⑥ 长向端头柔光：玻璃管两端的圆头会各自接住一点光（贴边时整体减淡，
-                //    免得和内阴影打架）。只有一个端头亮会显得"半截塑料"，对称才像液体。
-                {
-                    const float endAlpha=0.13f*(1.0f-docked*0.55f);
-                    D2D1_GRADIENT_STOP sweep[5];
-                    sweep[0].position=0.0f; sweep[0].color=Fade(palette.text,endAlpha);
-                    sweep[1].position=0.12f; sweep[1].color=Fade(palette.text,0.0f);
-                    sweep[2].position=0.5f; sweep[2].color=Fade(palette.text,0.0f);
-                    sweep[3].position=0.88f; sweep[3].color=Fade(palette.text,0.0f);
-                    sweep[4].position=1.0f; sweep[4].color=Fade(palette.text,endAlpha);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sweepStops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,5,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&sweepStops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sweepBrush;
+                // ③ 贴边侧接触阴影（只在贴边时有，随 docked 淡出）+ 1px 轮廓线。
+                //    **没有黑色粗描边**：轮廓靠一条 1px 的渐变细线锁住。
+                if(docked>0.01f) {
+                    D2D1_GRADIENT_STOP contact[2];
+                    contact[0].position=0.0f;
+                    contact[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.30f*docked);
+                    contact[1].position=1.0f; contact[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(contact,2,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
                         if(SUCCEEDED(target->CreateLinearGradientBrush(
                             D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(0,ch)),sweepStops.Get(),&sweepBrush))) {
-                            target->FillGeometry(path.Get(),sweepBrush.Get());
+                                D2D1::Point2F(cw*0.55f,0)),stops.Get(),&brush))) {
+                            target->FillGeometry(path.Get(),brush.Get());
+                        }
+                    }
+                }
+                {
+                    D2D1_GRADIENT_STOP rim[4];
+                    rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.0f);
+                    rim[1].position=0.5f; rim[1].color=Fade(palette.text,0.05f);
+                    rim[2].position=0.85f; rim[2].color=Fade(palette.text,0.16f);
+                    rim[3].position=1.0f; rim[3].color=Fade(palette.text,0.30f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                                D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
+                            target->DrawGeometry(path.Get(),brush.Get(),1.0f);
+                        }
+                    }
+                }
+                // ④ 长向单向受光：光从"起点端"打过来（0..10% 亮），末端（90..100%）压暗。
+                //    对称的双端亮光是错的 —— 那样只像一根发亮的棍子，没有方向就没有立体。
+                {
+                    const float lift=0.09f*(1.0f-docked*0.4f);
+                    D2D1_GRADIENT_STOP sweep[5];
+                    sweep[0].position=0.0f; sweep[0].color=D2D1::ColorF(1.0f,1.0f,1.0f,lift);
+                    sweep[1].position=0.10f; sweep[1].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
+                    sweep[2].position=0.5f; sweep[2].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
+                    sweep[3].position=0.86f; sweep[3].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+                    sweep[4].position=1.0f;
+                    sweep[4].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.10f*(0.4f+0.6f*docked));
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,5,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                                D2D1::Point2F(0,ch)),stops.Get(),&brush))) {
+                            target->FillGeometry(path.Get(),brush.Get());
+                        }
+                    }
+                }
+                // ⑤ 1px 细边：只用来锁住轮廓，不做"厚边"。亮边在桌面侧最强，贴边侧几乎无。
+                //    浅色主题用 text（深）低透明，深色主题用白色低透明 —— 都不是黑色粗框。
+                {
+                    D2D1_GRADIENT_STOP rim[4];
+                    rim[0].position=0.0f; rim[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+                    rim[1].position=0.45f; rim[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+                    rim[2].position=0.80f;
+                    rim[2].color=palette.light?Fade(palette.text,0.10f):D2D1::ColorF(1,1,1,0.14f);
+                    rim[3].position=1.0f;
+                    rim[3].color=palette.light?Fade(palette.text,0.24f):D2D1::ColorF(1,1,1,0.34f);
+                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                        if(SUCCEEDED(target->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                                D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
+                            target->DrawGeometry(path.Get(),brush.Get(),1.0f);
                         }
                     }
                 }

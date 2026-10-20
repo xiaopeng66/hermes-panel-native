@@ -1402,12 +1402,17 @@ PanelViewModel Application::CurrentView() {
         input.motion.stripAlpha=progress(stripMotionStart_,kStripEnterMs);
         // 胶囊贴边度：目标态向 0/1 过渡（1=贴边直角、0=浮起椭圆）。动画中逐帧插值。
         {
+            // 形状过渡用 smoothstep（t*t*(3-2t)）而不是 ease-out cubic：椭圆与直边的起止
+            // 两端都软、中段更快，视觉上更接近真实弹性体（ease-out 前段太急）。
             const float target=capsuleDocked_?1.0f:0.0f;
-            const auto started=capsuleDockStart_;
-            input.motion.capsuleDocked=capsuleDockOverride_>=0.0f?capsuleDockOverride_
-                :started==0?target
-                :capsuleDocked_?progress(started,kCapsuleDockMs)
-                :1.0f-progress(started,kCapsuleDockMs);
+            float value=target;
+            if(capsuleDockStart_!=0) {
+                const float elapsed=std::clamp(static_cast<float>(now-capsuleDockStart_)
+                    /static_cast<float>(kCapsuleDockMs),0.0f,1.0f);
+                const float eased=elapsed*elapsed*(3.0f-2.0f*elapsed);
+                value=capsuleDocked_?eased:1.0f-eased;
+            }
+            input.motion.capsuleDocked=capsuleDockOverride_>=0.0f?capsuleDockOverride_:value;
         }
         input.motion.tooltipAlpha=progress(tooltipMotionStart_,kTooltipMotionMs);
         input.motion.hoverPrevious=hoverPrevious_;
