@@ -61,24 +61,12 @@ int main() {
                 model.widget=style;
                 const auto rects=ComputeRect(model,normal);
                 const auto& strip=*rects.strip;
-                // 胶囊窗口比可见胶囊每边大 StripShadowMargin（外投影用），贴边那一侧会伸到
-                // 工作区外——所以"整块在工作区内"只对无投影的样式成立。
-                const int margin=StripShadowMargin(style,normal.dpi);
-                if(margin==0)
-                    Check(Contains(normal.work,{strip.x,strip.y})&&strip.right()<=normal.work.right()
-                        &&strip.bottom()<=normal.work.bottom(),"widget stays inside the work area");
-                else {
-                    const auto visual=Rect{strip.x+margin,strip.y+margin,
-                        strip.width-2*margin,strip.height-2*margin};
-                    Check(Contains(normal.work,{visual.x,visual.y})
-                        &&visual.right()<=normal.work.right()&&visual.bottom()<=normal.work.bottom(),
-                        "visible widget stays inside the work area");
-                }
-                const int inset=margin;
-                if(edge==Edge::Left) Check(strip.x+inset==normal.work.x,"left widget is flush");
-                if(edge==Edge::Right) Check(strip.right()-inset==normal.work.right(),"right widget is flush");
-                if(edge==Edge::Top) Check(strip.y+inset==normal.work.y,"top widget is flush");
-                if(edge==Edge::Bottom) Check(strip.bottom()-inset==normal.work.bottom(),"bottom widget is flush");
+                Check(Contains(normal.work,{strip.x,strip.y})&&strip.right()<=normal.work.right()
+                    &&strip.bottom()<=normal.work.bottom(),"widget stays inside the work area");
+                if(edge==Edge::Left) Check(strip.x==normal.work.x,"left widget is flush");
+                if(edge==Edge::Right) Check(strip.right()==normal.work.right(),"right widget is flush");
+                if(edge==Edge::Top) Check(strip.y==normal.work.y,"top widget is flush");
+                if(edge==Edge::Bottom) Check(strip.bottom()==normal.work.bottom(),"bottom widget is flush");
             }
         }
     }
@@ -186,23 +174,19 @@ int main() {
             if(!rects.strip) { Check(false,"a docked model always has a strip");continue; }
             const auto& strip=*rects.strip;
             const auto expected=WidgetSize(model.widget,model.edge,monitor.dpi);
-            const int margin=StripShadowMargin(model.widget,monitor.dpi);
-            // 窗口 = 可见挂件 + 2×投影外边（胶囊才有外投影）。
-            Check(strip.width==expected.width+2*margin&&strip.height==expected.height+2*margin,
-                "the strip window is the widget plus the shadow margin");
-            const auto visible=Rect{strip.x+margin,strip.y+margin,
-                strip.width-2*margin,strip.height-2*margin};
+            Check(strip.width==expected.width&&strip.height==expected.height,
+                "the strip uses the documented widget size");
             // 挂件比工作区还大时（极端小屏）无法完全放进去：只要求贴边侧仍然贴住，
             // "整块在工作区内"只在尺寸放得下时断言。
             const bool fits=expected.width<=monitor.work.width&&expected.height<=monitor.work.height;
             if(fits)
-                Check(Contains(monitor.work,{visible.x,visible.y})
-                    &&visible.right()<=monitor.work.right()&&visible.bottom()<=monitor.work.bottom(),
-                    "the visible widget stays inside the work area");
-            if(model.edge==Edge::Left) Check(visible.x==monitor.work.x,"left strip is flush");
-            if(model.edge==Edge::Right) Check(visible.right()==monitor.work.right(),"right strip is flush");
-            if(model.edge==Edge::Top) Check(visible.y==monitor.work.y,"top strip is flush");
-            if(model.edge==Edge::Bottom) Check(visible.bottom()==monitor.work.bottom(),"bottom strip is flush");
+                Check(Contains(monitor.work,{strip.x,strip.y})
+                    &&strip.right()<=monitor.work.right()&&strip.bottom()<=monitor.work.bottom(),
+                    "the strip stays inside the work area");
+            if(model.edge==Edge::Left) Check(strip.x==monitor.work.x,"left strip is flush");
+            if(model.edge==Edge::Right) Check(strip.right()==monitor.work.right(),"right strip is flush");
+            if(model.edge==Edge::Top) Check(strip.y==monitor.work.y,"top strip is flush");
+            if(model.edge==Edge::Bottom) Check(strip.bottom()==monitor.work.bottom(),"bottom strip is flush");
             Check(ComputeRect(model,monitor)==rects,"geometry is deterministic");
         }
         Check(iterations>2500,"the fuzz actually exercised docked models");

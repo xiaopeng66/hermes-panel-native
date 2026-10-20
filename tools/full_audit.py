@@ -27,9 +27,7 @@ PROBE = os.path.join(ROOT, "build", "Debug", "geometry-probe.exe")
 
 THEMES = ["dark", "light", "slate", "carbon", "porcelain", "sand"]
 STYLES = ["beacon", "tag", "flag", "capsule"]
-# 可见胶囊尺寸；capsule 的窗口每边还要加 SHADOW_MARGIN_DIP（外投影的透明外扩）。
 STYLE_DIP = {"beacon": (10, 76), "tag": (14, 74), "flag": (16, 58), "capsule": (30, 136)}
-SHADOW_MARGIN_DIP = {"beacon": 0, "tag": 0, "flag": 0, "capsule": 10}
 TABS = ["tabModels", "tabFallback", "tabAdd", "tabBackup", "tabSettings"]
 
 results = []
@@ -310,21 +308,17 @@ def monitor_sweep(app):
                 time.sleep(0.25)
                 dump = app.dump()
                 strip = dump["strip"]
-                # 窗口 = 可见挂件 + 2×投影外边（胶囊才有）。
-                margin = scale_dip(SHADOW_MARGIN_DIP[style], dpi)
-                expected_w = scale_dip(dip_w, dpi) + 2 * margin
-                expected_h = scale_dip(dip_h, dpi) + 2 * margin
+                expected_w = scale_dip(dip_w, dpi)
+                expected_h = scale_dip(dip_h, dpi)
                 if edge in (3, 4):
                     expected_w, expected_h = expected_h, expected_w
                 ok = (strip[2] == expected_w and strip[3] == expected_h
                       and dump["stripVisible"] and not dump["panelVisible"])
-                flush = {1: strip[0] + margin == work[0],
-                         2: strip[0] + strip[2] - margin == work[0] + work[2],
-                         3: strip[1] + margin == work[1],
-                         4: strip[1] + strip[3] - margin == work[1] + work[3]}[edge]
-                inside = (strip[0] + margin >= work[0] - 1 and strip[1] + margin >= work[1] - 1
-                          and strip[0] + strip[2] - margin <= work[0] + work[2] + 1
-                          and strip[1] + strip[3] - margin <= work[1] + work[3] + 1)
+                flush = {1: strip[0] == work[0], 2: strip[0] + strip[2] == work[0] + work[2],
+                         3: strip[1] == work[1], 4: strip[1] + strip[3] == work[1] + work[3]}[edge]
+                inside = (strip[0] >= work[0] - 1 and strip[1] >= work[1] - 1
+                          and strip[0] + strip[2] <= work[0] + work[2] + 1
+                          and strip[1] + strip[3] <= work[1] + work[3] + 1)
                 check("widget %s @%s dpi%d: size" % (style, name, dpi), ok, strip)
                 check("widget %s @%s dpi%d: flush+inside" % (style, name, dpi), flush and inside, strip)
     app.pipe({"command": "configure", "widgetStyle": "beacon"})

@@ -79,10 +79,6 @@ Size TierSize(Tier tier, unsigned dpi);
 Size TierSize(const GeometryModel& model, unsigned dpi);
 // 挂件尺寸（DIP → 像素）：竖边高、横边宽；贴边那一侧不额外留厚度。
 Size WidgetSize(WidgetStyle style, Edge edge, unsigned dpi);
-// 胶囊的透明外扩边（DIP）：专门留给外投影。窗口比可见胶囊每边大这么多，
-// 贴边时窗口会有一部分在屏幕外（可见部分仍然贴屏幕边）。
-int StripShadowMarginDip(WidgetStyle style);
-int StripShadowMargin(WidgetStyle style,unsigned dpi);
 // 挂件形状参数（像素）：绘制（D2D 几何掩码）与命中（GDI 区域）共用，避免两套常量漂移。
 struct WidgetMetrics {
     int radius=0;   // 圆角

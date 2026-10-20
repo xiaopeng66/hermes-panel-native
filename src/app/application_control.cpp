@@ -443,13 +443,6 @@ Json Application::Command(const Json& request) {
         if(state_==State::Collapsed) RenderStrip();
         return Dump();
     }
-    if(command=="strip-shot") {
-        // 排障/门禁：把贴条的分层位图原样存盘（含 alpha），不依赖屏幕抓取。
-        if(!strip_) throw std::invalid_argument("strip-shot requires a strip");
-        const auto path=Widen(request.value("path",std::string("strip.bmp")));
-        const bool ok=stripContext_.surface.SaveLayeredBmp(path);
-        return {{"saved",ok},{"path",request.value("path",std::string("strip.bmp"))}};
-    }
     if(command=="state") return Dump();
     if(command=="process") {
         // 全量审查指标：资源泄漏（GDI/USER/句柄/线程）、内存与 CPU 时间。门禁按轮次采样比较。

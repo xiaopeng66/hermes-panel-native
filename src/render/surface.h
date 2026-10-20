@@ -31,8 +31,6 @@ public:
     int BackdropWidth() const { return backdropWidth_; }
     int BackdropHeight() const { return backdropHeight_; }
     unsigned BackdropGeneration() const { return backdropGeneration_; }
-    // 调试：把当前分层位图（含 alpha）写成 BMP，供门禁/排障直观看渲染结果。
-    bool SaveLayeredBmp(const std::wstring& path) const;
     // 门禁诊断：缓存快照的平均色（0x00RRGGBB）。黑玻璃/白玻璃对照实验用。
     unsigned BackdropMean() const;
     // 诊断：模糊后的快照还剩多少高频（相邻像素平均差，0..255）。玻璃"像噪点"时用它判断

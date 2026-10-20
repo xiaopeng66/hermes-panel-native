@@ -633,19 +633,16 @@ bool Application::HitStripShape(POINT client) const {
     if(width<=0||height<=0) return false;
     if(client.x<0||client.y<0||client.x>=width||client.y>=height) return false;
     const auto metrics=WidgetMetricsFor(model_.widget,monitor_.geometry.dpi);
-    // 胶囊窗口每边多出 margin 专门画投影：命中只在可见胶囊上，margin 不吃鼠标。
-    const int margin=StripShadowMargin(model_.widget,monitor_.geometry.dpi);
-    client.x-=margin;
-    client.y-=margin;
     // canonical → 窗口坐标（与渲染的旋转换算一致）：x 从贴边侧指向桌面，y 沿贴边方向。
+    // 浮起胶囊没有贴边，窗口就是 canonical 方向（竖条）。
     const bool vertical=model_.edge==Edge::Left||model_.edge==Edge::Right||model_.edge==Edge::None;
-    const int cw=(vertical?width:height)-2*margin,ch=(vertical?height:width)-2*margin;
+    const int cw=vertical?width:height,ch=vertical?height:width;
     const auto map=[&](int x,int y) -> POINT {
         switch(model_.edge) {
-        case Edge::Right: return {width-margin-x,height-margin-y};
+        case Edge::Right: return {width-x,height-y};
         case Edge::Top: return {width/2-(y-ch/2),height/2+(x-cw/2)};
         case Edge::Bottom: return {width/2+(y-ch/2),height/2-(x-cw/2)};
-        default: return {x+margin,y+margin};
+        default: return {x,y};
         }
     };
     const auto polygon=[&](std::initializer_list<POINT> points) {
@@ -1277,11 +1274,7 @@ void Application::PositionHoverCard() {
     const int contentDip=62+20*static_cast<int>(view.hoverCard.rows.size())
         +(view.hoverCard.note.empty()?0:20)+10;
     const int height=ScaleDip(contentDip,dpi);
-    // 悬停卡贴着**可见胶囊**放（窗口比它每边大 margin，直接用它会把卡推远）。
-    const auto windowRect=GeometryController::Read(strip_);
-    const int margin=StripShadowMargin(model_.widget,dpi);
-    const auto stripRect=Rect{windowRect.x+margin,windowRect.y+margin,
-        windowRect.width-2*margin,windowRect.height-2*margin};
+    const auto stripRect=GeometryController::Read(strip_);
     const auto card=HoverCardRect(stripRect,model_.edge,monitor_.geometry.work,width,height,
         ScaleDip(8,dpi));
     SetWindowPos(hoverCard_,HWND_TOPMOST,card.x,card.y,card.width,card.height,SWP_NOACTIVATE);
