@@ -78,9 +78,16 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
         model_.anchor=stored.anchor;
         model_.floating=stored.floating;
         model_.heightDip=stored.heightDip;
-        // 浮起的胶囊：收起态没有贴边，位置单独持久化（与浮动面板的 floating 区分开）。
-        model_.stripFloating=stored.stripFloat;
-        model_.stripFloatingPos=stored.stripFloatPos;
+        // v1.8 的"浮起胶囊"已废弃（松手必须回贴边）：旧设置里残留的 stripFloat 在这里
+        // 折算成离它最近的边，用户升级后第一次启动就回到贴着边的收起态。
+        if(stored.stripFloat) {
+            const auto widget=WidgetSize(WidgetStyleFromName(stored.widgetStyle),Edge::Left,
+                monitor_.geometry.dpi);
+            const auto rect=Rect{stored.stripFloatPos.x,stored.stripFloatPos.y,widget.width,widget.height};
+            model_.edge=NearestEdge(rect,monitor_.geometry);
+            model_.anchor=model_.edge==Edge::Left||model_.edge==Edge::Right
+                ?rect.y:rect.x;
+        }
         stored_=stored;
         // G1：贴边挂件样式在创建窗口前就要定下来（ComputeRect 用它算 strip 尺寸）。
         model_.widget=WidgetStyleFromName(stored.widgetStyle);
@@ -140,10 +147,7 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     geometry_.Attach(panel_,strip_,log_);
     // The persisted presentation decides what the user sees at startup: a docked panel comes back as
     // the collapsed strip, exactly like the tray "show" path (DESIGN §5.2 row 1, §6.5 step 5).
-    // 浮起胶囊（edge=None + stripFloat）启动后仍是收起态；只有浮动面板才是 Floating。
-    state_=model_.edge==Edge::None
-        ?(model_.stripFloating?State::Collapsed:State::Floating)
-        :State::Collapsed;
+    state_=model_.edge==Edge::None?State::Floating:State::Collapsed;
     geometry_.Place(model_,monitor_.geometry,state_,"startup");
     geometry_.Visibility(state_);
     geometry_.Validate(model_,monitor_.geometry,state_);
@@ -707,7 +711,9 @@ void Application::RenderStrip() {
         }
         // 玻璃快照只在代次变化时记一行：真机上"抓没抓到、抓到了什么"必须能从日志判断
         // （真机 2026-10-20 报"玻璃像噪点"，就是靠这行定位到快照缺失的）。
-        if(log_&&view.backdrop.generation!=loggedBackdropGeneration_) {
+        // 拖动中的帧没有快照（generation=0）：那一帧不记日志，否则会刷出误导性的
+        // "size=0x0" 和上一轮残留的 mean/noise（诊断日志只在真的抓到新快照时写一行）。
+        if(log_&&view.backdrop.pixels&&view.backdrop.generation!=loggedBackdropGeneration_) {
             loggedBackdropGeneration_=view.backdrop.generation;
             log_->Info("paint",std::string("strip backdrop gen=")
                 +std::to_string(view.backdrop.generation)+" size="
@@ -740,9 +746,7 @@ void Application::Hide() {
 }
 void Application::DockNearest() {
     if(model_.edge!=Edge::None || state_==State::Hidden) return;
-    // 浮起胶囊（面板隐藏）按贴条自己的位置选边，否则会拿上一次的面板位置去贴边。
-    const bool fromStrip=state_==State::Collapsed&&model_.stripFloating;
-    const auto rect=GeometryController::Read(fromStrip?strip_:panel_);
+    const auto rect=GeometryController::Read(panel_);
     monitor_=MonitorAt(CenterOf(rect));
     const auto edge=NearestEdge(rect,monitor_.geometry);
     if(edge==Edge::None) return;
@@ -757,18 +761,14 @@ void Application::DockNearest() {
         if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
     }
     state_=NextState(state_,Event::DropDocked,edge);
-    model_.stripFloating=false;
     geometry_.Place(model_,monitor_.geometry,state_,"dock");
     ApplyState("dock",previous);
     PersistSettings();
 }
 void Application::Undock() {
-    // 浮起胶囊（edge=None + stripFloating）也响应「解除贴边」：展开成浮动面板。
-    // 以前 edge==None 时直接 return，浮起胶囊的托盘「解除贴边」就成了死按钮。
-    if(model_.edge==Edge::None&&!model_.stripFloating) return;
+    if(model_.edge==Edge::None) return;
     const auto previous=state_;
     model_.edge=Edge::None;
-    model_.stripFloating=false;
     // 胶囊浮起过渡：贴边直角 → 完整椭圆（DESIGN v1.8 真机反馈）。
     if(stored_.widgetStyle=="capsule") {
         capsuleDocked_=false;
@@ -800,19 +800,8 @@ void Application::PointerEnteredStrip() {
     ++stripMoves_;
     HideHoverCard();
     if(dragging_) return;
-    if(state_!=State::Collapsed) return;
+    if(state_!=State::Collapsed || model_.edge==Edge::None) return;
     const auto previous=state_;
-    if(model_.edge==Edge::None) {
-        // 浮起胶囊：面板在胶囊旁边展开（夹进工作区）。收起后胶囊回到浮起位置。
-        RECT window{};
-        if(GetWindowRect(strip_,&window)) {
-            monitor_=ReadMonitor(MonitorFromWindow(strip_,MONITOR_DEFAULTTONEAREST));
-            const auto size=TierSize(model_,monitor_.geometry.dpi);
-            const auto dpi=monitor_.geometry.dpi;
-            model_.floating=ClampFloating(
-                {window.left+ScaleDip(24,dpi),window.top-ScaleDip(24,dpi)},size,monitor_.geometry.work);
-        }
-    }
     state_=NextState(state_,Event::EnterStrip,model_.edge);
     ApplyState("strip-click",previous);
     if(state_!=State::Expanded) return;
@@ -1173,14 +1162,21 @@ void Application::UpdateStripDrag(POINT screenPoint) {
     const int x=std::clamp<int>(static_cast<int>(screenPoint.x)-stripDragOffset_.x,work.x,maxX);
     const int y=std::clamp<int>(static_cast<int>(screenPoint.y)-stripDragOffset_.y,work.y,maxY);
     SetWindowPos(strip_,nullptr,x,y,width,height,SWP_NOACTIVATE|SWP_NOZORDER);
-    // 拖动中的胶囊形态：离最近边越远越圆（0=完整椭圆），贴边时收直。每帧重绘，
-    // 松手后由 kCapsuleDockMs 的过渡动画接上最终状态（贴边直角 / 浮起椭圆）。
+    // 拖动中的胶囊形态：离最近边越远越圆（0=完整椭圆），贴边时收直。松手后由
+    // kCapsuleDockMs 的过渡动画收回贴边直角（落点永远吸附最近边）。
     int nearest=std::min(x-work.x,work.right()-(x+width));
     nearest=std::min(nearest,std::min(y-work.y,work.bottom()-(y+height)));
     const int band=ScaleDip(96,target.geometry.dpi);
     capsuleDockOverride_=1.0f-std::clamp(static_cast<float>(nearest)
         /static_cast<float>(std::max(1,band)),0.0f,1.0f);
-    RenderStrip();
+    // 重绘限 60Hz：鼠标 125/250Hz 上报时，逐条 WM_MOUSEMOVE 整帧重绘会让 D2D 每帧建
+    // 十来个 COM 对象（渐变/路径），既浪费 CPU，也把驱动放到最高频的分配/销毁节奏上。
+    // 位置本身仍然逐条跟手（SetWindowPos 在上面无条件执行）。
+    const auto now=GetTickCount64();
+    if(now-stripDragRenderTick_>=16) {
+        stripDragRenderTick_=now;
+        RenderStrip();
+    }
 }
 void Application::CommitStripDrop() {
     if(!stripDragging_) { stripPressed_=false;return; }
@@ -1193,35 +1189,17 @@ void Application::CommitStripDrop() {
     const int centreX=window.left+(window.right-window.left)/2;
     const int centreY=window.top+(window.bottom-window.top)/2;
     monitor_=ReadMonitor(MonitorFromWindow(strip_,MONITOR_DEFAULTTONEAREST));
-    const auto& work=monitor_.geometry.work;
-    const auto dpi=monitor_.geometry.dpi;
-    // 离四边都超过 48 DIP → 真正浮起（完整椭圆，停在原地）；否则照旧吸附到最近边。
-    // 以前拖到屏幕中央也会被吸回边上，所以用户永远看不到椭圆形态。
-    int nearest=std::min(static_cast<int>(window.left)-work.x,
-        work.right()-static_cast<int>(window.right));
-    nearest=std::min(nearest,std::min(static_cast<int>(window.top)-work.y,
-        work.bottom()-static_cast<int>(window.bottom)));
-    const bool floatNow=nearest>ScaleDip(48,dpi);
-    if(floatNow) {
-        model_.edge=Edge::None;
-        model_.stripFloating=true;
-        model_.stripFloatingPos={window.left,window.top};
-    } else {
-        // 挂件沿边移动 → 展开后的面板以挂件中心为锚点；夹进工作区。
-        const auto snap=StripSnapDecision({centreX,centreY},TierSize(model_,monitor_.geometry.dpi),
-            monitor_.geometry);
-        model_.edge=snap.edge;
-        model_.anchor=snap.anchor;
-        model_.stripFloating=false;
-    }
+    // 松手**永远回贴边**（真机 2026-10-20 纠正）：拖到中间只是拖动中的椭圆形态，
+    // 不是"浮起并留在中间"。落点按挂件中心选最近的边，展开面板的锚点跟着夹进工作区。
+    const auto snap=StripSnapDecision({centreX,centreY},TierSize(model_,monitor_.geometry.dpi),
+        monitor_.geometry);
+    model_.edge=snap.edge;
+    model_.anchor=snap.anchor;
     capsuleDockOverride_=-1.0f;
-    // 胶囊落点动画：贴上边（直角）↔ 浮起（完整椭圆）——按最终是否贴边切换。
-    if(stored_.widgetStyle=="capsule") {
-        const bool nowDocked=!floatNow;
-        if(nowDocked!=capsuleDocked_) {
-            capsuleDocked_=nowDocked;
-            if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
-        }
+    // 胶囊落点动画：拖动中的完整椭圆 → 贴边直角（240ms）。松手必贴边，目标恒为贴边。
+    if(stored_.widgetStyle=="capsule"&&!capsuleDocked_) {
+        capsuleDocked_=true;
+        if(AnimationsEnabled()) { capsuleDockStart_=GetTickCount64();KeepMotionTimer(); }
     }
     const auto previous=state_;
     state_=State::Collapsed;
@@ -1322,8 +1300,7 @@ Settings Application::SnapshotSettings() const {
     settings.floating=model_.floating;
     settings.anchor=model_.anchor;
     settings.heightDip=model_.heightDip;
-    settings.stripFloat=model_.stripFloating;
-    settings.stripFloatPos=model_.stripFloatingPos;
+    settings.stripFloat=false;          // v1.9：松手必贴边，浮起胶囊状态不再存在
     settings.monitorId=Narrow(monitor_.id);
     return settings;
 }
@@ -1735,9 +1712,7 @@ PanelViewModel Application::CurrentView() {
     // G1：收起态挂件（strip 窗口）用同一份视图绘制。
     view.widgetStyle=stored_.widgetStyle;
     view.widgetEdge=static_cast<int>(model_.edge);
-    // 浮起胶囊（edge=None）没有旋转，窗口本身就是竖条；横向边的贴条才会转置。
-    view.widgetVertical=model_.edge==Edge::Left||model_.edge==Edge::Right
-        ||model_.edge==Edge::None;
+    view.widgetVertical=model_.edge==Edge::Left||model_.edge==Edge::Right;
     view.widgetPhase=widgetPhase_;
     view.focusedFormField=FormFieldIndexOf(focusedField_);
     if(activePage_==0) {

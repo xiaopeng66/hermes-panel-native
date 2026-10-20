@@ -10,8 +10,7 @@ State NextState(State current,Event event,Edge edge) {
     case Event::Show: return edge==Edge::None?State::Floating:State::Collapsed;
     case Event::Hide: return State::Hidden;
     case Event::BeginDrag: return current==State::Hidden?State::Hidden:State::Dragging;
-    // 收起态点贴条展开：贴边条和浮起胶囊都能展开（DESIGN v1.8）。
-    case Event::EnterStrip: return current==State::Collapsed?State::Expanded:current;
+    case Event::EnterStrip: return current==State::Collapsed&&edge!=Edge::None?State::Expanded:current;
     case Event::LeaveGrace: return current==State::Expanded?State::Collapsed:current;
     case Event::Undock: return current==State::Hidden?State::Hidden:State::Floating;
     case Event::DropFloating: return current==State::Hidden?State::Hidden:State::Floating;

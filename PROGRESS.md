@@ -2654,3 +2654,20 @@ live_strip_3x.png（浮起胶囊停在主屏中央，浅磨砂平滑）；门禁
   浅色玻璃压在浅色桌面上时，单靠亮边完全看不出轮廓，深外缘把玻璃"切"出来。
 - 证据：diag/theme-{porcelain6-float,slate6}.png、live_strip_3x.png（浮起胶囊在主屏）；
   门禁 widget/motion/hover/drag/shell/state/geometry/settings 8/8。
+
+## G21 纠正贴条拖动语义 + 拖动路径加固（2026-10-20，真机）
+
+**用户纠正**：要的是"拖动时变胶囊"的动画，不是"松手停在中间"；松手必须自动贴边。
+**改动**（DESIGN v1.9）：`CommitStripDrop` 恢复无条件 `StripSnapDecision`（最近边吸附），
+胶囊松手播放 240ms 收回贴边直角；删除 `GeometryModel::stripFloating` 与相关分支
+（ComputeRect/Undock/PointerEnteredStrip/启动态）；旧设置 `stripFloat` 启动时折算成最近边。
+拖动中无快照 → 玻璃用接近不透明主题底色（不再透出桌面变成薄膜）；拖动重绘限 60Hz
+（`stripDragRenderTick_`，位置仍逐条跟手）；诊断日志不再记录无快照帧。
+
+**闪退排查**：10:58:43 实例在 11:00:43 后无结束日志、无 `crash-probe`、无 WER 事件即消失，
+与既有结论一致（外部 TerminateProcess，非访问违例）；本轮把拖动路径的高频 D2D 分配节奏
+（125/250Hz 鼠标逐条整帧重绘）压到 60Hz，属于可消除的风险面。
+
+**证据**：真实指针拖动截图 `diag/drag-mid.png`（完整椭圆、实心）/`drag-after.png`（左缘贴齐）；
+30 次随机位置拖动全部吸附到边且 `violations=0`、进程存活；`drag` 门禁 6 项中 5 项 PASS、
+真指针段因桌面被占用 SKIP（既有环境判定）。

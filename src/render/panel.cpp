@@ -348,9 +348,13 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
                 // ---- 液态玻璃（真背景 + 分层高光）----
+                // 拖动中不抓快照（窗口每帧在动，抓取要隐藏窗口→会闪）：这时用**接近不透明**
+                // 的主题底色撑住实体感，落手后重新抓取、玻璃再把桌面透出来。
+                const bool hasBackdrop=view.backdrop.pixels&&view.backdrop.width>0
+                    &&view.backdrop.height>0;
                 // ① 桌面快照（Surface 已抓取并模糊）**放大 6% 画进胶囊**：磨砂玻璃的
                 //    折射感来自"背后内容被透镜放大"，1:1 只是透明、放大才有玻璃味。
-                if(view.backdrop.pixels&&view.backdrop.width>0&&view.backdrop.height>0) {
+                if(hasBackdrop) {
                     if(!backdrop_||backdropGeneration_!=view.backdrop.generation) {
                         backdrop_.Reset();
                         const auto properties=D2D1::BitmapProperties(
@@ -382,12 +386,14 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                 }
                 // ② 玻璃底色：深色 ink 打底保对比度，再叠半透明主题渐变（受光面厚、背面薄）。
                 // 浅色主题的"压暗"要轻得多：0.34 的深底会把 porcelain 压成灰片。
-                brush_->SetColor(Fade(palette.ink,palette.light?0.22f:0.34f));
+                // 没有快照（拖动中）时整层抬到接近不透明，避免变成一层能看见桌面的薄膜。
+                const float inkAlpha=(palette.light?0.22f:0.34f)+(hasBackdrop?0.0f:0.30f);
+                brush_->SetColor(Fade(palette.ink,inkAlpha));
                 target->FillGeometry(path.Get(),brush_.Get());
                 D2D1_GRADIENT_STOP glass[3];
-                glass[0].position=0.0f; glass[0].color=Fade(palette.stripTop,0.55f);
-                glass[1].position=0.5f; glass[1].color=Fade(palette.stripTop,0.38f);
-                glass[2].position=1.0f; glass[2].color=Fade(palette.stripBottom,0.52f);
+                glass[0].position=0.0f; glass[0].color=Fade(palette.stripTop,hasBackdrop?0.55f:0.99f);
+                glass[1].position=0.5f; glass[1].color=Fade(palette.stripTop,hasBackdrop?0.38f:0.96f);
+                glass[2].position=1.0f; glass[2].color=Fade(palette.stripBottom,hasBackdrop?0.52f:0.99f);
                 Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> glassStops;
                 if(SUCCEEDED(target->CreateGradientStopCollection(glass,3,D2D1_GAMMA_2_2,
                     D2D1_EXTEND_MODE_CLAMP,&glassStops))) {
