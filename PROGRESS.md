@@ -2646,3 +2646,11 @@ dist 26f4cb61。
 **证据**：tmp/hermes-panel-native/diag/theme-{dark,porcelain4,slate4}.png；
 live_strip_3x.png（浮起胶囊停在主屏中央，浅磨砂平滑）；门禁 8/8
 （widget/motion/hover/drag/shell/state/geometry/settings）。dist 见 package 输出。
+
+### G20 追加（同轮）
+
+- 端头柔光改成**对称双端**（5 档渐变；只有一个端头亮会显得"半截塑料"）。
+- 边缘描边改**深外缘 + 亮内缘**双层（2.2px 黑 alpha 0.30/0.34，再 1.1px 亮折射线）——
+  浅色玻璃压在浅色桌面上时，单靠亮边完全看不出轮廓，深外缘把玻璃"切"出来。
+- 证据：diag/theme-{porcelain6-float,slate6}.png、live_strip_3x.png（浮起胶囊在主屏）；
+  门禁 widget/motion/hover/drag/shell/state/geometry/settings 8/8。

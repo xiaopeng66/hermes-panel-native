@@ -415,7 +415,11 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         }
                     }
                 }
-                // ④ 边缘折射线：桌面侧最亮、贴边侧衰减（1.25px 内描边）。
+                // ④ 边缘折射线：**先深后亮**的双层描边 —— 外侧一圈深色把玻璃从任何
+                //    背景下"切"出来（浅色主题压在浅色桌面上时，单靠亮边完全看不出轮廓），
+                //    内侧再一道 1.1px 的亮折射线（桌面侧最亮、贴边侧衰减）。
+                brush_->SetColor(D2D1::ColorF(0.0f,0.0f,0.0f,palette.light?0.34f:0.30f));
+                target->DrawGeometry(path.Get(),brush_.Get(),2.2f);
                 D2D1_GRADIENT_STOP rim[3];
                 rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.05f);
                 rim[1].position=0.55f; rim[1].color=Fade(palette.text,0.15f);
@@ -427,7 +431,7 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                     if(SUCCEEDED(target->CreateLinearGradientBrush(
                         D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
                             D2D1::Point2F(cw,0)),rimStops.Get(),&rimBrush))) {
-                        target->DrawGeometry(path.Get(),rimBrush.Get(),1.25f);
+                        target->DrawGeometry(path.Get(),rimBrush.Get(),1.1f);
                     }
                 }
                 // ⑤ 镜面高光：厚度方向的一条窄亮带（玻璃的"液体"弧面），竖向再补一条
@@ -446,20 +450,23 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                         target->FillGeometry(path.Get(),specularBrush.Get());
                     }
                 }
-                // ⑥ 长向顶部柔光：玻璃受光面的"高光扫过"——贴边方向顶部 2..14 DIP 的一条
-                //    斜向亮带（透明→亮→透明），随 docked 淡出（贴边时被内阴影顶掉大半）。
+                // ⑥ 长向端头柔光：玻璃管两端的圆头会各自接住一点光（贴边时整体减淡，
+                //    免得和内阴影打架）。只有一个端头亮会显得"半截塑料"，对称才像液体。
                 {
-                    D2D1_GRADIENT_STOP sweep[3];
-                    sweep[0].position=0.0f; sweep[0].color=Fade(palette.text,0.0f);
-                    sweep[1].position=0.5f; sweep[1].color=Fade(palette.text,0.10f*(1.0f-docked*0.55f));
-                    sweep[2].position=1.0f; sweep[2].color=Fade(palette.text,0.0f);
+                    const float endAlpha=0.13f*(1.0f-docked*0.55f);
+                    D2D1_GRADIENT_STOP sweep[5];
+                    sweep[0].position=0.0f; sweep[0].color=Fade(palette.text,endAlpha);
+                    sweep[1].position=0.12f; sweep[1].color=Fade(palette.text,0.0f);
+                    sweep[2].position=0.5f; sweep[2].color=Fade(palette.text,0.0f);
+                    sweep[3].position=0.88f; sweep[3].color=Fade(palette.text,0.0f);
+                    sweep[4].position=1.0f; sweep[4].color=Fade(palette.text,endAlpha);
                     Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sweepStops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,3,D2D1_GAMMA_2_2,
+                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,5,D2D1_GAMMA_2_2,
                         D2D1_EXTEND_MODE_CLAMP,&sweepStops))) {
                         Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sweepBrush;
                         if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,Dip(2,scale)),
-                                D2D1::Point2F(0,Dip(16,scale))),sweepStops.Get(),&sweepBrush))) {
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                                D2D1::Point2F(0,ch)),sweepStops.Get(),&sweepBrush))) {
                             target->FillGeometry(path.Get(),sweepBrush.Get());
                         }
                     }
