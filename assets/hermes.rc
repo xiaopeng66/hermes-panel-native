@@ -1,5 +1,35 @@
-// Hermes 模型面板 · 资源脚本：只放应用图标（logo = 标题栏那枚 mark，见 tools/make_icon.py）。
+﻿// Hermes 模型面板 · 资源脚本：应用图标（logo = 标题栏那枚 mark，见 tools/make_icon.py）+ 版本信息。
 // ID 1 是 shell 取用的「程序图标」：Explorer/任务栏读 exe 里的第一个 ICON 资源。
+// 版本号写在三处且必须一致：这里、CMakeLists 的 project(VERSION)、src/app/app.manifest；
+// tools/package.ps1 打印的 version 就是从这里读出来的 FileVersion。
+// 存成 UTF-8 with BOM：rc.exe 靠 BOM 判断源文件编码，否则中文会被当 ANSI 读成乱码。
 #include <windows.h>
 
 1 ICON "hermes.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "Hermes 模型面板（原生版）"
+            VALUE "FileVersion", "1.1.0.0"
+            VALUE "InternalName", "HermesModelPanelNative"
+            VALUE "OriginalFilename", "HermesModelPanelNative.exe"
+            VALUE "ProductName", "Hermes 模型面板"
+            VALUE "ProductVersion", "1.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

@@ -39,6 +39,21 @@ std::string Narrow(const std::wstring& value) {
 }
 std::string Evidence(const std::string& name) { return g_evidence+"/"+name; }
 
+// 证据目录由 --evidence 传进来（CMake 的 A_EVIDENCE）。tools/e2e.ps1 会先建它，但直接跑 ctest
+// 时没人建：目录不在，几何探针的采样文件写不出来，A7 就以 "too few probe samples: 0" 失败
+// （2026-10-25 清理 tmp 后实测）。门禁自己把整条路径建出来，两种跑法都不再依赖外部准备。
+void EnsureDirectoryTree(const std::string& path) {
+    std::wstring wide=Widen(path);
+    for(auto& character:wide) if(character==L'/') character=L'\\';
+    for(std::size_t i=1;i<=wide.size();++i) {
+        if(i<wide.size()&&wide[i]!=L'\\') continue;
+        const auto prefix=wide.substr(0,i);
+        const bool driveOnly=prefix.size()==2&&prefix[1]==L':';
+        if(!driveOnly) CreateDirectoryW(prefix.c_str(),nullptr);
+        if(i==wide.size()) break;
+    }
+}
+
 void StartApp() {
     // 验收一律用假助手夹具（GOAL 的硬约束）：A 场景只考外壳几何，真 WSL 的冷启动/状态翻转会在
     // 拖拽中途多写一次几何（离线页 640 DIP ↔ 模型页 634 DIP），把"每次拖拽一次写"误判成失败。
@@ -1862,6 +1877,7 @@ int wmain(int argc,wchar_t** argv) {
         return 2;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    EnsureDirectoryTree(g_evidence);
     g_instance=L"a-"+Widen(scenario)+L"-"+std::to_wstring(GetCurrentProcessId());
     try {
         StartApp();
