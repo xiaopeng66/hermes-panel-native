@@ -12,7 +12,9 @@ RENAMES = [
     ("BalancePanelNative", "HermesModelPanelNative"),
 ]
 
-SUFFIXES = {".cpp", ".h", ".txt", ".ps1", ".md", ".cmake"}
+# .manifest/.rc 原来漏在这里：应用清单的 assemblyIdentity 名（BalancePanelNative）就没被改到，
+# 一直到 2026-10-25 整理时才手工补上。保留这行是为了下次改名不再漏。
+SUFFIXES = {".cpp", ".h", ".txt", ".ps1", ".md", ".cmake", ".manifest", ".rc"}
 
 
 def main() -> None:

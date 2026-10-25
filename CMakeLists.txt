@@ -20,9 +20,12 @@ target_link_options(hermes-panel-native PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPU
 target_link_options(hermes-panel-native PRIVATE "/MAP:$<TARGET_FILE_DIR:hermes-panel-native>/app.map" "/MAPINFO:EXPORTS")
 # DESIGN §8: the control plane (named pipe + COPYDATA commands) exists in debug builds only, so a
 # shipped release cannot be driven by another local process.
+# 宏名是 HERMES_CONTROL_PLANE（与 src/app/control_plane.h 一致）：以前这里还在定义旧名
+# BALANCE_CONTROL_PLANE，源码根本不读它——Debug/Release 是否带控制面实际由 control_plane.h
+# 里的 _DEBUG 兜底决定。名字对上之后，这份按配置的定义才是真正生效的那一处。
 target_compile_definitions(hermes-panel-native PRIVATE
-    $<$<CONFIG:Debug>:BALANCE_CONTROL_PLANE=1>
-    $<$<NOT:$<CONFIG:Debug>>:BALANCE_CONTROL_PLANE=0>)
+    $<$<CONFIG:Debug>:HERMES_CONTROL_PLANE=1>
+    $<$<NOT:$<CONFIG:Debug>>:HERMES_CONTROL_PLANE=0>)
 
 add_library(hermes-geometry STATIC src/core/geometry.cpp)
 target_include_directories(hermes-geometry PUBLIC src)

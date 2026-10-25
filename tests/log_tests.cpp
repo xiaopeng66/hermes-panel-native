@@ -36,7 +36,7 @@ int main() {
 
     wchar_t directory[MAX_PATH]{};
     GetTempPathW(MAX_PATH,directory);
-    const std::wstring path=std::wstring(directory)+L"balance-panel-log-test.log";
+    const std::wstring path=std::wstring(directory)+L"hermes-panel-log-test.log";
     DeleteFileW(path.c_str());
     {
         hermes::Log log(path);
@@ -59,7 +59,7 @@ int main() {
     DeleteFileW(path.c_str());
     // 日志轮转：文件超过 5 MB 时把旧内容挪到 .1，新日志从空开始（只保留一份旧日志）。
     {
-        const std::wstring rotated=std::wstring(directory)+L"balance-panel-log-rotate.log";
+        const std::wstring rotated=std::wstring(directory)+L"hermes-panel-log-rotate.log";
         DeleteFileW(rotated.c_str());
         DeleteFileW((rotated+L".1").c_str());
         {

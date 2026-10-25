@@ -99,7 +99,7 @@ inline bool IsEnvironmentInterference(const std::exception& error) {
     const std::string what=error.what();
     return what.find("cursor interference")!=std::string::npos
         ||what.find("the desktop is in use")!=std::string::npos
-        // 用户自己的置顶悬浮面板（例如 BalancePanelNative）压住测试点位：环境属性。
+        // 用户自己的置顶悬浮面板（例如本面板、其它 topmost 窗口）压住测试点位：环境属性。
         ||what.find("covered by")!=std::string::npos
         // 用户在测试期间按着鼠标拖动别的窗口：capture 属于别人的 HWND，也是环境属性。
         ||what.find("another window holds the mouse capture")!=std::string::npos
