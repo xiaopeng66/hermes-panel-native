@@ -2,6 +2,7 @@
 build/
 build-asan/
 dist/
+dist-live/
 *.obj
 *.pdb
 *.ilk

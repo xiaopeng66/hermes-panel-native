@@ -17,43 +17,43 @@ int main() {
     const Monitor normal{{0, 0, 1920, 1080}, {0, 0, 1920, 1040}, 96};
     struct RectCase { const char* name; GeometryModel model; Monitor monitor; WindowRects expected; };
     const std::vector<RectCase> cases{
-        {"R01 floating origin preserved", {Edge::None, Tier::Full, 0, {519, 514}}, normal, {{519,514,384,634}, std::nullopt}},
-        {"R02 left dock", {Edge::Left, Tier::Full, 123}, normal, {{0,123,384,634}, Rect{0,402,10,76}}},
-        {"R03 right dock", {Edge::Right, Tier::Full, 123}, normal, {{1536,123,384,634}, Rect{1910,402,10,76}}},
-        {"R04 top dock", {Edge::Top, Tier::Full, 253}, normal, {{253,0,384,634}, Rect{407,0,76,10}}},
-        {"R05 bottom dock", {Edge::Bottom, Tier::Full, 253}, normal, {{253,406,384,634}, Rect{407,1030,76,10}}},
-        {"R06 left anchor clamps low", {Edge::Left, Tier::Full, -90}, normal, {{0,0,384,634}, Rect{0,279,10,76}}},
-        {"R07 right anchor clamps high", {Edge::Right, Tier::Full, 1900}, normal, {{1536,406,384,634}, Rect{1910,685,10,76}}},
-        {"R08 top anchor clamps low", {Edge::Top, Tier::Full, -10}, normal, {{0,0,384,634}, Rect{154,0,76,10}}},
-        {"R09 bottom anchor clamps high", {Edge::Bottom, Tier::Full, 1919}, normal, {{1536,406,384,634}, Rect{1690,1030,76,10}}},
+        // R01：浮动窗口在**工作区内**时位置不变（origin preserved）。原来的夹具 y=514 会让
+        // 面板底边 1148 压到工作区底 1040 之外（也就是压在底部任务栏上）——那是旧实现
+        // "浮动不做夹取"的产物，2026-10-24 修正后必须落进 work。
+        {"R01 floating origin preserved", {Edge::None, Tier::Full, 0, {519, 406}}, normal, {{519,406,384,634}, std::nullopt}},
+        {"R01b floating clamps into the work area", {Edge::None, Tier::Full, 0, {519, 514}}, normal, {{519,406,384,634}, std::nullopt}},
+        {"R02 left dock", {Edge::Left, Tier::Full, 123}, normal, {{0,123,384,634}, Rect{0,372,30,136}}},
+        {"R03 right dock", {Edge::Right, Tier::Full, 123}, normal, {{1536,123,384,634}, Rect{1890,372,30,136}}},
+        {"R04 top dock", {Edge::Top, Tier::Full, 253}, normal, {{253,0,384,634}, Rect{377,0,136,30}}},
+        {"R05 bottom dock", {Edge::Bottom, Tier::Full, 253}, normal, {{253,406,384,634}, Rect{377,1010,136,30}}},
+        {"R06 left anchor clamps low", {Edge::Left, Tier::Full, -90}, normal, {{0,0,384,634}, Rect{0,249,30,136}}},
+        {"R07 right anchor clamps high", {Edge::Right, Tier::Full, 1900}, normal, {{1536,406,384,634}, Rect{1890,655,30,136}}},
+        {"R08 top anchor clamps low", {Edge::Top, Tier::Full, -10}, normal, {{0,0,384,634}, Rect{124,0,136,30}}},
+        {"R09 bottom anchor clamps high", {Edge::Bottom, Tier::Full, 1919}, normal, {{1536,406,384,634}, Rect{1660,1010,136,30}}},
         {"R10 compact keeps floating origin", {Edge::None, Tier::Compact, 0, {519,514}}, normal, {{519,514,384,152}, std::nullopt}},
-        {"R11 compact bottom remains exact", {Edge::Bottom, Tier::Compact, 253}, normal, {{253,888,384,152}, Rect{407,1030,76,10}}},
-        {"R12 negative monitor left", {Edge::Left, Tier::Full, -720}, {{-1920,-800,1920,1080},{-1920,-800,1920,1040},96}, {{-1920,-720,384,634}, Rect{-1920,-441,10,76}}},
-        {"R13 internal right edge stays on owner monitor", {Edge::Right, Tier::Full, 70}, {{-1920,0,1920,1080},{-1920,0,1920,1040},96}, {{-384,70,384,634}, Rect{-10,349,10,76}}},
-        {"offset work area left taskbar", {Edge::Left, Tier::Full, 0}, {{0,0,1920,1080},{48,32,1872,1008},96}, {{48,32,384,634}, Rect{48,311,10,76}}},
-        {"126 dpi full rounding", {Edge::Right, Tier::Full, 121}, {{0,0,2560,1440},{0,0,2560,1380},126}, {{2056,121,504,832}, Rect{2547,487,13,100}}},
-        {"202 dpi compact rounding", {Edge::Bottom, Tier::Compact, 401}, {{2560,-500,2560,1440},{2560,-500,2560,1400},202}, {{2560,580,808,320}, Rect{2884,879,160,21}}},
-        {"portrait bottom", {Edge::Bottom, Tier::Full, 700}, {{-1080,0,1080,1920},{-1080,0,1080,1880},96}, {{-384,1246,384,634}, Rect{-230,1870,76,10}}},
-        {"work area smaller than panel clamps safely", {Edge::Left, Tier::Full, 400}, {{0,0,320,200},{0,20,320,180},96}, {{0,20,384,634}, Rect{0,124,10,76}}}
+        {"R11 compact bottom remains exact", {Edge::Bottom, Tier::Compact, 253}, normal, {{253,888,384,152}, Rect{377,1010,136,30}}},
+        {"R12 negative monitor left", {Edge::Left, Tier::Full, -720}, {{-1920,-800,1920,1080},{-1920,-800,1920,1040},96}, {{-1920,-720,384,634}, Rect{-1920,-471,30,136}}},
+        {"R13 internal right edge stays on owner monitor", {Edge::Right, Tier::Full, 70}, {{-1920,0,1920,1080},{-1920,0,1920,1040},96}, {{-384,70,384,634}, Rect{-30,319,30,136}}},
+        {"offset work area left taskbar", {Edge::Left, Tier::Full, 0}, {{0,0,1920,1080},{48,32,1872,1008},96}, {{48,32,384,634}, Rect{48,281,30,136}}},
+        {"126 dpi full rounding", {Edge::Right, Tier::Full, 121}, {{0,0,2560,1440},{0,0,2560,1380},126}, {{2056,121,504,832}, Rect{2521,448,39,179}}},
+        {"202 dpi compact rounding", {Edge::Bottom, Tier::Compact, 401}, {{2560,-500,2560,1440},{2560,-500,2560,1400},202}, {{2560,580,808,320}, Rect{2821,837,286,63}}},
+        {"portrait bottom", {Edge::Bottom, Tier::Full, 700}, {{-1080,0,1080,1920},{-1080,0,1080,1880},96}, {{-384,1246,384,634}, Rect{-260,1850,136,30}}},
+        {"work area smaller than panel clamps safely", {Edge::Left, Tier::Full, 400}, {{0,0,320,200},{0,20,320,180},96}, {{0,20,384,634}, Rect{0,64,30,136}}}
     };
     for (const auto& test : cases) Check(ComputeRect(test.model, test.monitor) == test.expected, test.name);
 
-    // G11 挂件尺寸表（DIP → 像素）：竖边高、横边宽；三套窄型（真机要求"不占地方"）。
-    Check(WidgetSize(WidgetStyle::Beacon,Edge::Left,96) == Size{10,76}, "beacon vertical size");
-    Check(WidgetSize(WidgetStyle::Beacon,Edge::Top,96) == Size{76,10}, "beacon horizontal size");
+    // G11 挂件尺寸表（DIP → 像素）：竖边高、横边宽；两套现役样式（信标/旗标已删）。
     Check(WidgetSize(WidgetStyle::Tag,Edge::Right,96) == Size{14,74}, "tag size");
-    Check(WidgetSize(WidgetStyle::Flag,Edge::Bottom,96) == Size{58,16}, "flag horizontal size");
     Check(WidgetSize(WidgetStyle::Capsule,Edge::Left,96) == Size{30,136}, "capsule vertical size");
     Check(WidgetSize(WidgetStyle::Capsule,Edge::Top,96) == Size{136,30}, "capsule horizontal size");
     Check(WidgetSize(WidgetStyle::Tag,Edge::Left,126) == Size{18,97}, "tag scales with dpi");
-    Check(WidgetMetricsFor(WidgetStyle::Beacon,96).gap==3
-        &&WidgetMetricsFor(WidgetStyle::Flag,96).tail==12
+    Check(WidgetMetricsFor(WidgetStyle::Tag,96).spine==3
+        &&WidgetMetricsFor(WidgetStyle::Capsule,96).radius==15
         &&WidgetMetricsFor(WidgetStyle::Tag,192).spine==6,"widget metrics scale with dpi");
     {
         // 每种样式都：贴边侧逐像素贴住工作区，整块落在工作区内。
         const GeometryModel base{Edge::Left,Tier::Full,123};
-        const std::vector<WidgetStyle> styles{WidgetStyle::Beacon,WidgetStyle::Tag,WidgetStyle::Flag,
-            WidgetStyle::Capsule};
+        const std::vector<WidgetStyle> styles{WidgetStyle::Tag,WidgetStyle::Capsule};
         for(const auto style:styles) {
             for(const auto edge:{Edge::Left,Edge::Right,Edge::Top,Edge::Bottom}) {
                 auto model=base;
@@ -79,11 +79,12 @@ int main() {
         Check(badDpi,"ScaleDip rejects a zero DPI");
     }
     Check(std::string(WidgetStyleName(WidgetStyle::Tag))=="tag"
-        &&WidgetStyleFromName("flag")==WidgetStyle::Flag
-        &&WidgetStyleFromName("halo")==WidgetStyle::Tag          // 旧值映射
+        &&WidgetStyleFromName("flag")==WidgetStyle::Capsule        // 已删样式就近落到胶囊
+        &&WidgetStyleFromName("halo")==WidgetStyle::Tag            // 旧值映射
         &&WidgetStyleFromName("capsule")==WidgetStyle::Capsule
-        &&WidgetStyleFromName("pulse")==WidgetStyle::Beacon
-        &&WidgetStyleFromName("nope")==WidgetStyle::Beacon,"widget style name round trip");
+        &&WidgetStyleFromName("pulse")==WidgetStyle::Capsule
+        &&WidgetStyleFromName("beacon")==WidgetStyle::Capsule
+        &&WidgetStyleFromName("nope")==WidgetStyle::Capsule,"widget style name round trip");
 
     // 贴边判定**只看窗口**（真机反馈）：final/start 两个矩形决定一切，鼠标位置不参与。
     // `start` 是这次拖拽开始时的窗口矩形 —— 越界那一档要求"拖拽前还在工作区内"，
@@ -164,7 +165,7 @@ int main() {
             model.tier=randomInt(0,1)==0?Tier::Full:Tier::Compact;
             model.anchor=randomInt(-6000,6000);
             model.floating={randomInt(-4000,4000),randomInt(-4000,4000)};
-            model.widget=static_cast<WidgetStyle>(randomInt(0,3));
+            model.widget=static_cast<WidgetStyle>(randomInt(0,1));
             const auto rects=ComputeRect(model,monitor);
             if(model.edge==Edge::None) {
                 Check(!rects.strip.has_value(),"floating has no strip");
@@ -239,6 +240,42 @@ int main() {
                 "the right-edge card sits to the left of the strip");
             Check(HoverCardRect(Rect{100,1000,170,38},Edge::Top,work,315,183,10).y==1080-183,
                 "a card that would leave the work area is clamped");
+        }
+        // 任务栏在**左侧 / 上方**（侧边任务栏）：贴边必须贴工作区边，不是屏幕边。
+        // 这是之前完全没覆盖的几何场景——真实机器只有底部任务栏，侧边任务栏的坐标全靠推理。
+        {
+            // 左任务栏 80px：work = {80,0,1840,1080}
+            const Monitor leftBar{Rect{0,0,1920,1080},Rect{80,0,1840,1080},96};
+            GeometryModel docked;
+            docked.edge=Edge::Left;
+            docked.tier=Tier::Full;
+            docked.heightDip=634;
+            docked.anchor=200;
+            const auto left=ComputeRect(docked,leftBar);
+            Check(left.panel.x==80,"a left taskbar pushes the docked panel to the work-area edge");
+            Check(left.panel.x+left.panel.width<=80+1840,"the docked panel stays inside the work area");
+            Check(left.strip&&left.strip->x==80,"the widget also docks to the work edge, not the screen edge");
+
+            // 上任务栏 48px：work = {0,48,1920,1032}
+            const Monitor topBar{Rect{0,0,1920,1080},Rect{0,48,1920,1032},96};
+            GeometryModel top;
+            top.edge=Edge::Top;
+            top.tier=Tier::Full;
+            top.heightDip=634;
+            top.anchor=100;
+            const auto upper=ComputeRect(top,topBar);
+            Check(upper.panel.y==48,"a top taskbar pushes the docked panel down to the work area");
+            Check(upper.panel.y+upper.panel.height<=48+1032,"the panel stays inside the work area");
+            Check(upper.strip&&upper.strip->y==48,"the top widget docks to the work edge");
+
+            // 浮动窗口：越界坐标必须被夹进 work（而不是屏幕）。
+            GeometryModel floating;
+            floating.edge=Edge::None;
+            floating.tier=Tier::Full;
+            floating.heightDip=634;
+            floating.floating={0,0};
+            const auto clamped=ComputeRect(floating,topBar);
+            Check(clamped.panel.y>=48,"a floating panel is clamped into the work area (no overlap with the taskbar)");
         }
     }
 

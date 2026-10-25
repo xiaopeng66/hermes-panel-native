@@ -26,8 +26,13 @@ FAKE = os.path.join(ROOT, "build", "Debug", "fake-hermes.exe")
 PROBE = os.path.join(ROOT, "build", "Debug", "geometry-probe.exe")
 
 THEMES = ["dark", "light", "slate", "carbon", "porcelain", "sand"]
-STYLES = ["beacon", "tag", "flag", "capsule"]
-STYLE_DIP = {"beacon": (10, 76), "tag": (14, 74), "flag": (16, 58), "capsule": (30, 136)}
+# 只剩铭牌/胶囊两套（旗标/信标按用户要求删除，DESIGN v1.10 ①）。旧值仍可读：
+# flag/halo/badge -> tag，beacon/pulse/magnet 与未知值 -> capsule；下面单列一条把回落规则钉住，
+# 这样"删掉的样式"仍有覆盖（查的是归宿，不再是它们各自的尺寸）。
+STYLES = ["tag", "capsule"]
+STYLE_DIP = {"tag": (14, 74), "capsule": (30, 136)}
+LEGACY_STYLE_TO = {"beacon": "capsule", "pulse": "capsule", "flag": "capsule",
+                   "magnet": "capsule", "halo": "tag", "badge": "tag"}
 TABS = ["tabModels", "tabFallback", "tabAdd", "tabBackup", "tabSettings"]
 
 results = []
@@ -271,23 +276,22 @@ def cpu_probe(app):
     app.pipe({"command": "place", "state": 1, "edge": 0})
     expanded = measure("expanded")
     check("cpu: expanded panel < 3%", expanded < 3.0, "%.2f%%" % expanded)
-    # G11：全灯正常时三套挂件都必须完全静止（不再有常驻呼吸动画）；信标只在有故障时才呼吸。
-    app.pipe({"command": "configure", "widgetStyle": "beacon"})
-    app.pipe({"command": "place", "state": 4, "edge": 1, "anchor": 200})
-    time.sleep(0.5)
-    collapsed = measure("collapsed beacon")
-    # 三套静态挂件共用同一份轮询/控制面开销（展开态本身就有 1.2–1.6%），2% 会把噪声当回归。
+    # G11：挂件完全静止（信标/旗标删除后，唯一的挂件动画——异常呼吸——也一起移除了）。
+    # 两种样式共用同一份轮询/控制面开销（展开态本身就有 1.2–1.6%），2% 会把噪声当回归；
     # 真正的"空转"是旧 pulse/halo 的 120ms 常驻重绘（约 8%），3% 仍能可靠区分。
-    check("cpu: collapsed beacon < 3%", collapsed < 3.0, "%.2f%%" % collapsed)
-    app.pipe({"command": "configure", "widgetStyle": "tag"})
-    time.sleep(0.5)
-    tag = measure("collapsed tag")
-    check("cpu: collapsed tag < 3%", tag < 3.0, "%.2f%%" % tag)
-    app.pipe({"command": "configure", "widgetStyle": "flag"})
-    time.sleep(0.5)
-    flag = measure("collapsed flag")
-    check("cpu: collapsed flag < 3%", flag < 3.0, "%.2f%%" % flag)
-    app.pipe({"command": "configure", "widgetStyle": "beacon"})
+    for style in STYLES:
+        app.pipe({"command": "configure", "widgetStyle": style})
+        app.pipe({"command": "place", "state": 4, "edge": 1, "anchor": 200})
+        time.sleep(0.5)
+        value = measure("collapsed " + style)
+        check("cpu: collapsed %s < 3%%" % style, value < 3.0, "%.2f%%" % value)
+    # 旧样式名/未知值必须有确定归宿（删掉的 beacon/flag 不能再出现在设置里，也不能让面板挑不出来）。
+    for legacy, expected in LEGACY_STYLE_TO.items():
+        app.pipe({"command": "configure", "widgetStyle": legacy})
+        time.sleep(0.3)
+        effective = app.pipe({"command": "dump"})["stored"]["widgetStyle"]
+        check("legacy style %s -> %s" % (legacy, expected), effective == expected, effective)
+    app.pipe({"command": "configure", "widgetStyle": "capsule"})
     app.pipe({"command": "place", "state": 1, "edge": 0})
     app.pipe({"command": "configure", "interval": 60})
 
@@ -321,7 +325,7 @@ def monitor_sweep(app):
                           and strip[1] + strip[3] <= work[1] + work[3] + 1)
                 check("widget %s @%s dpi%d: size" % (style, name, dpi), ok, strip)
                 check("widget %s @%s dpi%d: flush+inside" % (style, name, dpi), flush and inside, strip)
-    app.pipe({"command": "configure", "widgetStyle": "beacon"})
+    app.pipe({"command": "configure", "widgetStyle": "capsule"})
     app.pipe({"command": "place", "state": 1, "edge": 0})
 
 
@@ -430,6 +434,27 @@ def log_scan():
     check("log: no secret-looking content", not leaks, leaks[:2])
 
 
+def source_scan():
+    """源码里的 mojibake（UTF-8 字节被当 Latin-1 解释后又存成 UTF-8）。
+
+    2026-10-23 真机在添加页模型列表表头看到 "å¨ä¸é（3/3）" 而不是「全不选（3/3）」，
+    就是这种字符串字面量。静态扫一遍 src/，防复发。允许排版用的少量字符（§ · 等）。
+    """
+    allowed = set("·×—–…°§µ")
+    hits = []
+    for base, _, files in os.walk(os.path.join(ROOT, "src")):
+        for name in files:
+            if not name.endswith((".cpp", ".h")):
+                continue
+            path = os.path.join(base, name)
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for number, line in enumerate(handle, 1):
+                    bad = [c for c in line if chr(0xA0) <= c <= chr(0xFF) and c not in allowed]
+                    if bad:
+                        hits.append("%s:%d" % (os.path.relpath(path, ROOT), number))
+    return check("source: no mojibake string literals", not hits, hits[:3])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="减半的模糊与泄漏轮次")
@@ -437,6 +462,7 @@ def main():
     rounds = 300 if args.quick else 800
     cycles = 60 if args.quick else 150
     app = App()
+    source_scan()
     try:
         app.settle()
         data = app.dump()["data"]

@@ -9,6 +9,7 @@
 //      只到"弹确认框"为止，然后用 Esc 取消）。
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 #include <windows.h>
 #include "harness/client.h"
 #include "harness/paths.h"
@@ -66,6 +67,9 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=3) return 2;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const std::wstring id=L"controls-"+std::to_wstring(GetCurrentProcessId());
+    // 设置目录按实例名（含 pid）隔离，但 pid 会被系统复用：先把上一轮可能留下的
+    // previewDiff / autoReloadGateway 清掉，否则同一个用例会时绿时红。
+    std::filesystem::remove_all(harness::IsolatedDataDir(id));
     const auto home=std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id+L"/fake";
     CreateDirectoryW(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata",nullptr);
     CreateDirectoryW((std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id).c_str(),nullptr);
@@ -169,6 +173,84 @@ int wmain(int argc,wchar_t** argv) {
                 harness::Require(!dump["modal"]["title"].get<std::string>().empty(),
                     "the provider '…' button did not open its menu");
                 std::cout<<"PASS click: the provider '…' button opens the provider menu\n";
+                // 菜单里的「探测模型并追加」：确定后必须对该供应商发**一次只读 probe**，并把结果
+                // 落进「添加」页（v1.15 修过"结果被丢弃"）。此前只覆盖了"菜单能开/能关"，
+                // 确定动作本身没有断言。
+                {
+                    const auto provider=dump["providerMenu"]["provider"].get<std::string>();
+                    std::string baseUrl,keyEnv;
+                    for(const auto& entry:dump["data"]["providerList"]) {
+                        if(entry.value("name",std::string{})!=provider) continue;
+                        baseUrl=entry.value("baseUrl",std::string{});
+                        keyEnv=entry.value("keyEnv",std::string{});
+                    }
+                    harness::Require(!baseUrl.empty(),"the opened provider has no base_url");
+                    const auto probesBefore=CountRequests(home+L"/requests.log","probe");
+                    Tap(client,Controls(client)["modalConfirm"]); Sleep(700);
+                    harness::Require(CountRequests(home+L"/requests.log","probe")==probesBefore+1,
+                        "the provider menu confirm must send exactly one probe");
+                    {
+                        std::ifstream input(home+L"/requests.log");
+                        std::string line;
+                        bool matched=false;
+                        while(std::getline(input,line)) {
+                            if(line.find("\"cmd\":\"probe\"")==std::string::npos) continue;
+                            const auto parsed=Json::parse(line);
+                            if(parsed.value("base_url",std::string{})==baseUrl
+                                &&parsed.value("key_env",std::string{})==keyEnv) matched=true;
+                        }
+                        harness::Require(matched,"the probe carried the provider's base_url and key_env");
+                    }
+                    // v1.18：扫描结果直接写回该供应商（只带新增模型），不再让用户去「添加」页手动保存。
+                    std::string providerId;
+                    for(const auto& entry:dump["data"]["providerList"]) {
+                        if(entry.value("name",std::string{})==provider)
+                            providerId=entry.value("providerId",std::string{});
+                    }
+                    const auto writes=[&] {
+                        for(int attempt=0;attempt<50;++attempt) {
+                            if(CountRequests(home+L"/requests.log","add-models")>0) break;
+                            Sleep(100);
+                        }
+                        return CountRequests(home+L"/requests.log","add-models");
+                    }();
+                    harness::Require(writes==1,"scan-and-append must write exactly one add-models");
+                    {
+                        std::ifstream input(home+L"/requests.log");
+                        std::string line;
+                        bool matched=false;
+                        while(std::getline(input,line)) {
+                            if(line.find("\"cmd\":\"add-models\"")==std::string::npos) continue;
+                            const auto parsed=Json::parse(line);
+                            if(parsed.value("provider",std::string{})==providerId
+                                &&parsed["models"].size()==3
+                                &&parsed.value("prune",false)) matched=true;
+                        }
+                        harness::Require(matched,"the sync carried the provider, the probed list and prune=true");
+                        // 替换语义：Alpha 原本 2 个模型，同步后应等于探测到的 3 个（追加会变 5 个）。
+                        const auto synced=[&] {
+                            for(int attempt=0;attempt<40;++attempt) {
+                                const auto list=Dump(client)["data"]["providerList"];
+                                for(const auto& entry:list) {
+                                    if(entry.value("name",std::string{})!=provider) continue;
+                                    if(entry.value("models",0)==3) return 3;
+                                }
+                                Sleep(100);
+                            }
+                            return 0;
+                        }();
+                        harness::Require(synced==3,"the provider's model list was replaced, not appended");
+                    }
+                    // 第二次扫描：配置已一致 → 只提示"已是最新"，不再写盘。
+                    const auto writesBefore=CountRequests(home+L"/requests.log","add-models");
+                    Tap(client,head["menu"]); Sleep(450);
+                    Tap(client,Controls(client)["modalConfirm"]); Sleep(1200);
+                    harness::Require(CountRequests(home+L"/requests.log","add-models")==writesBefore,
+                        "a second scan with nothing new must not write again");
+                    harness::Require(Dump(client)["toast"]["text"].get<std::string>().find("\u5DF2\u662F\u6700\u65B0")
+                        !=std::string::npos,"the second scan says it is already up to date");
+                    std::cout<<"PASS click: the provider menu's 扫描并追加 writes only new models\n";
+                }
                 escape(); Sleep(300);
                 harness::Require(Dump(client)["modal"]["title"].get<std::string>().empty(),
                     "Esc did not close the provider menu");
@@ -198,13 +280,32 @@ int wmain(int argc,wchar_t** argv) {
             Tap(client,Controls(client)["fbFoldClose"]); Sleep(350);
 
             Tap(client,Controls(client)["tabAdd"]); Sleep(400);
-            for(const auto& pair:std::vector<std::pair<std::string,int>>{{"subTabModels",1},{"subTabDel",2},{"subTabNew",0}}) {
-                Tap(client,Controls(client)[pair.first]); Sleep(450);
+            // v1.21（真机反馈"所有输入框都应该有光标"）：聚焦 + 打字后必须报出插入符位置。
+            {
+                const auto fields=Controls(client)["_fields"];
+                harness::Require(!fields.empty(),"the add page has no fields");
+                Tap(client,fields[0]); Sleep(250);
+                client.Request({{"command","key"},{"text","abc"}});
+                Sleep(250);
+                const auto focus=Dump(client)["focus"];
+                harness::Require(focus.value("field",-1)==0,"the name field took focus");
+                harness::Require(focus.value("caret",-1)==3,
+                    ("the caret follows the typed text ("+focus.dump()+")").c_str());
+                // 清掉刚打的字，后面用例的表单还是空的
+                client.Request({{"command","vk"},{"vk",VK_END}});
+                for(int index=0;index<3;++index) client.Request({{"command","vk"},{"vk",VK_BACK}});
+                Sleep(150);
+            }
+            // v1.18：子分段只剩两档（新建供应商 / 删除供应商）。
+            for(const auto& pair:std::vector<std::pair<std::string,int>>{{"subTabDel",1},{"subTabNew",0}}) {
+                const auto ctrls=Controls(client);
+                harness::Require(ctrls.contains(pair.first),("missing control "+pair.first).c_str());
+                Tap(client,ctrls[pair.first]); Sleep(450);
                 harness::Require(Dump(client)["add"]["sub"].get<int>()==pair.second,
                     (pair.first+" did not switch the add sub-tab").c_str());
             }
-            std::cout<<"PASS click: the three add sub-tabs switch\n";
-            for(const auto& pair:std::vector<std::pair<std::string,int>>{{"subTabModels",1},{"subTabDel",2}}) {
+            std::cout<<"PASS click: the two add sub-tabs switch\n";
+            for(const auto& pair:std::vector<std::pair<std::string,int>>{{"subTabDel",1}}) {
                 Tap(client,Controls(client)[pair.first]); Sleep(450);
                 const auto fields=Controls(client)["_fields"];
                 harness::Require(!fields.empty(),"the add sub-page has no fields");
@@ -265,8 +366,8 @@ int wmain(int argc,wchar_t** argv) {
             {
                 const auto controls=Controls(client);
                 const auto segs=controls["_segments"];
-                // F4/G11：设置页分段 = 3 段延迟间隔 + 4 段挂件 + 7 段主题。
-                harness::Require(segs.size()>=14,"the settings page has no theme segments");
+                // F4/G11：设置页分段 = 3 段延迟间隔 + 2 段挂件（信标/旗标已删） + 7 段主题。
+                harness::Require(segs.size()>=12,"the settings page has no theme segments");
                 const int themeOffset=static_cast<int>(segs.size())-7;
                 Tap(client,segs[1+themeOffset]); Sleep(400);
                 harness::Require(Dump(client)["settings"]["theme"].get<int>()==1,"the theme segment did not switch");
@@ -287,28 +388,49 @@ int wmain(int argc,wchar_t** argv) {
             }
             // 悬停提示（用户要求：状态灯/chip 上悬浮要有文字）——用合成的 hover 走同一条路径。
             {
-                const auto controls=Controls(client);
-                const auto bounds=Dump(client)["panel"];   // [x,y,w,h] 屏幕坐标
                 struct HoverCase { const char* key;const char* expect; };
+                // tabFallback 是**底栏**按钮：它这条盯的是"底栏上的控件也有提示"（真机 2026-10-21
+                // 报底栏按钮的提示被底栏盖住）。提示的**层级**（必须画在底栏之上）没有断言——
+                // 提示矩形是渲染层按测量结果现算的，而 h-* 门禁没有 probe 通道做像素断言；
+                // 该点由 evidence/tooltip-nav-after.png 的像素证据覆盖，缺口记在 audit 文档里。
                 const HoverCase hovers[]={{"lampWsl","WSL"},{"lampWebui","WebUI"},{"lampGateway","网关"},
-                    {"refresh","配置"}};
+                    {"refresh","配置"},{"tabFallback","回退链"}};
                 for(const auto& test:hovers) {
-                    harness::Require(controls.contains(test.key),(std::string("no ")+test.key+" control").c_str());
-                    const auto& rect=controls[test.key];
-                    const int x=rect["x"].get<int>()-bounds[0].get<int>()+rect["width"].get<int>()/2;
-                    const int y=rect["y"].get<int>()-bounds[1].get<int>()+rect["height"].get<int>()/2;
-                    client.Request({{"command","hover"},{"x",x},{"y",y}});
-                    // tooltip 的驻留计时是 450ms 一次性定时器；Regression 全量跑时机器忙，
-                    // 650ms 只剩 200ms 余量，真机抖过一次。给两倍余量。
-                    Sleep(900);
-                    const auto tip=Dump(client)["tooltip"];
-                    harness::Require(tip["visible"].get<bool>(),
+                    // 取点**每个控件现读一次**：早先整块只取一份 Controls()/panel 快照，而前面刚跑过的
+                    // 置顶/主题用例会让几何一瞬间不同 —— 实测失败现场的应用日志是 `hover control 0`
+                    // （合成 hover 落到了没有控件的地方，提示自然不出来），不是提示逻辑的问题。
+                    // 所以这里重读快照 + 同一控件最多重试一次；断言本身不变。
+                    bool shown=false;
+                    Json tip;
+                    for(int attempt=0;attempt<2&&!shown;++attempt) {
+                        const auto controls=Controls(client);
+                        const auto bounds=Dump(client)["panel"];   // [x,y,w,h] 屏幕坐标
+                        harness::Require(controls.contains(test.key),
+                            (std::string("no ")+test.key+" control").c_str());
+                        const auto& rect=controls[test.key];
+                        const int x=rect["x"].get<int>()-bounds[0].get<int>()+rect["width"].get<int>()/2;
+                        const int y=rect["y"].get<int>()-bounds[1].get<int>()+rect["height"].get<int>()/2;
+                        client.Request({{"command","hover"},{"x",x},{"y",y}});
+                        // tooltip 的驻留计时是 450ms 一次性定时器。固定 Sleep 在机器忙时不够用
+                        // （真机 2026-10-21 全量跑时 650ms→900ms 都抖过），改成**有界轮询**：
+                        // 断言不变（"悬停必须出提示"），只是等到 2s 为止；出不来照样失败。
+                        const auto deadline=GetTickCount64()+2000;
+                        while(GetTickCount64()<deadline) {
+                            if(Dump(client)["tooltip"]["visible"].get<bool>()) { shown=true;break; }
+                            Sleep(100);
+                        }
+                        tip=Dump(client)["tooltip"];
+                    }
+                    harness::Require(shown&&tip["visible"].get<bool>(),
                         (std::string("hovering ")+test.key+" shows no tooltip").c_str());
                     harness::Require(tip["text"].get<std::string>().find(test.expect)!=std::string::npos,
                         (std::string("the ")+test.key+" tooltip does not mention "+test.expect+": "
-                            +tip["text"].get<std::string>()).c_str());
+                            +tip["text"].get<std::string>()+" hover="
+                            +Dump(client)["tooltipHover"].dump()+" rect="
+                            +Controls(client)[test.key].dump()+" panel="
+                            +Dump(client)["panel"].dump()).c_str());
                 }
-                std::cout<<"PASS hover: the three lamps and the sync stamp explain themselves\n";
+                std::cout<<"PASS hover: the three lamps, the sync stamp and a bottom-nav tab explain themselves\n";
                 // 审计：所有悬停说明都必须是一句话、不含换行（用户要求）。
                 const auto tips=Dump(client)["tooltips"];
                 int audited=0;

@@ -2756,3 +2756,1261 @@ logo 永远横向正着。平边始终贴屏幕边。四边截图 diag/orient-{t
 **验证**：`geometry` 17433 通过；真机窗口回到 38×170 @(0,356)（无外扩边），
 左缘像素 x=0 即胶囊、无空隙；`drag` 门禁本轮多次因"桌面被占用（指针漂移）"SKIP，
 不能算通过——回退后的代码与 6570cd1 之前一致，那份代码此前 drag 5/5 通过。
+
+## G28 铭牌补齐胶囊那套（方案 3 + 1）（2026-10-21，用户："先做 3 和 1"）
+
+设计先行：`DESIGN.md` 加 v1.10（含 §2/§4.8 #34 的"10/14/16/30（beacon/tag/flag/capsule）"→
+"14/30（tag/capsule）"更正）。契约：两样式共用同一份液态玻璃；铭牌形体升级为路径几何（圆角仍 4 DIP，
+尺寸与命中区域不变）；**内容排布统一为屏幕空间**（取代 v1.8"整条挂件是同一个刚体"里 logo/灯/文字那半条）——
+竖直边恒为 logo 在上 → 三灯 网关/WebUI/WSL 从上到下 → 模型名在下（从下往上读），水平边恒为
+名字在左 → 三灯 从左到右 → logo 在右；待重启琥珀条画在屏幕空间起点端并裁进轮廓；身份色轨仍随贴边侧。
+
+实现：`Widget` 抽成"形状 → 同一段玻璃管线 → 铭牌专属装饰（layer 遮罩）→ `WidgetContent`（屏幕空间）"，
+`LampDot` 从 lambda 提为成员函数；删掉走不到的通用旋转文字路径与三个死 lambda。
+
+**实测**（隔离实例，同一机器/同一主题，4× 放大前后对照见 `evidence/tag-*-*.png`）：
+胶囊 `capsule-before-porcelain-edge1` → `capsule-final-porcelain-edge1` **0/103360 px 变化**（阈值 24）；
+铭牌同一位置 **78.5% 像素变化**（整个换材质换排布）；两次同代码渲染 0 px 差异（渲染确定）。
+调查中的假象：右边缘两次都像"上半截没画" —— 差值图 + 临时 DIB 像素轨迹（已删）证明 DIB 正确，
+`WindowFromPoint` 点名是第三方悬浮窗 `HRNETFLOWTRAY` 压在测试点上；换 anchor 后轮廓全高。
+
+**门禁**：`-Gate Regression` 21 通过 / 2 失败（1 个是过期断言：未知样式回落目标仍写 `beacon`，
+按 DESIGN v1.10 改为 `capsule` 并写明理由；1 个 `drag` 恢复高度归环境，见 BLOCKER-005）/
+1 SKIP；修完断言后 settings+widget+geometry+motion+shell+tray 6/6 全绿；
+`-Gate All` 30 套件 **100% 通过（exit 0）**，10 项真实指针/IME 套件按环境 SKIP（外部自动化顶着光标：
+SetCursorPos 到三个点 250 ms 后全被顶回 (1313,59)，无裁剪/无按键/无 capture）。
+
+**真机**：打包（SHA `0a617e90…`）替换实例；`evidence/live-capsule-top.png` 是新构建真机上的胶囊。
+铭牌要用户在设置页切「铭牌」才看得见（没替用户改偏好设置）。
+
+### G28 补充：自查修复（2026-10-21，用户："检查一下你的修改有没有造成新的bug"）
+
+逐 hunk 复查 23 个文件的改动 + 定向排查风险类别，找到并修掉 **1 个真 bug**：玻璃快照会过期
+（`EnsureBackdrop` 只判"空不空"，切挂件样式改尺寸后仍用旧快照，实测 37.9% 像素与新鲜快照不同）。
+改为按窗口当前矩形判定后 A/B = 0 px，且抓取次数与旧逻辑逐项相同（无多余抓屏）。另清掉挂件动画
+定时器残留（`kWidgetTimer`/不可达分支/`widgetPhase_`/空 `UpdateWidgetTimer`）并把视图默认样式名
+`beacon`→`capsule`。复查确认无问题的：worker 数据竞争、诊断残留、删除的 lambda、
+`kSyncWidth` 对 `layout.busy` 的影响（无消费者）、时间戳两条路径时区一致、胶囊渲染结构不变。
+验证：快速门禁 10/10、`-Gate All` 30/30（exit 0）、重打包 SHA `3579780d…`。
+
+### G29 贴边/收起"抖动闪烁"（2026-10-21，真机）
+
+根因是 G28 自查那轮的落账漏洞：`EnsureBackdrop` 按窗口矩形判断是否重抓，但 `CaptureBackdrop`
+只记了快照尺寸、**没记位置**（文本替换缩进不匹配，静默失效）→ 每次贴条重绘都判成"几何变了"→
+每次都抓屏（抓屏 = 藏窗口 → BitBlt → 显示 → 肉眼一次闪烁）。真机日志：一次落边 2–3 次抓屏、
+空闲时每 60s 轮询闪一次。修法：把快照的窗口位置真实落账。修后：轮询/展开/真实收起全部 0 次抓屏，
+只有几何真变（换样式/换边）才 1 次；新增永久守卫"某帧没有玻璃快照就记一行日志"。
+验证：`-Gate All` 30/30、`a-hover` A7 空闲 CPU 0.156%（与基线一致）。
+
+### G30 worker 线程起不来时面板自杀（2026-10-21，真机日志抓到）
+
+`std::thread` 构造失败（机器被压满）抛 `system_error` → 冒到消息循环 → `HandleWindowFailure`
+判为不可恢复 → `fatal, closing` → 面板退出（真机 14:42:56 实测一次）。新增 `SpawnWorker` 助手，
+六个起线程点统一改为"失败回滚忙碌标志 + 记日志 + 本轮跳过"，异常不再到达消息循环。
+验证：`-Gate All` 30/30、数据通路门禁全绿、真机重启后 4 分钟零异常、轮询零抓屏。
+
+### G31 门禁拆分 + 真机交互补齐（2026-10-21，用户："点来点去和拖动的测试不需要每次都跑"）
+
+`tools/e2e.ps1` 新增 `-Gate Pointer`（hover/drag/dpi/h-ime/a-snap/a-pullout/a-hover/a-edge/a-crossdpi/a-topology），
+从 `All`/`Regression`/`Shell`/`Pages` 移除这 10 项（覆盖不删，只是挪出默认跑法）。默认 `-Gate All`
+由 30 项/408s 降到 **20 项/110s，0 失败 0 SKIP**。拆分后单跑 Pointer：10 项 9 过 1 SKIP，
+a-snap 重试即 PASS —— 最终产物上真实指针套件（含本轮闪烁所在的贴条拖动路径）全部有通过记录。
+
+### G32 第二轮自查：还带来别的 bug 吗（2026-10-21）
+
+查出并修掉 3 个：①`tools/full_audit.py` 仍按四套样式查（旗标/信标已删）→ 收敛为 tag/capsule
+并新增 6 条 legacy 样式回落检查，`-Gate Audit` 133/0；②新检查抓到真产品 bug：
+`SetSetting("widgetStyle")` 不归一，已删除的名字会留在设置里并让设置页选错档 → 在唯一入口按
+Load 同一条规则归一；③`-Gate Release` 因真机实例占着 `dist/` 而打包失败 → 真机改跑 `dist-live/`
+（SHA 与 dist 一致）。另把 `h-controls` 的 tooltip 固定 `Sleep(900)` 改成有界轮询（机器满载不再误判），
+并补了起线程失败时的界面状态（不画假对勾 + 一条 toast）。完成门禁在最终产物上全绿：
+Regression 20/20、Audit 133/0、Release exit 0、Pointer 10/10、All 20/20。
+
+### G33 死代码排查 + 代码梳理（2026-10-21，用户："检查有没有没用的死代码，梳理一下代码"）
+
+`/W4 /WX` 下编译器可见的死代码早就是 0，所以做了三个自制普查（声明普查 / 成员访问普查 / 重复块扫描）
++ 目标引用检查。删掉 8 项"零读取"死状态（`Application::helper_`、`hotLoadedMtime_`、`uncCacheValid_`、
+`HelperBridge::lastReadStart_`、`FallbackPageInput::cursorField`、`ModalView::scrimCloses`、
+`WidgetMetrics::gap`、`widgets::kGroupHeadHeight`）、两个零引用的调试目标（`environment-probe`、`drag-repro`），
+并把产品侧三份 `Widen/Narrow` 合成 `src/core/text.h` 一份。重构成不改变输出用背靠背抓图证明：
+噪声底 0 px、改动前后 0/26784 px（最大通道差 3）。故意保留的有 `layout.busy`（设计契约仍写着"忙碌条=细字"，
+要改先动 DESIGN）、测试/工具里的夹具副本、以及 tools 里的一次性迁移脚本。完整报告见
+`audit/CODE-HYGIENE.md`（含下一步值得做的三处重复与验证方式）。
+
+### G34 面板弹出"内容位移/抖动"（2026-10-21，用户报告，方案 A）
+
+定性：不是 bug，是入场动效本身——Collapsed→Expanded 时整块内容按 `(1-p)*8 DIP` 从下往上滑 + 淡入，
+共用缓动是 ease-out（第一帧就走 32%、前 50ms 走 73%），观感即"窜一下再贴回去"。
+改法：只给位移换 smoothstep（与胶囊形状过渡同曲线），淡入与其余动画不动。
+对照表见 `evidence/enter-curve.md`（第一帧位移 3.2 px → 0.4 px）；`motion` 门禁 PASS、21 项回归全绿；
+产物 SHA `96c1fee5…` 已替换真机实例。
+
+### G35 面板展开的动画与效果整体去掉（2026-10-21，用户要求）
+
+DESIGN v1.11：展开方向不再触发任何面板动效（不滑不淡入），删除展开专用的触发点与位移通道。
+界定范围：`StartPanelMotion(false)` 是**切页内容淡入**（5 个 tab 调用点），按用户只说"展开"而保留，
+函数改名去掉参数。`motion` 门禁按新契约重写（断言 show/展开无动效 + 新增"点 tab 仍淡入"），
+22 项回归全绿；逐帧证明"展开后第一帧 == 最终帧（score 0）"，肉眼对照
+`evidence/enter-removed-comparison.png`。产物 SHA `f4b58120…` 已替换真机实例。
+
+### G36 悬停提示被底栏盖住 → 置顶（2026-10-21，真机反馈）
+
+根因两条叠加：①`Draw` 里底栏是**最后绘制的实心条**，与它重叠的提示被盖住；②提示以指针为锚、
+"翻到左上"后底边只比指针高 10 DIP，悬停底栏按钮时仍落在底栏内部。改法（DESIGN v1.12）：提示块移到
+`Draw` 最后（底栏/模态/Toast/描边之后）+ 指针在底栏内时夹进内容区（底栏之上 4 DIP）+ 模态期间不显示。
+验证：像素证据 `evidence/tooltip-nav-after.png`（气泡完整显示在底栏之上），`h-controls` 悬停用例扩到
+底栏按钮（`tabFallback`）并断言文案，21 项回归全绿。层级本身没有门禁断言（页门禁无 probe 通道），
+缺口已登记。产物 SHA `8a2b45a5…` 已替换真机实例。
+
+### G37 悬停提示改到指针上方（2026-10-21，用户："容易被指针挡住"）
+
+根因：原落位"指针右下 14/18，放不下翻左上"正好放在光标延伸方向上。改法（DESIGN v1.13）：纵向优先
+指针上方（−10 DIP − 气泡高），只有上方顶到窗口才翻到下方。实测（前/后差分 + 真光标只移动不点击）：
+底栏「回退链」气泡在指针上方 42 px 且仍在底栏之上、顶栏「同步章」上方 26 px。22 项回归全绿，
+产物 SHA `0fb23636…` 已替换真机实例。
+
+### G38 悬停提示文字垂直居中（2026-10-21，用户）
+
+根因：气泡内文字从 top+5 DIP 起画，而 n 行文字块高 10n+6、气泡高 10n+11 → 文字块底边贴边（实测上留白
+11px / 下留白 4px）。改法（DESIGN v1.14）：首行落 top+2.5 DIP，上下各 2.5 DIP；实测复测上 8px / 下 7px。
+产物 SHA `3a53baf6…` 已替换真机实例。
+
+### G39 顺带修掉 h-controls 悬停用例的取点 flake（既有）
+
+失败现场的应用日志是 `ui: hover control 0`（合成 hover 没命中控件）——用例对整块控件只取一份快照，
+而前面刚跑过的置顶/主题用例会让几何一瞬间不同。该消息在改提示之前就出现过（既有 flake）。修法（测试侧，
+断言不动）：每个控件现读快照 + 最多重试一次；`h-controls` 连跑 3 次全过，22 项回归全绿。
+
+### G40 模型探测链路 + 修"探测结果被丢弃"（2026-10-21，真机反馈）
+
+探测由 WSL 助手的 `probe` 完成（GET base_url / +models / +/v1/models，Bearer key 或 key_env，全量返回）。
+P1：面板的填充逻辑被 `activePage_==2` 门住，从模型页「供应商 ⋯ → 探测模型并追加」发起时结果只写进药丸
+（加模型页显示文本框）→ 等于丢弃。修法：拿到模型就同时填两个文本框 + 药丸，非添加页时给计数 toast。
+12 项相关门禁全绿；该路径原本零覆盖（供应商菜单是分组头的 ⋯ 热区，控制面未暴露）→ 缺口登记，下一批补。
+未修：回退链表单无模型列表（需新增功能）；`custom:sheapi` 无 key_env 导致探测无鉴权（需用户同意做只读探测）。
+产物 SHA `ca107d3f…` 已替换真机实例。
+
+### G41 一键探测全部供应商模型（只读）（2026-10-21，用户要求）
+
+托盘「探测全部供应商模型（只读）」（menu id 1015）→ worker 串行探测（base_url 去重、≤24、单个 6s、间隔 150ms，
+只 GET），结果按供应商缓存进 `probedModels_`；添加页「加模型」选中供应商即自动取用缓存填模型框；控制面 dump 暴露
+`probeAll{...}`。h-add 新增断言通过：`PASS probe-all: 11 of 12 providers returned a model list (read-only)`；
+原"一次点击=一次 probe"断言改为增量；22 项回归全绿。产物 SHA `ad730ff7…` 已替换真机实例。
+未做：回退链表单的模型选择器（下一批）。
+
+### G42 key_env 质疑的只读实探 + 更正 G40 的错误推断（2026-10-21）
+
+G40 里"`custom:sheapi` 无 key_env 导致探测无鉴权"是**错的**：该供应商条目在 `custom_providers` 上有
+`key_env: SHEAPI_API_KEY`，`.env` 里也有该变量。用助手 `probe` 只读实测：不带鉴权 → `401 Invalid token`；
+`key_env=SHEAPI_API_KEY` → `200`、3 个模型，与配置 `models:` 的三条一致（"只能显示三个模型"=该供应商的
+真实模型数，不是截断）。18 个供应商按面板逻辑实探：13 成功；5 失败均为外部原因（xxs TLS 握手超时、
+local-cuda-35b 在 WSL 内连 `127.0.0.1` 拒连、sensenova 401、motomoto 超时、whiteapi 403 无订阅）。
+顶层 `model:` 段确实没有 `key_env`，但面板探测遍历的是供应商条目，不受影响。
+已同步更正 `audit/ROUND-2026-10-21-TAG-GLASS.md` §17/§18。证据：`tmp/hermes-panel-native/diag/{probe-keyenv.py,probe-all-live.py}`。
+
+### G43 回退链「追加一条」的模型选择器（2026-10-21，用户要求，DESIGN v1.16）
+
+`#17` 的模型 id 右侧加 ▾（`ControlId::FbModelSelect`，命中区 = 字段右 28 DIP，插在控件表最前以免被
+FormField 吃掉）。候选顺序：一键探测缓存（`probedModels_`，锁内拷贝）→ 供应商条目自带的 `models` →
+空则不开列表、改给一句"先探测"的 toast。选中只 `fbModel_.SetTextUtf8`，无任何助手写命令（只读）。
+与来源供应商下拉互斥；点另一个下拉时**一次点击**完成"关旧的、开新的"（首版只关不开，门禁抓到后修）。
+控制面：`fbModelSelect` + `dump.fallback.{modelSelectOpen,modelOptions}`。
+门禁 `h-fallback` 新增一条：空缓存 → 配置里的 models；跑托盘 1015 一键探测 → 缓存优先
+（`probe-a/b/c`）；点第一项 → `modelValue` 命中且 probe 调用次数不变；两下拉互斥断言。
+证据：`-Gate All` 20/20（`tmp/hermes-panel-native/evidence/20261021-231939-701-All.txt`）。
+真机：`deepseek-official` → ▾ 列出 3 个模型 → 选中后 `deepseek-v4-pro` 落进模型 id
+（`evidence/live-v116-picker-crop.png` / `live-v116-picked-crop.png`）。
+产物 SHA `411ae7f4…` 已替换真机实例（PID 62460）。
+
+### G44 写盘链路实证 + 所有配置写入统一「网关重启交代」（2026-10-21/22，用户质疑"是不是摆设"）
+
+**实证**（`tmp/hermes-panel-native/diag/verify-writes.py`）：把用户真实 `config.yaml`（25686 字节、18 供应商）
+复制到 `tmp/hermes-panel-native/verify-home/`，用**真实** `hermes-panel-apply.py` 按面板实际 payload 逐条跑：
+upsert-provider（新建）→ 条目 + `.env` 写入；add-models → models 追加；set-main → `model:` 段切换；
+fallback-add（from_custom）→ 链尾追加；fallback-move → 上移；fallback-remove → 移除；
+delete-provider（purge_key+remove_fallbacks）→ 条目消失、`.env` 的 key 一并清掉。
+中间一次 delete 被助手拒绝（"该供应商正是当前模型"）→ 证明"当前模型不可删"的保护真实存在（面板同名规则
+把删除键置灰）。副本最后还原到与基线逐字段一致。真实 `~/.hermes` 全程只读。
+面板侧 payload 由门禁逐字断言（`h-add`：name/key_env/key/models、purge_key/remove_fallbacks；`h-fallback`：
+from_custom+model）——两段合起来就是"点了真的会写进去"。
+
+**修**（DESIGN v1.17）：此前只有切主模型/套档案会进待重启分支，其余写入弹"网关热读生效"——对机器人不成立。
+改为 `ApplyDataResult` 里统一按 `IsConfigWrite(verb)`（set-main/upsert-provider/add-models/delete-provider/
+fallback-add/fallback-remove/fallback-move/restore）在**成功落盘后**分两路：开「自动重启网关」→ 清待重启 +
+排队 `reload{gateway,auto}` + toast 追加"网关重启中，机器人稍后生效"；关 → `pendingGatewayRestart_=true`
+（寄存器行「重启网关」胶囊 + 贴条信息卡"网关待重启"）+ toast 追加"需重启网关后机器人才用上"。
+7 处动作文案去掉"（网关热读生效）"。`dry_run` 不进入该分支。
+门禁 `h-fallback` 新增两条断言（待重启 + toast 含"重启"；打开自动重启后写一次 → 发出 reload 且胶囊收起）。
+`-Gate All` 20/20（`evidence/20261022-000839-243-All.txt`）。
+产物 SHA `2107ce82…` 已替换真机实例（PID 32660）。
+
+### G45 供应商 ⋯ 菜单「探测模型并追加」补门禁（2026-10-22）
+
+更正 G40/§20 的登记：那个 ⋯ 热点**控制面早已暴露**（`controls._list.items[].menu`，用 `GroupMenuBox`），
+`h-controls` 也已在点它、断言菜单能开、Esc 能关。真正缺覆盖的是菜单里的**确定动作**。
+补上：`h-controls` 在打开菜单后点确定 → 断言 (a) 恰好一次 `probe`，(b) 请求带该供应商的 `base_url` +
+`key_env`，(c) 结果落进「添加」页的药丸（切到添加页再断言——`view.add` 只在该页构建）。
+控制面 `dump.data.providerList` 新增逐条 `{name,baseUrl,keyEnv,models,isActive}`（原来只有个数，
+没法断言"发的是这个供应商"）。`-Gate Regression` 20/20
+（`evidence/20261022-005021-051-Regression.txt`，含 `PASS click: the provider menu's probe fills the add page (read-only)`）。
+产物 SHA `bd5e533d…` 已替换真机实例（PID 35504）。
+
+### G46 添加页收敛 + 供应商 ⋯「扫描并追加」（2026-10-22，用户要求，DESIGN v1.18）
+
+用户要求：①新建供应商可以不填模型（写进配置后由 hermes 侧发现）；②不要 Key 变量名；
+③问"保存前探测模型列表是干嘛的"；④删掉「加模型」子页，只保留 ⋯ →「扫描并追加」直接显示最新模型。
+实现：子页两档（新建/删除）、字段 名称/Base URL/API Key/模型（可空）、Key 变量名改为助手推导
+（面板只显示推导结果）；删掉从未被读取的死开关；⋯ 主操作改为 只读 probe → 与配置求差 →
+`add-models` 只写新增 → 刷新（v1.17 的重启交代同样生效；无新增时提示"已是最新"不写盘）。
+**门禁抓到一个真 bug**：模型药丸的布局循环误用外层 `width`（面板宽），条件恒真 → 药丸从未进命中表，
+真机上"点掉药丸"一直是空操作（`h-add` 新增的"清空药丸"用例暴露）。修成 `itemWidth`。
+控制面新增 `controls._chips`、`dump.data.providerList[].providerId`。门禁：`h-add`（两档子页/4 字段/
+无 key_env/空模型可保存/药丸可点掉）、`h-controls`（⋯ 扫描并追加：1 次 probe + 1 次 add-models 只带新增，
+第二次扫描不再写盘）。`-Gate All` 20/20（`evidence/20261022-012347-092-All.txt`）。
+真机截图：新添加页（`evidence/live-v118-addpage2-crop.png`）、⋯ 菜单（`evidence/live-v118-menu-crop.png`）。
+产物 SHA `5cd2ce51…` 已替换真机实例（PID 68480）。
+
+### G47 「扫描并追加」→「扫描并同步」：删掉已下线模型（2026-10-22，用户反馈）
+
+用户实测 s2api：配置里 6 个模型，供应商实际只提供 4 个；点 ⋯ 后列表没变，却提示"已是最新（4 个）"。
+原因：v1.18 的动作只会**追加**，配置里已有的 2 个旧模型不会消失；提示也只报了探测数。
+**修**（DESIGN v1.19，经用户授权修改助手）：`hermes-panel-apply.py` 的 `add-models` 增加可选
+`prune: true`（不传时行为完全不变）：用传入列表**替换**该供应商的 `models:` 子区块（新增的加入、
+不在列表里的删除，缩进/映射 vs 列表形态沿用现有规则，写前备份为 `sync-models-<name>`），空列表
+仍拒绝。面板 ⋯ 改为「扫描并同步」：只读探测 → 有差异才发 `add-models{prune:true, models:探测结果}`
+→ toast 报"新增 N / 删除 M"；探测返回空列表时**绝不** prune（只提示未改动）。
+**实证**（真实助手 + live 配置副本，`diag/verify-prune.py`）：6→4、`removed` 精确为
+`glm-5.3-flash / glm-5.3 / brand-new-model`、二次同步不写盘、`dry_run` 不落盘、空列表被拒。
+**门禁**：`h-controls` 断言 `prune=true` 且同步后该供应商模型数等于探测结果（追加会多出来）。
+**同批修的测试/产品问题**：①上一轮逐条探测的迟到结果会覆盖新一轮（`ProbeRow` 现在带 generation，
+迟到即丢弃）；②测试实例的 pid 复用会把上一轮的 previewDiff/autoReload 设置带进下一轮（h-fallback /
+h-controls 启动前清空自己的设置目录）；③悬停用例先挪走真实指针（它停在测试窗口上会把悬停目标抢回
+「追加一条」）。
+`-Gate All` 20/20（`evidence/20261022-021614-907-All.txt`）。真机：s2api 的 ⋯ 现在显示
+「扫描并同步」与"把模型列表同步成最新"的说明（`evidence/live-v119-dialog2-crop.png`，未确认、未写盘）。
+产物 SHA `61fb9738…` 已替换真机实例（PID 58056）。
+
+### G48 健康复查：列表形态 models 的缩进 bug + 探测缓存清空（2026-10-22，用户"看看还有没有问题"）
+
+静态残留检查：`addModels_ / addKeyEnv_ / addProbeBefore_ / SubTabModels / modelsText / kSubModels`
+全部为 0 处引用。助手边界测试（`tmp/hermes-panel-native/diag/verify-prune-edge.py`，真实助手 +
+三份自建配置）抓到**既有 bug**：`models:` 为列表形态且元素缩进比字段更深时，追加写出的 `- id`
+挂错层级 → 解析失败（写后校验挡住了落盘，但老面板的「加模型」会失败）。修：`model_item_indent()`
+沿用已有元素缩进，`insert_model_ids` / `replace_model_ids` 共用。同时面板侧：⋯ 探测缓存只在
+成功且有结果时更新（失败不再清空，避免回退链模型选择器莫名退化）。
+验证：`-Gate Regression` 20/20、`-Gate Audit` 133 项、`-Gate Release` 通过（`evidence/20261022-083737-780-Regression.txt`、
+`…-083952-019-Audit.txt`、`…-084319-827-Release.txt`）；边界用例全过（列表缩进 6/4、无 models 子区块、
+`deepseek-ai/DeepSeek-V4.1` / `Qwen/Qwen3.5-32B` / `vendor:model:v2` 等 id、重复 id、老调用只追加）。
+产物 SHA `358142ae…` 已替换真机实例（PID 59728）。
+
+### G49 输入框插入符 + 模型列表 + 删除按钮文案（2026-10-22，用户要求，DESIGN v1.21）
+
+①插入符：表单字段此前只画高亮圈（只有搜索框有插入符）。新增 `FieldWithCaret`：按 caret 位置量宽
+（掩码按每字符一个点、多行按行/列），accent 色 + 530ms 闪烁；设置页右对齐字段从右边界回推。
+控制面 `dump.focus.caret/multiline` 暴露位置，`h-controls` 断言"聚焦名称框 + 打 abc → caret=3"。
+②模型区重做：探测结果进**可滚动列表**（全部模型、默认全选），表头全选/全不选，点行切换是否写入，
+可视 5 行 + 滚轮 + 滑块；手动添加改单行输入，回车并入列表；保存只写勾选行。
+③删除页主按钮从「追加」改成「删除供应商」。
+门禁：`h-add`（全部列出且全选 / 回车并入 / 只写勾选 / 全不选后空保存）、`h-controls`（caret 跟随）。
+`-Gate All` 20/20（`evidence/20261022-125210-416-All.txt`）。
+**环境限制**：真机点击验证被桌面上的第三方置顶窗口（交易软件）与自动移动的指针挡住，
+`BLOCKER-005` 已登记；模型列表的渲染证据取自夹具实例截图（`evidence/live-v121-real.png`，
+可见表头 + 4 行带勾选框）。
+产物 SHA `9cbbc2f9…` 已替换真机实例（PID 35524）。
+
+### G50 输入框换成原生 EDIT（2026-10-22，用户要求，DESIGN v1.23）
+
+用户："我要原生输入框"。面板主体是普通窗口，可直接挂 `EDIT` 子控件：
+`src/ui/native_field.*` 创建系统 `EDIT` 并**子类化**（只拦 Enter/Esc/Tab/↑↓ + 焦点通知），
+编辑、光标、拖选、双击选词、I 形指针、右键菜单、IME、横向滚动全部交给系统；
+`EN_CHANGE` 把文本实时镜像回 `TextField`，业务代码零改动。自绘层保留外框/标签/聚焦描边，
+EDIT 内缩叠在框内、底色按主题（`WM_CTLCOLOREDIT`）。
+途中修的两个真问题：①**重绘自激**——每次绘制都 `SetWindowPos` 子控件，子控件变化又触发父窗口
+重绘（实测 125fps 空转、`WaitForInputIdle` 永不返回）；加"位置未变就不动"的缓存后空闲 CPU 8ms/s、
+就绪 366ms。②自定义窗口类没有编辑行为（打字无效）——改用系统 `EDIT` 类 + `CallWindowProc` 转发。
+配套：控制面 `key`/`vk` 投递给聚焦的原生控件；`hit` 增加 `isPanelChild`（自己的子控件不算遮挡，
+否则所有点击门禁都判"被其他窗口遮住"）；`ClearSearch` 同步清控件；搜索框 ↑↓/Enter/Esc 转给列表逻辑；
+`motion` 首帧加就绪等待（启动变快后第一帧 dump 可能早于状态初始化）。
+**过程偏差**：DESIGN v1.23 条目是事后补写（同一会话内），违反"先改设计文档再改代码"的顺序，已记录。
+`-Gate All` 20/20（`evidence/20261022-171631-605-All.txt`）。
+产物 SHA `c983e891…` 已替换真机实例（PID 24508）。
+
+### G51 原生输入框收尾（2026-10-22，DESIGN v1.23 续）
+
+①占位提示：改用系统 cue banner，并在控件首次显示时重设（隐藏时设置无效）；进程缺 comctl32 v6
+导致 cue 不显示 → 把 v6 依赖并入既有 `src/app/app.manifest`，搜索框恢复「搜索模型或供应商」。
+②双光标：`PanelViewModel.focusedFormNative` 让原生字段不再画自绘插入符。
+③点击门禁：`hit` 新增 `isPanelChild`，页面门禁把"自己的子控件"视为点得到（原来会判成遮挡）。
+④搜索框给放大镜/`/` 提示留白；删掉自绘搜索占位。
+**测量口径**：PowerShell 非 DPI-aware，枚举子控件的 `GetWindowRect` 是 125% 虚拟坐标，
+一度误判"子控件放错位置"，核对后确认无误。
+`-Gate All` 20/20（`evidence/20261022-200814-137-All.txt`）、`-Gate Release` 通过。
+产物 SHA `2b045c59…` 已替换真机实例（PID 46764）。
+
+### G52 原生输入框：文字居中 + 消除闪烁（2026-10-22，真机反馈）
+
+用户："输入框里的文字不在居中高度，而且一直在闪烁"。①单行 EDIT 默认文字顶对齐 → 量字体行高
+（`GetTextMetrics`），摆放时把控件收成「行高+2」并放在字段框竖直中线（`transparent` 外框不变）。
+②父窗口没有 `WS_CLIPCHILDREN`：每次父窗口重绘（轮询/光标定时器/悬停）都会把子控件区域刷掉一帧，
+表现为持续闪烁 → 加 `WS_CLIPCHILDREN`；焦点在原生字段时 `kCaretTimer` 不再切换/重绘（原生控件自己画光标）。
+③占位提示：`EM_SETCUEBANNER` 在控件隐藏时设置无效（改为首次显示重设），且进程需 comctl32 v6
+（并入既有 `src/app/app.manifest`）。
+验证：连拍三帧、采样搜索框区域像素，三帧完全相同（`distinct=1`，`evidence/flick-1..3.png`）；
+截图 `evidence/center2-crop.png` 显示占位文字垂直居中；`-Gate All` 20/20
+（`evidence/20261022-203636-047-All.txt`）。
+产物 SHA `6f40a3b6…` 已替换真机实例（PID 53584）。
+
+### G53 下拉遮挡 / 新建页模型区 / 忙碌条（2026-10-22，真机反馈，DESIGN v1.24）
+
+①回退链下拉里"看得到输入框、选不到模型"：原生 EDIT 是子窗口，永远压在自绘下拉之上 →
+任一下拉展开时隐藏全部原生输入框（与模态同一条判定）。
+②新建供应商"探测不到模型列表"＋"探测后不要输入框"：删掉「模型 id」输入框（字段数 4→3），
+模型只来自探测列表；手动添加路径与原生绑定一并移除。
+③忙碌条仍卡顿：实测主面板单帧 **200–230ms**（日志 `busy paint 216ms`），自适应节流把它压到
+400ms/帧＝2.5fps。改为**独立子窗口**绘制（`src/ui/busy_bar.*`）：每帧只填 900×6 的 32bpp 位图
++ BitBlt，实测 **0.05ms/帧**；16ms 一拍（60fps），主面板忙碌期间不再重绘；计时器由
+刷新/逐条探测/一键探测三种 worker 统一驱动。
+门禁：`h-add` 新增 `PASS busy bar: repaints while busy and each frame is cheap`
+（`paints` 增长 >3、`lastPaintMs` <8ms），`-Gate All` 20/20
+（`evidence/20261022-223844-213-All.txt`）。
+产物 SHA `7c8a443a…` 已替换真机实例（PID 64584）。
+
+### G54 一键刷新同步 / 回退链只选不填 / 点击穿透（2026-10-23，真机反馈，DESIGN v1.25）
+
+①模型页搜索框右端新增「刷新同步」：确认卡 → 逐供应商只读探测 + `add-models{prune}` 同步
+（新增写入、已下线删除、写前备份），`dump.syncAll` 暴露进度。
+②⋯ 菜单删掉最后一行说明。
+③回退链「追加一条」只保留两个下拉：来源供应商（无"手填"项）+ 模型（整块字段即下拉，
+选来源后自动展开）；提交强制 `from_custom`；手填字段与原生绑定一并删除。
+④**点击穿透**三处根因 + 一处滚动条抢点击：
+- `ControlAt` 命中顺序改为"外壳优先 + 页面控件限定内容区"，修掉"点设置点到下边按钮"；
+- 回退链折叠卡控件整体前置（× 不再命中阶梯行按钮）；
+- 搜索框整行矩形先于右端按钮注册 → ✕/同步按钮被吃掉；改为 ✕ → 同步 → 搜索框并分开几何；
+- 页内滚动条只在无控件命中时才接管。
+⑤修崩溃：无供应商时 `clamp(0,0,-1)` 触发 Debug 断言（0xc000041d）→ 空列表保持 0。
+验证：控制面脚本（`tmp/.../verify-clickthrough.ps1`）确认「折叠卡 × 关闭后链长度不变」、
+「同步按钮弹出确认卡、取消不写」；`-Gate All` 20/20（`evidence/20261023-021439-110-All.txt`）；
+真机截图 `evidence/final-search.png`（同步按钮 + 原生占位同排显示）。
+产物 SHA `42f2354b…` 已替换真机实例（PID 16828）。
+
+### G55 复查新引入的问题（2026-10-23，用户"再检查检查有没有什么新的bug"）
+
+对照这轮改动逐项自查，找到并修掉 5 个问题（都是本轮新引入或缺的收尾）：
+1. **一键同步写完不刷新、不提示重启**：`SyncAllModels` 在独立 worker 里直接调助手，没走
+   `ApplyDataResult` 的写路径 → 模型列表要等下一次轮询才更新，且没有 v1.17 要求的网关重启交代。
+   修：新增 `kSyncAllMessage` + `HandleSyncAllDone()`：`StartRefresh()` + 有变更时按
+   `autoReloadGateway` 自动重启或点亮待重启胶囊，toast 报"已同步 N 个供应商"。同时把 worker 完成时
+   误发的 `kProbeAllMessage` 改为本消息（原来会触发探测完成逻辑，语义错位）。
+2. **退出崩溃**：析构只 detach 了 3 个 worker，`allProbeWorker_`/`syncAllWorker_` 还在飞时
+   `std::thread` 析构 → terminate。修：一并 detach。
+3. **同步期间忙碌条不出现/不动**：`SyncBusyBar` 与 16ms 计时器的 busy 判定漏了 `syncAllBusy_`。修：补上。
+4. **`dump.fallback.manual` 失真**：去掉手填项后 `source==0` 表示第一个供应商，字段仍报"manual=true"。
+   修：删除该字段（无门禁依赖）。
+5. **门禁覆盖**：`h-models` 新增"一键同步"用例（确认卡 → 逐供应商 probe + `add-models{prune:true}` →
+   待重启点亮 + toast 提到重启）。用例放在测试末尾——它会把夹具的模型列表改成探测结果，不能影响
+   前面的列表断言。
+`-Gate All` 20/20（`evidence/20261023-084001-943-All.txt`）；五个关键门禁连跑三次全绿。
+产物 SHA `747aa95b…` 已替换真机实例（PID 59872）。
+
+### G56 第二轮复查（2026-10-23，用户"继续检查"）
+
+又修 6 处：①跨 DPI 重建原生 EDIT 字体（`RefreshNativeFieldMetrics`，在 `ApplyDpiChange` 决议后调用）；
+②`InvalidateAll` 同时重绘原生输入框（`WM_CTLCOLOREDIT` 现取调色板，换主题才跟随）；
+③刷子按颜色缓存（原来每条消息新建/删除，旧刷子仍被选中时删除失败 → 句柄泄漏）；
+④同步进行中再点只提示「正在同步」，不重复弹确认卡；⑤删掉手填模式死渲染分支与
+`providerValue/urlValue/keyEnvValue/keyValue` 四个死字段（含 dump 键）；
+⑥同步按钮补悬停说明。
+`-Gate All` 20/20（`evidence/20261023-091251-422-All.txt`）。
+产物 SHA `96b54601…` 已替换真机实例（PID 46964）。
+
+### G57 性能：空闲不再整窗重绘 + 帧耗时归因（2026-10-23，用户"继续优化"）
+
+①**归因**：给 `Surface::Paint` 加 `BeginDraw / Draw / EndDraw` 三段计时，并在 `WM_PAINT` 里补
+`EndPaint` 计时；日志只在慢帧（≥25ms）写。实测：绘制本体 5–16ms（begin 0 + draw 5–11 + end 4–5）、
+`syncNative` 2–6ms、`syncBusy` 2–7ms、`EndPaint` 0ms。之前反复出现的"200ms/帧"是**墙钟**被
+helper 进程抢占（一次探测会连开十几个 `wsl.exe`）产生的等待，不是 D2D 渲染慢。
+②**优化**：`ApplyHelperState` 在状态签名未变时不再 `InvalidateAll()`（20s 轮询不再整窗重画）；
+`StartRefresh(quiet)` 让轮询不显示"对勾"（不为一个勾重绘整窗），手动刷新仍显示。
+③**验证**：`dump.paintFrames` 采样——1s 轮询间隔下连续 4 秒帧数 5→5（完全不变）；
+`motion` 新增断言"状态不变时轮询不重绘"；`-Gate All` 20/20（`evidence/20261023-101148-782-All.txt`）。
+产物 SHA `aed9904c…` 已替换真机实例（PID 37880）。
+
+### G58 热路径优化：测量缓存 + 摆放短路（2026-10-23，用户"继续优化"）
+
+①`PanelRenderer::Measure` 按 `(format, text)` 缓存 `CreateTextLayout` 结果（有界 2048 条，满了整体清空）。
+②`SyncNativeFields` 先算布局签名（页/子页/滚动/客户区/DPI/浮层态），不变就整段跳过——省掉每帧
+建 map + 13 次 `Place`（实测 2–6ms）。
+证据：`dump.measure` 在一次交互会话后为 **hits=4766 / misses=37（99.2% 命中）**；
+`dump.paintFrames` 在 1s 轮询间隔下 4 秒保持不变（空闲零重绘）；`h-models` 新增
+"测量缓存必须命中"断言；`-Gate All` 20/20（`evidence/20261023-110717-333-All.txt`）。
+产物 SHA `e5745104…` 已替换真机实例（PID 46100）。
+
+### G59 悬停热路径缓存（2026-10-23，用户"仔细检查"）
+
+`TrackHover` 每次鼠标移动都 `CurrentView()`（60+ tooltip 文案）+ `ComputeLayout`；布局其实只依赖
+状态/页/滚动/尺寸/DPI/展开态。新增 `HoverLayout()`：FNV 整数 key 判等，命中直接复用，
+`InvalidateAll()` 使其失效；`Draw` 增加"传入已算好布局"的重载，避免一次绘制算两遍布局。
+实测 30 次合成悬停 **命中 29 / 未命中 1**（`dump.hoverLayout`）。
+顺带删掉两处死成员（`lastBusyRepaint_`/`lastBusyThrottleLog_`）。
+`-Gate All` 20/20（`evidence/20261023-120620-292-All.txt`）；`hover` 单跑 6/6。
+产物 SHA `1dd5bdf4…` 已替换真机实例（PID 66456）。
+
+### G60 自查发现：v1.28 的"签名未变就不重绘"会漏刷状态灯（2026-10-23）
+
+`Signature()` 原本只用于判断"列表要不要重建"，因此**不含** webui/网关可达性、网关启动时刻、
+config mtime、助手错误横幅。v1.28 把它当作"要不要重绘"的判据后，这四类变化不会触发重绘：
+网关掉线时灯仍是绿的、助手报错时横幅不出现、同步时间戳不更新——是上上轮优化引入的真 bug。
+修：签名补齐五项；`state_tests2` 的"webui 可达性不改变签名"按新契约改写（理由：签名已兼任
+重绘判据），并新增 4 条断言；`-Gate All` 20/20（`evidence/20261023-123418-465-All.txt`）。
+产物 SHA `dfe1bf38…` 已替换真机实例（PID 27108）。
+
+### G61 悬停气泡反相配色（2026-10-23，真机反馈）
+
+用户："悬浮提示的方框背景要与当前主题不同，区分开来，要对比强一些"。
+气泡原来是 `palette.surf` + `palette.line`（与卡片/输入框同色系），浅色主题下几乎融进页面。
+改为**反相**：浅色页面 → 深底亮字 + 白色 30% 描边；深色页面 → 亮底深字 + 黑色 22% 描边；
+另加 1.5 DIP 下移的淡阴影。落位/淡入/文字垂直居中不变。
+证据：`evidence/tooltip-default.png`（浅色页面上的深色气泡）、`evidence/tooltip-dark.png`
+（深色页面上的亮色气泡）；`-Gate All` 20/20（`evidence/20261023-130050-879-All.txt`）。
+产物 SHA `b4587270…` 已替换真机实例（PID 52684）。
+
+### G62 跨屏拖动占位文字跑出输入框 / 忙碌条"点点点"（2026-10-23，真机反馈）
+
+① **现象**：拖动面板跨越显示器时，搜索框占位「搜索模型或供应商」跑到输入框外面（字号还大一圈）。
+**根因**：绘制倍率取 `GetDpiForWindow(panel_)`，而布局 / 原生 EDIT 摆放取 `monitor_.geometry.dpi`；
+系统移动循环期间 `WM_DPICHANGED` 被 `ApplyDpiChange` 的 `dragging_` 守卫推迟，`monitor_` 还停在
+上一个显示器上 —— 自绘框按新倍率、EDIT 按旧倍率（字号也是旧 DPI），跨屏瞬间两者错位约 100 px。
+**修**：新增 `Application::WindowDpi()` 作为唯一倍率来源（`LayoutForInput`、`SyncNativeFields` 内缩、
+`SyncBusyBar`、`CurrentView` 的滚动夹取、命中测试、控制面 `controls`/`audit` 全改用它）；
+`ApplyDpiChange` 在 `dragging_` 早退**之前**就 `RefreshNativeFieldMetrics()`；拖动快速路径按
+「客户区 / 窗口 DPI 变化」重算布局并 `SyncNativeFields` + `SyncBusyBar`；`NativeField::Place` 的缓存键
+改为「真正下发的矩形 + 行高」，控件 DPI 与字体 DPI 不一致时自愈重建，并把控件高度夹进字段框。
+
+② **现象**：忙碌条看起来是"一堆点点点"。**根因**：`BusyBar::Paint` 把打包成 `0x00RRGGBB` 的整数
+**整体**乘 alpha 再除 255，通道之间互相进位（G→R、B→G），每一列都成了伪随机色 —— 画出来就是点阵。
+**修**：逐通道混合（256 档查表）；观感改成「淡色轨道 + 44% 宽扫光带（快起亮、长尾淡出）」；
+底色改用忙碌条所在行（lampRow = surf）而不是 ink（原来会在状态行顶部压出一条更深的暗带）。
+
+③ **验证**：
+- A/B 对照（同一条真实拖动；临时把 `WindowDpi()` 退回 `monitor_` 复现）：旧逻辑拖到 192 DPI 屏时
+  「画出来的搜索框」在客户区 y=268、EDIT 停在 y=171（`inside=false`）；修复后每一步 `inside=true`，
+  松手后同样成立（`tmp/hermes-panel-native/crossdpi-repro2.py`）。
+- 真机截图 `tmp/hermes-panel-native/cdpi-during-drag-search.png`（192 DPI 屏、拖动中占位在框内）；
+  忙碌条逐帧 `tmp/hermes-panel-native/busy-sheet.png`（连续扫光，无点点）。
+- `ctest` 全量 **21/21**（Unit / Widget / Lifecycle / Shell / Pages / 回归），Debug + Release 均构建通过。
+- 产物 SHA `0d33852e…` 已替换真机实例（PID 38960）。
+
+### G63 标题栏上叠在吸附/最小化上的「刷新」是什么（2026-10-23，真机反馈）
+
+用户截图里标题栏「钉子」右边那枚「↻ 刷新」并和吸附/最小化图标叠在一起。定性：**备份页的页头动作按钮**
+（`ControlId::BackupRefresh`，旧 `.ph` 右侧的刷新）被画到了窗口最顶端。
+根因：`layout.cpp` 备份页分支在 `layout.pageHead` 还没算出来时就写了
+`pageHeadAction=Box(content.right-88, dip(0), 88, 30)`，纵坐标用了 `dip(0)`；后面的
+`pageHeadSub` 用 `pageHead.top` 重算过，`pageHeadAction` 没重算，于是按钮（含热区）停在 y=0..30，
+压在标题栏的吸附/最小化按钮上。修：纵坐标改为 `layout.content.top+dip(y)`（页头起点），
+顺手删掉同一分支里被后面覆盖掉的 `pageHeadSub` 死赋值。
+证据：`tmp/hermes-panel-native/backup-head.png`（备份页：标题栏四个按钮干净，页头右侧「↻ 刷新」）；
+`h-backup`/`h-controls`/`widget` 全绿。产物 SHA `873d6f22…` 已替换真机实例（PID 46500）。
+
+### G64 滑条不统一 / 添加页底栏压内容 / 备份页脚注 / 设置页空框（2026-10-23，真机反馈）
+
+① **滑条两套**：模型列表的滑条在 `list.right-6-1`（内容区里侧），页内滚动条在 `content.right+2`
+（内容区外侧），配色也不同（`raise2` vs `line2`，浅色主题下 raise2 几乎看不见）。
+统一为同一条竖线 `content.right+dip(2)`、同色 `line2`、悬停同样加粗到 8 DIP（页内滑条补了悬停判定）。
+证据 `tmp/hermes-panel-native/scroll-compare.png`（两页滑条同一 x、同宽）。
+
+② **添加页底栏压内容**：动作栏（探测/保存）固定在 `content.bottom-46`，而正文裁剪区是整个
+`content`、`pageScroll` 又被写死 0 —— 窗口拉矮后「接口模式」和 .env 说明被按钮盖住且看不到。
+修：正文视口改为 `bodyTop..footBar.top`（`layout.pageViewport`），`pageMaxScroll` 按这个高度算，
+添加页恢复页内滚动；动作栏移到正文裁剪之外绘制（固定底栏，不随滚动）。
+证据 `page-add-small.png` / `page-add-scrolled.png`（滚轮后 `pageScroll=67`，段选与开关可见，按钮不再压字）。
+
+③ **备份页脚注**：用户问「回滚前会把当前内容再备份一份…」是什么、能不能删。它是备份列表最后一段
+`.note`（`BackupPageView::footNote`）。按用户要求删除：文本、绘制、以及它在列表滚动高度里的 38 DIP
+一并去掉。证据 `page-backup-small.png`。
+
+④ **设置页输入框空框**：原生 EDIT 才是显示层，但镜像文本从来没推下去（只在创建时设过空串），
+设置页三行（WSL 发行版 / WebUI 端口 / 刷新间隔）永远是空框。修：`SyncNativeFields` 每帧把
+非焦点字段的镜像文本 `SetText` 到控件（相同则内部跳过；焦点字段以控件为准，避免打断 IME）。
+顺带：设置页自绘值的左右内缩 7→9 DIP（与 EDIT 摆放一致，去掉右缘漏出的半截字）；发行版留空时
+给 cue「默认发行版（留空）」。证据 `page-settings-small.png`（Ubuntu-24.04 / 8787 / 60 正常显示）。
+注意：真机 `settings.json` 里 `distro` 现在是空串（多半是被空框误导删掉的），显示为占位提示。
+
+门禁：`ctest` 全量 **21/21**（Debug）。产物 SHA `24065ad8…` 已替换真机实例（PID 54200）。
+
+### G65 复查（用户"你再检查一下"）：原生输入框越界 + 空 distro 打挂助手链路（2026-10-23）
+
+**① 本轮改动自查发现的新问题**：给添加页开了页内滚动后，原生 EDIT 是**子窗口**、不吃 D2D 的
+裁剪区 —— 正文滚动时输入框会盖到页头/底部动作栏/底栏导航上（这正是上一轮"底栏被压"的同一类病，
+只是换成了子窗口那层）。修：`SyncNativeFields` 只摆"整块都在 `layout.pageViewport` 里"的字段；
+半截滚出视口的字段交给自绘层照常显示（文字本来就在控件下面）。压测（最小高度 384 DIP + 探测出
+大量模型 + 滚到底）：`pageScroll=80`，可见字段 2/3，`overlaps footer = False`。
+
+**② 复查真机日志发现的真故障**：16:58:50 有一次 `settings: set distro = `（空值）落盘 —— 用户当时
+正对着"空框"的设置页操作（就是 G64 ④ 那个 bug），把发行版设置清空了。后果从 16:59 起：
+`UNC unavailable (unc: distro unknown)` → 回退 `wsl.exe` → 而 `wsl.exe -d ""` 报
+**WSL_E_DISTRO_NOT_FOUND** → 助手全挂（`state changed: providers=0`、页面"离线"、点标签无反应）。
+同时那次空值也把 `pollSeconds` 清成了下限 5（事故前日志是每 20 s 一轮）。
+修（不动用户数据的部分）：`HelperBridge::DistroSwitch()` —— **发行版留空时不传 `-d`**，走 WSL 默认
+发行版（设置页占位提示写的就是这个语义；以前传 `-d ""` 必失败）。用真机 settings 副本（distro 置空）
+跑 Debug：`wsl ping exit 0`、`helper exit=0 ok=1 dataBytes=10537`、`providers=17`。
+**用户数据修复**（已备份到 `tmp/hermes-panel-native/live-settings-before-repair.json`）：
+`distro` 复原为 `Ubuntu-24.04`（机器上唯一发行版，也是 UNC 快路径工作的前提）、`pollSeconds` 复原为 20
+（事故前节奏）。复核：真机日志恢复 `refresh from UNC snapshot` → `UNC cache (config unchanged)`，
+即轮询不再拉起 wsl.exe。
+
+门禁：`ctest` 全量 **22/22**（含 helper / unc-parity，Debug）；`tools/full_audit.py --quick` **113 passed / 0 failed**。
+产物 SHA `e99fd7ee…` 已替换真机实例（PID 33216）。
+
+### G66 继续查 bug：添加页表头乱码 + 气泡/Toast 被输入框盖住（2026-10-23）
+
+① **添加页模型列表表头是乱码**（真 bug，用户可见）：源码里写的是 mojibake
+（`å¨ä¸é` / `ï¼`，即 UTF-8 字节被当 Latin-1 解释后又存成 UTF-8），探测出模型后表头显示成
+`å¨ä¸é（3/3）` 而不是「全不选（3/3）」。修：改成 ASCII 转义（`å¨...`），
+真机截图 `tmp/hermes-panel-native/chips-header-crop.png` 现在是「✓ 全不选（3/3）」。
+**防复发**：`tools/full_audit.py` 新增静态检查 `source: no mojibake string literals`
+（扫 src/**/*.cpp|h 里 U+00A0–U+00FF 的字符，白名单只放排版用的 § · × — … ° µ）。
+
+② **提示气泡被原生输入框盖住**（上一轮确认）：气泡是 D2D 画的、输入框是子窗口、永远在上——
+悬停搜索框下沿时提示被切成两半。修：气泡定位避开所有字段盒（优先挪到框正上方，放不下挪到框下方，
+最后再夹进窗口）。截图对照：修前 `tip-bottom-crop.png`（被切）、修后 `tip-bottom-crop2.png`（完整在框上方）。
+
+③ **Toast 同一机制**（防御性修复，未单独复现）：提示期间把与 Toast 矩形重叠的原生字段藏起来
+（自绘层的框与值仍在，视觉无缝；**焦点字段不藏**，否则正在输入的内容会掉）；Toast 的出现/消失
+也进了原生字段的布局签名，保证提示出现的那一帧就生效。
+
+④ **极端窗口高度布局审计**：384 / 420 / 560 / 700 DIP × 五页 × （顶部 + 滚到底）→
+`audit` 报 **0 越界/退化**（`tmp/hermes-panel-native/extreme-audit.py`）。
+
+门禁：`ctest` 全量 **22/22**（Debug）；`full_audit.py --quick` **114 passed / 0 failed**（含新静态检查）。
+产物 SHA `df631de1…` 已替换真机实例（PID 46648）。
+
+### G67 继续查 bug：API Key「眼睛」被输入框盖住 + 点了没反应（2026-10-23）
+
+用户要求"继续把后面的都弄完"。按上一轮列的三项逐个查，又抓到 **2 个真 bug + 1 个隐私隐患**：
+
+① **眼睛按钮被原生输入框盖住**：按钮是自绘的（`KeyReveal`，`field.box.right-31..-5`），而 API Key 的
+原生 EDIT 铺到 `field.box.right-9` —— 按钮只剩贴着右边框的一条边（真机截图里那个"›"就是它）。
+更糟的是真实鼠标点上去会先命中输入框（gates 用 `tap` 走控制面，所以一直没暴露）。
+修：`SyncNativeFields` 对 `kind==1`（密码）字段再让出 24 DIP，按钮完整露出来、真鼠标也点得到。
+证据 `tmp/hermes-panel-native/eye-masked-crop2.png`（完整眼睛图标）。
+
+② **眼睛点了没反应**：`addKeyRevealed_` 只改了视图标志，原生 EDIT 建的时候是 `ES_PASSWORD`、
+**从没**调过 `EM_SETPASSWORDCHAR` → 自绘层"已显示"、控件还是一排圆点。
+修：`NativeField::SetPasswordVisible()`（创建时用 `EM_GETPASSWORDCHAR` 记住系统默认掩码字符，
+切换时置 0 / 还原，带状态去重防止每帧重绘）；`SyncNativeFields` 每帧把 `addKeyRevealed_` 同步下去。
+实测 `EM_GETPASSWORDCHAR`：掩码 `[0,0,9679]`（U+25CF）→ 点眼睛 `[0,0,0]`（明文）✓。
+
+③ **明文状态跨页面存活（隐私隐患）**：`addKeyRevealed_` 从不复位——一旦点过眼睛，之后每次进添加页、
+每个新供应商的 Key 都默认明文。修：切到添加页 / 切子页时复位为掩码（实测切走再回来 `keyRevealed=false`）。
+
+**另外三项核查（结论：无缺陷）**：
+- 长文本字段：向 distro 塞 113 字符 → 输入框内部横向滚动、裁在框内，不溢出到标签或框外
+  （`tmp/.../long-text-crop.png`）。
+- 高对比度：向面板投 `WM_SETTINGCHANGE` + `WM_THEMECHANGED` → 存活、布局不变；面板全部自绘颜色、
+  原生 EDIT 的字/底色由 `WM_CTLCOLOREDIT` 显式给，不随系统 HC 翻转（设计如此）。
+- 主题切换中途：`InvalidateAll` 每帧连原生输入框一起失效，抓过渡帧与终态帧对比，字段底色/字色
+  与面板同步（`tmp/.../theme-mid.png` / `theme-end.png`）。
+- 顺带确认：输入框里敲的 key 不会进日志（在隔离实例里敲 `sk-test-…` 后日志 0 命中）。
+
+门禁：`ctest` 全量 **22/22**（含 helper / unc-parity，Debug）。产物 SHA `ece53c6f…`
+已替换真机实例（PID 32036）。
+
+### G68 继续查 bug：搜索清空 ✕ / 状态中心卡片被输入框盖住（2026-10-23）
+
+用户要求"继续"。这轮专查**静态布局审计抓不到的相互遮挡**（审计只查越界/退化，不查两个元素叠在一起），
+又抓到两个真 bug，都是"原生子窗口画在 D2D 之上"这一族：
+
+① **搜索框的 ✕（清空）被输入框盖住**：✕ 的盒子在 `search.right-114..-94`，而原生搜索 EDIT 的右内缩
+只有 100 DIP → 正好压住 ✕ 的左边 20 DIP，真机上只剩贴着边框的一条":"（自绘的 ✕ 在输入框底下）。
+修：右内缩 100→118 DIP，整颗 ✕ 在框外。证据 `tmp/.../clear-crop.png`（修前只剩":"）/
+`clear-crop2.png`（修后完整 ✕ + 刷新同步）。顺带说明：真实鼠标点 ✕ 以前也会先命中输入框，修好后
+真点也落在面板上（门禁一直用控制面合成点击，所以没暴露）。
+
+② **状态中心卡片被输入框盖住**：点「N 项状态」胶囊展开的卡片（D2D）从灯行下方开始，正好压住设置页
+第一行输入框 → 卡片第二行「助手出错 / 重试」被 `Ubuntu-24.04` 输入框切掉一半（真机截图复现）。
+修：把"浮层避让"统一——Toast / 状态中心卡片任一可见且与字段相交时，该字段本帧不摆（自绘层框与值
+仍在，视觉无缝；焦点字段除外），并把状态卡片状态并入原生字段的布局签名，保证展开那一帧就生效。
+证据 `status-card-open-2x.png`（修前被切）/ 修后同一位置两行完整可见。
+
+③ **顺手补齐**：设置页「关闭按钮」下拉（`settingsSelectOpen_`）原先漏在"浮层打开就藏输入框"的判定外，
+补进 `overlayOpen`（与回退链/添加页两个下拉同一条规则）。
+
+**这轮的"无缺陷"核查**（同样靠截图，不靠断言）：灯行同时挂合并状态胶囊 + 待重启 chip + 三盏灯
+不重叠（`ov-lamps-2x.png`）；筛选行三段与右侧「2 条结果 · ↑↓ 选择 · ↵ 切换」提示不重叠
+（`ov-filters-2x.png`）；90 字符的模型名在 hero 铭牌里按省略号截断、不压右侧 chat tag
+（`ov-hero.png`）；设置页「关闭按钮」下拉两个选项完整（`settings-dropdown-2x.png`）。
+
+门禁：`ctest` 全量 **22/22**（Debug；首轮 motion/h-backup 各失败一次，单跑与复跑均 PASS——
+那是我自己的调试实例占着桌面导致的抖动，不是回归）。产物 SHA `cb45316d…` 已替换真机实例（PID 44088）。
+
+### G69 继续查 bug：诊断/用量模态卡在「正在读取…」（2026-10-23）
+
+**真 bug**：设置页点「查看」（诊断 / 用量）时，如果后台正好有一轮刷新/轮询在飞，
+`StartReadHelper` 的单飞守卫会**直接丢弃**这次只读请求 —— 模态就永远停在「正在读取…」，
+只有再点一次「刷新」才有内容。真机场景很常见：轮询期间点开就会命中。
+（门禁没抓到：`h-settings` 只断言"请求到达了助手"，没断言模态拿到事实行。）
+
+修：忙时**记下**请求（`pendingReadCmd_`），在 `ApplyDataResult` 开头（worker 已释放
+`workerBusy_`）补跑一次；若用户已经关掉模态就丢弃（按 `pending_` 校验）。
+实测：修前模态 `facts=1`（就是"正在读取…"这一行）且助手 `requests.log` 里 0 条 diagnose；
+修后 `facts=8`、`requests.log` 2 条（diagnose + usage）。
+
+**这轮的其他核查（结论：无缺陷）**：
+- 供应商 ⋯ 菜单：超长 base_url / 供应商名 → 名字按省略号截断、长 URL 走**横向滚动**（设计如此，
+  模态底部有横滑条），`audit` 0 越界。
+- 回退链 10 条：阶梯内部滚动正常（滚到 4–10 行）、末行 ↓ 正确置灰、「追加一条」不重叠；
+  逐条探测后每行出现「● 7」结果点，不与行尾三个按钮重叠；三处 `audit` 全 0。
+- 托盘右键菜单：五个分组 + 中文正常 + 「始终置顶」带勾（`tools/tray_menu_shot.py` 真机截图）。
+- 贴条 4 条边 × 铭牌/胶囊两套：logo / 三灯 / 模型名都在各自区域内，无重叠（`strip-sheet.png`）。
+- Tab 焦点链：从搜索框连续 Tab 8 次，8 个不同停靠点，不卡死、不跳空。
+- 真实键盘焦点：窗口为前台时点原生字段后 `GetGUIThreadInfo.hwndFocus` = `Edit` ✓
+  （非前台时 SetFocus 会丢焦点，是 Win32 行为，真实鼠标点击会先激活窗口）。
+
+门禁：`ctest` 全量 **22/22**（Debug）。产物 SHA `95f2612c…` 已替换真机实例（PID 57668）。
+
+### G70 继续查 bug：回滚后列表不刷新 / 保存后表单复位的取舍（2026-10-24）
+
+**真 bug（已修）**：备份页回滚成功后会「恢复前再备份一份」当前内容 —— 列表里应当**多出一条**，
+但 `restore` 落盘后没有任何重读，界面仍是旧的 3 行（实测 `backup-list` 请求数 1）。
+修：`restore` 成功后 `LoadBackups()` 重读；实测 `backup-list` 1→2，列表随之更新。
+回滚主链路本身复核正常：确认卡 → `restore{file,kind}` 到达助手 → toast「已回滚（恢复前又备份了一份…）」。
+
+**一处"差点改错"的地方（留档）**：保存新供应商后表单是否清空。旧 Electron 版会清空 5 个字段并
+跳回模型页；本移植版的 `h-add` 门禁明确要求"保存后仍能继续操作同一页/同一列表"（连续保存第二个
+供应商的用例），upsert 本身幂等、不会产生重复条目。我先按旧版行为加了一段清空+跳页，
+`h-add` 立刻失败 —— 已回退，并在代码里写明这是**有意的差异**，不是缺陷。
+
+**这一轮的其他核查（结论：无缺陷）**：
+- 贴条拖动三态：左贴起手 [0,311,38,170] → 拖到中部松手自动贴顶 [547,0,170,38]
+  （尺寸横竖互换正确、edge=3）→ 再拖到右缘 [2522,457,38,170]（edge=2）；三帧字形完整
+  （`sd-sheet.png`）。
+- 托盘右键菜单、供应商 ⋯ 菜单（超长 URL 走横向滚动）、回退链 10 条 + 逐条探测点、Tab 焦点链、
+  真实键盘焦点到 EDIT：均在 G69 已覆盖，本轮回归仍为正常。
+
+门禁：`ctest` 全量 **22/22**（Debug；`motion` 首轮失败一次、单跑与整轮复跑都 PASS，
+属于桌面被调试实例占用时的抖动）。产物 SHA `e1a5ba44…` 已替换真机实例（PID 75832），
+真机日志 0 error、17 个供应商。
+
+### G71 继续查 bug：紧凑视图整片越界 / 「/」快捷键是空头承诺（2026-10-24）
+
+**① 真 bug：托盘「紧致视图」把面板压到 152 DIP，四页共 18 处控件越界。**
+152 DIP 比固定 chrome 还矮（标题栏 34 + 寄存器 27 + hero 64 + 底栏 47 = 172），`layout.content`
+的高度被算成**负数**；随后各处 `std::max(dip(96), …)` 之类的兜底又把它撑回 96+，于是搜索框、
+保存按钮、回滚按钮全被画到窗口外——真机上点不到（`audit` 报 18 处，`h-controls` 报
+"tap point is outside the panel"）。
+修（不动 152 这个几何契约——`geometry` 门禁明确要求 `TierSize(compact)==152 DIP`）：
+- `layout.content` 高度夹到非负，并算出 `tightContent`（可用正文 < 80 DIP）；
+- 空间不够时**不画 hero**（`heroFits`，用窗口高度判断，不能读 `layout.nav.top`——那时还没赋值）；
+- 列表可用高度 / 备份页可用高度在紧凑档取 0，列表盒高度再夹到 `nav.top`；
+- 页内滚动条只在视口高度 > 0 时出现（避免 3 像素高的退化轨道）。
+结果：紧凑档五页 `audit` **全部 0**（修前 18 处）。
+
+**过程中自查到的自身错误（值得记）**：`layout.content` 的高度我第一版写成了
+`dip(layout.nav.top-contentTop)` —— 后者已是像素，`dip()` 又乘了一次 scale（120 DPI 下 1.25×），
+内容区比窗口还高，`h-fallback`/`h-controls` 立刻失败。去掉多余 `dip()` 后恢复。
+
+**② 真 bug：「/」聚焦搜索框是空头承诺。** 搜索框提示写「搜索模型或供应商（/ 聚焦）」、
+DESIGN §4.3 #10 也写了，但代码里**没有实现**该快捷键（`grep VK_OEM` 全仓 0 命中）。
+修：模型页、无输入焦点时 `/`（`VK_OEM_2`，小键盘 `/` 用 `VK_DIVIDE`）聚焦搜索框。
+实测：`/` → `focus.native=true`；输入 `abc` → `search=abc`；Esc → 清空。
+
+**这一轮的其他核查（无缺陷）**：切换模型撞上进行中刷新 → 确认卡 → 排队执行成功
+（`set-main` 1 次、当前模型正确切换）；重启网关 → toast「网关已重启」、`reload` 1 次、
+待重启胶囊清除；回滚后备份列表重读（G70 修复）保持；模型页收藏星标可切换。
+
+门禁：`ctest` 全量 **22/22**（Debug）。产物 SHA `5720e87f…` 已替换真机实例（PID 74092）。
+
+### G72 紧凑档收尾：切页后「追加一条」仍越界（2026-10-24）
+
+承 G71：紧凑档五页在**未切页**时 `audit` 已 0，但实际切到回退链页后仍报 1 处
+`fbFoldToggle outside`：`layout.ladder` 高度用的是 `content.bottom - pageHead.bottom - 7 - addHeight`，
+紧凑档下 content 已经很矮，相减为负 → 「追加一条」被算到窗口外，而且**仍在命中表里**（点不到但吃点击）。
+修：阶梯高度夹到非负；「追加一条」只在**整块落在内容区内**时才注册控件，否则置空矩形。
+
+顺带核实（无缺陷）：
+- 灯行合并胶囊：`pillWidth=min(pillWidth, syncLeft-gap-pillLeft)` 有兜底，超长状态标签只会被压窄，不会压住同步章。
+- 配置档案：`h-settings` 已覆盖「保存当前 → 应用（set-main/清空回退链/追加回退）→ 待重启胶囊 → 失败即停」
+  全链路；本轮复跑正常。空档案时的管理页 `audit` 0。
+
+门禁：`ctest` 全量 **22/22**（Debug）。产物 SHA `4c346a2b…` 已替换真机实例（PID 66476）。
+
+### G73 紧凑档改为「迷你模式」（2026-10-24，用户选择方案 2）
+
+152 DIP 装不下「标题栏 34 + 寄存器 27 + hero 64 + 底栏 47 = 172」，压得再紧也没有正文可用。
+用户拍板方案 2：**紧凑档只做迷你模式**——只显示标题栏 + 状态灯行 + 当前模型（hero）+ 底栏，
+不显示任何页面正文，底栏只保留「模型」「设置」两个入口。
+
+实现（都在 `ComputeLayout` 的 `compactMode` 分支，命中后提前 return，不再产出任何页面控件）：
+- `compactMode = 标题栏+灯行+hero64+底栏 > 窗口高`；
+- hero 高度取**剩余高度**（152−34−27−47 = 44 DIP）而不是固定 64 —— 否则会被底栏裁掉一半
+  （中间版本的真机截图就是"模型名只露上半截"）；迷你 hero 省掉供应商行，只留单行模型铭牌 + chat tag；
+- 正文矩形（list / listViewport / 两个滚动条 / pageViewport）显式清空，`scrollVisible` 置 false；
+- 底栏两枚入口（模型/设置）两等分居中，nav 渲染按 `navItems.size()==2` 把下标映射回真实页号
+  （否则图标/文案会串位）；
+- `InvokeControl` 对紧凑档的中间三页直接忽略（即使被合成点击/键盘命中也不切页）；
+- `audit` 在迷你模式下跳过 `listViewport` 的退化检查（空矩形是预期）。
+修掉的三次自伤：① 提前 return 时 nav 项没建 → 底栏空；② hero 子盒在 return 之后算 → hero 空白；
+③ 同一处 hero 高度写死 64 → 被底栏裁切。
+
+验收：`mini-test.py` / `mini-tabs.py` —— 紧凑档 `audit` **0**；底栏只有 `tabModels`/`tabSettings`；
+点设置→page 4、点模型→page 0；盲点底栏正中不切页；截图 `tmp/.../mini-mode.png`
+（标题栏 + 三灯 + 单行模型铭牌 + 两枚底栏入口，无裁切）。
+
+门禁：`ctest` 全量 **22/22**（Debug）；`full_audit.py --quick` **114 passed / 0 failed**。
+产物 SHA `798ca516…` 已替换真机实例（PID 57016）。
+
+### G74 性能优化 + 悬停提示偶发不弹（2026-10-24）
+
+**性能（先量后改）**：真机日志 `paint phases` 一直是 begin=0 / draw 4–14ms / end 4–8ms，
+远低于历史上"200ms/帧"的记录（那是功能刚落地时的状态）。仍做了两处可测优化：
+
+① **每帧只构建一次视图**。绘制路径先 `CurrentView()` 建一份给绘制，`LayoutForInput()` 内部又
+`CurrentView()` 建了第二份（60+ 条 tooltip 文案 + 整棵模型列表）。新增
+`LayoutForInput(PanelViewModel&)` 重载，绘制路径直接复用同一份视图。
+② **原生字段文本缓存**。`NativeField::SetText` 以前每帧每字段都要
+`GetWindowTextLengthW`+`GetWindowTextW` 回读，7 个字段实测 ~4ms/帧。新增文本缓存
+（`CachedText`/`RefreshCache`），命中缓存就不碰内核。
+**踩到的坑（重要）**：控件**隐藏**时 `SetWindowTextW` 不生效，缓存却记成"已推送" → 设置页三个框
+一直是空的。修法两条：`SetText` 在控件不可见时作废缓存；文本推送从 `SyncNativeFields` 开头
+**移到 `Place` 之后**（先显示、后写文本）。实测 `syncNative` 4ms → 1–2ms。
+
+**真 bug：悬停提示偶发不弹（h-controls 三次里两次失败、失败点随机）。**
+根因两层：① `TrackHover` 只在"命中控件变了"时重排提示定时器 —— 同一控件连续 hover 时
+`id==hoverControl_`，定时器没走完就再也不会重启；② 控制面 `hover` 是合成的，而真实指针
+可能在面板上别处，系统补发的 `WM_MOUSEMOVE`/`WM_MOUSELEAVE` 立刻把合成悬停覆盖掉。
+修：把"已命中但提示还没显示"也算作需要重排；`hover` 命令置 2 秒保护窗，期间忽略真实移动
+与一次离开消息。顺带把状态灯的命中盒从 `dot.bottom`（8px 高一条）扩到整行高度 ——
+以前鼠标落在灯的文字上不弹提示，取矩形中点也会落到下一行。
+
+门禁：`h-controls` 连跑 **3/3 PASS**；`ctest` 全量 **22/22**；`full_audit --quick` **114/0**。
+产物 SHA `37c1898e…` 已替换真机实例（PID 20284）。
+
+### G75 资源长稳 + 性能复核（2026-10-24）
+
+**资源长稳（新测）**：5 轮「6 套主题 × 5 页 × 3 次档位切换 × 隐藏/显示 × 滚轮」+ 再压 200 轮
+五页循环，采样 `dump.process`：
+
+| 指标 | 基线 | 5 轮后 | 再 200 轮切页 |
+|---|---|---|---|
+| GDI | 39 | 40（+1，常量） | 40（+0） |
+| USER | 35 | 37 | 36 |
+| 句柄 | 391 | 389 | 396 |
+| 线程 | 22 | 22 | 20 |
+| 私有内存 | 59.9 MB | 64.1 MB | 64.0 MB（−52 KB） |
+
+结论：**无泄漏**。GDI 全程 40（唯一 +1 是首次创建托盘图标），内存跑完 200 轮切页后没有增长。
+顺带核实托盘图标只在状态色变化时重建、`Shell_NotifyIcon` 失败路径也 `DestroyIcon`（不泄漏）。
+
+**性能复核结论（不改代码）**：
+- 切页 140ms 淡入 CPU ≈ 78ms/次（9 帧 × ~7ms），是设计内的动画成本，不是浪费。
+- 轮询已有「状态签名不变就不重绘」短路（v1.28），空轮询不产生绘制。
+- `StartPanelMotion` 只 arm 定时器不立即重绘，调用处的 `InvalidateAll()` 是必要的（不是重复）。
+
+本轮实测帧成本（120 模型 + 连续切页/滚动）：begin 0ms / draw 5ms / end 4ms / syncNative 2ms /
+syncBusy 1ms / endPaint 0ms，`busy paint` 日志一条都没有（阈值 25ms）。
+
+产物 SHA `37c1898e…`（沿用 G74 的发布，本轮只做测量，无代码改动）；真机实例 PID 20284 正常，
+UNC 快路径、20/60s 轮询按可见性工作。
+
+### G76 继续查：数字输入的静默改值（真 bug）+ 覆盖盘点（2026-10-24）
+
+**真 bug：设置页数字框敲进非数字，会被静默改成下限值。**
+`SetSetting` 用 `atoi` + `std::clamp` 解析：`atoi("abc")=0` → 夹到 `webuiPort` 下限 **1**、
+`pollSeconds` 下限 **5**。而且输入框在编辑期间还显示旧值（`stored_` 变了、控件没变），
+**失焦后突然变成 1 并落盘** —— WebUI 探活从此打到 1 端口，轮询变成 5 秒一次。
+实测（隔离实例，清空后输入 `abc`）：`显示 8787 → 失焦 1`、`settings.json webuiPort=1`。
+
+修：新增 `ParseWholeInt`（整串必须都是数字，允许前后空白），非法输入**保持原值**不做任何写入；
+合法但越界的值仍按原规则 clamp（`99999` → `65535`，实测确认）。
+
+**覆盖面盘点（这轮检查过、确认已有的）**：
+- 资源长稳：见 G75（GDI 恒定、200 轮切页内存不增）。
+- 剪贴板 / Ctrl+A / 双击选词 / 右键菜单 / IME：全部由系统 `EDIT` 提供（v1.23 起），
+  自绘层不参与，`h-ime` 门禁覆盖 IME 路径。
+- 延迟探测（F4）、DPI 缩放（`dpi-probe` 覆盖 96/120/144/192/202）、拓扑消息（A6：浮动零写入、
+  贴边重新落位）：均已有门禁。
+- 设置页数字越界合法值：clamp 正确（65535）。
+
+**过程中遇到的 `unc-parity` 失败（环境，非产品）**：我手动在 WSL `/tmp/unc-parity` 下 `mkdir`
+了同名目录，导致 C++ 侧 `//wsl$` 写夹具时目录状态不一致（只有 `.env`、没有 `config.yaml`），
+驱动报 `FileNotFoundError`。删掉重跑后 **3/3 通过**；已确认与代码无关。
+
+门禁：`ctest` 全量 **22/22**。产物 SHA `b2f30383…` 已替换真机实例（PID 12428）。
+
+### G77 三项真机验证：Explorer 重启 / 侧边任务栏 / 高对比度（2026-10-24）
+
+**① 真 bug（严重）：Explorer 重启后托盘图标永久消失。**
+`TaskbarCreated` 是 `RegisterWindowMessage` 出来的动态消息，系统把它广播给**所有顶层窗口**；
+但本程序的消息循环宿主是 message-only 的 control 窗口，而那条分支只写在
+`Application::WindowMessage`（面板/贴条窗口）里 —— 它们根本收不到这条广播。
+实测：向 control 窗口投递 `TaskbarCreated`，`dump.tray.readds` 恒为 0（处理从未发生）。
+后果：资源管理器一重启（崩溃/更新/手动重启），托盘图标就没了，只能重启程序找回。
+修：`ReAddTrayAfterExplorerRestart()` 抽成方法，`ControlProc` 的 `default` 分支按
+`app->TaskbarCreatedMessage()` 识别并调用（面板侧的旧分支也改为调用同一方法）。
+实测修复后：`readds` 0→1→2，`registered` 保持 true，托盘菜单仍能正常弹出（`tray-menu-after.png`）。
+
+**② 真 bug：浮动面板不夹进工作区（侧边/顶部任务栏时会压住任务栏）。**
+`ComputeRect` 的 `Edge::None` 分支直接返回模型里的原始坐标，只有停靠分支用 `work`。
+新加的三条断言里"顶部任务栏 + 浮动"立刻失败。
+顺带发现旧夹具 `R01 floating origin preserved` 把 `y=514`（底边 1148 > 工作区底 1040，
+即压在任务栏上）当成预期 —— 等于把 bug 固化了。修：`Edge::None` 走 `ClampFloating`；
+R01 改成工作区内的合法坐标，另加 `R01b` 钉住"越界会被夹回"。
+实测四条边贴边全部 `insideWork=True`（底部贴到 1342 而非屏幕底 1440），面板与挂件都不压任务栏。
+
+**③ 高对比度 + 侧边任务栏的其余验证（无缺陷）**：
+- 投 `WM_SETTINGCHANGE` / `WM_THEMECHANGED`：不崩、几何不变（面板矩形前后一致）。
+- 六套主题的正文对比度（text/surf 与 text/ink）：15.85–18.55，全部 ≥14 的契约阈值；
+  未发现低对比主题。
+- `WM_GETDPISCALEDSIZE` 在 96/120/144/192 下给出 384×634 / 480×793 / 576×951 / 768×1268，换算正确。
+- 注：**没有**改用户系统的"高对比度"开关（那会影响整个桌面），只做了消息级验证 +
+  配色阈值计算；真实 HC 视觉观感仍需你在需要时自己开一下确认。
+
+门禁：`geometry` **17392 passed / 0 failed**（含新增侧边任务栏断言）；`ctest` 全量 **22/22**。
+产物 SHA `e1ececfa…` 已替换真机实例（PID 33712）。
+
+### G78 四个未覆盖场景的验证（2026-10-24，结论：无新缺陷）
+
+**① 原生输入框有焦点时切页**（隐私/错位风险）：设置页聚焦「WSL 发行版」后点「模型」标签 ——
+`dump.focus` 从 `{field:0, native:true}` 变为 `{field:-1, native:false}`，再敲 `ZZZ`
+不会串进搜索框（`models.search` 仍为空）。焦点在切页时被正确清除，键盘不会落到隐藏控件。
+
+**② 快速连点按钮**（重复写风险）：`probe` 按钮连点 3 次、间隔 20ms（夹具 `probe_slow` 让单次
+probe 慢 400ms）：`requests.log` 只有 2 条 probe，日志 `action probe started`×2 + `queued behind`×2
+—— 即"第一次执行 + 后两次合并成 1 次排队"，与 `StartHelperAction` 的设计一致。
+
+**③ 粘贴（WM_PASTE）进原生输入框**：剪贴板写 `Ubuntu-Paste-Test` 后投 `WM_PASTE`，
+输入框显示正确，且 `dump.stored.distro` 同步为该值（`EN_CHANGE` 路径工作）。
+编辑期间 `settings.json` 里仍是旧值——那是 `SettingsStore::Save` 的节流 + "失焦才提交"设计，
+不是缺陷（实测失焦后落盘为粘贴值）。
+
+**④ 同名实例重复启动**：第二个进程在 `CreateMutexW` 处识别 `ERROR_ALREADY_EXISTS`，
+等 ready 事件后向已有实例发 `kWake` 并以 **exit 0** 退出；实测未出现第二个面板窗口。
+
+**顺带确认**：`geometry` 的 17392 条断言（含 G77 新增的侧边任务栏用例）全绿。
+
+产物 SHA 沿用 `e1ececfa…`（本轮只做验证，无代码改动）。
+
+### G79 架构级死代码普查（2026-10-24，用户要求「从底层架构检查」）
+
+自查脚本（`tmp/hermes-panel-native` 下的 `deadcode.py` / `cmake-audit.py` / `dup-audit.py`）覆盖四类：
+头文件声明零调用、匿名命名空间孤立函数、成员字段零外部引用、constexpr 零使用；
+另外盘了 CMake 源文件覆盖、层间依赖、跨文件重复块。
+
+**① 真 bug：chip 颜色枚举错位（视觉上一直在说谎）**
+`widgets.cpp` 里 `ChipSkinOf` 把 `ChipKind` **强转 int** 喂给 `ThemePalette::LampColour`，
+但两个枚举序号不同（`ChipKind: Ok=0/Warn=1/Err=2`；`LampColour: 0=idle/1=ok/2=warn/3=err`）：
+「WebUI 不可达」（err）被画成**琥珀**、「网关待重启」（warn）被画成**绿色**。
+像素证据：修前 chipWarn 区域平均 RGB **(128,182,161)**（G 最高 = 绿），修后 **(207,176,127)**（R>G>B = 琥珀）。
+修：按 `ChipKind` 显式 switch 取色，不再跨枚举强转。
+
+**② 死代码清理（编译器 /W4 看不到的那些）**
+- 删除两个孤立函数：`panel.cpp` 的 `Blend`、`WorstLamp`（只有定义，零调用）。
+- 删除 5 个零使用常量：`layout.cpp` 的 `kAddLinePad` / `kLadderPadX` / `kRowLeftPad` / `kCardRadius`、
+  `widgets.h` 的 `kBannerHeight`（注释还写着已废弃的 banner 机制）。
+- 删除 7 个**只写不读**成员：`Application::backupLoaded_`、`lastBusyPaintMs_`（注释放着「供忙碌条
+  自适应节流」，但 G53 改独立子窗口后节流已移除）、`instance_`、`BusyBar::width_`/`height_`、
+  `NativeField::right_`、`ControlPipe::owner_`；`ControlPipe::Start` 的 `owner`/`message` 参数
+  从未被读取（通知走 handler 里的 `SendMessageW`），保留签名但显式 `(void)` 标注原因。
+- 复查：`constexpr 零使用 = 0`、`只写不读成员 = 0`。
+
+**③ 架构结论（无缺陷）**
+- 分层干净：`core`/`data` 不依赖 `render`/`app`；`render` 只依赖 `app/panel_view.h`（视图模型契约），
+  不反向依赖 `Application`。
+- 无孤立源文件：唯一未被 `add_executable` 直接引用的 `core/geometry.cpp` 由
+  `add_library(hermes-geometry STATIC …)` 编库后链接，属于正常组织。
+- 无孤立头文件（每个 `.h` 都被 include）。
+- 跨文件同名函数 15 组，绝大多数是不同类的同名方法（`Place`/`Create`/`Paint`）。
+  唯一语义重复的是 `Fade`（`panel.cpp` / `widgets.cpp` 各一份，均为「只换 alpha」）——
+  两行函数、37 处调用，合并的改动面大于收益，已在两处加注释互相指向、要求同步修改。
+- `LampColour` 的两份实现（`enum class` 版与 `int` 版）序号互相一致，是设计内的两套入口，
+  已在 `theme.h` 注明 `0 idle / 1 ok / 2 warn / 3 err`。
+
+### G80 多维度健壮性（2026-10-24）
+
+**① 真缺陷：settings.json 的数组加载没有上界（只做了写入侧限长）。**
+`SettingsStore::Load` 对 `favorites` / `recents` 无条件遍历全部条目，而写入路径有
+`kFavoritesMax=200` / `kRecentsMax=12`。手改或损坏的文件里可能有几十万条：启动要把整份数组读进
+内存、每次 `PersistSettings` 还要把它序列化回去（实测 2MB / 20 万条不崩，但没有意义）。
+修：把两个上限挪到数据层 `settings.h`（加载与写入共用一处定义），`Load` 里**加载即截断**；
+`application_internal.h` 的重复定义删除。验证：20 万条的夹具启动后写回文件变成 **200 条**。
+
+**② 畸形设置健壮性（7 组，全部通过）**：超长 favorites/recents（200k 条 / 2MB）、50 万字符的
+字符串、超大数字（999999999999 / 负数）、类型错误（数组写成字符串、端口写成字符串、主题写成数字）、
+深层嵌套对象、0 值——**全部能正常启动、不崩溃、回落到合理默认值**（`settings-fuzz.py`）。
+其中超大端口 999999999 被夹到 1、负数间隔夹到 5，与 clamp 契约一致。
+
+**③ 其他维度核查（无缺陷）**：
+- **内存有界性**：`PanelRenderer::measureCache_` 到 2048 条整体清空；`probedModels_` 受供应商数
+  限制且由 `probedMutex_` 保护；日志超过 `kMaxLogBytes` 轮转为单个 `.log.1`（总体有界）。
+- **跨线程**：worker 只经 `PostMessage` 回结果，共享计数器全是 `std::atomic`，唯一的复合容器
+  访问都持锁；UI 线程上没有 `Sleep`/`WaitForSingleObject`（探测间隔的 Sleep 都在 worker 里）。
+- **控制面输入**：命名管道与 `WM_COPYDATA` 都有 65536 字节上限，超限直接断开/返回；
+  管道线程退出路径完整（`SetEvent` + dummy 连接解除 `ConnectNamedPipe` + `join`）。
+- **内存安全**：JSON 数组访问前都检查 `size()`；两处 `memcpy` 的缓冲区大小与拷贝长度严格相等；
+  没有 `strcpy`/`sprintf`。
+
+门禁：`ctest` 全量 **22/22**（`h-models` 单跑复验 PASS）；`full_audit --quick` **114/0**。
+产物 SHA `a270043e…` 已替换真机实例（PID 71272）。
+
+### G81 模型页卡片右边距（2026-10-24，真机反馈「滑条修好后，供应商卡片右边距也要同步修」）
+
+**现象**：滑条从"内容区里侧"移到 `content.right+2`（G68）之后，卡片仍然一直铺到 `content.right`
+—— 卡片右边缘与滑条之间只剩 2 DIP，视觉上粘在一起；而左边距是 11 DIP（`kPagePadX`），左右不对称。
+
+修：模型页的列表盒 `layout.list` 右侧收进 `dip(kPagePadX)`（与左边距同一个常量，天然对称），
+滑条仍画在这段留白之外（`content.right+2`，不受影响）。
+验证（40 个模型的夹具，截图 `tmp/hermes-panel-native/margins-top.png`）：卡片右边缘到窗口右缘
+约 22 DIP，其中 11 DIP 是卡片留白、约 8 DIP 是滑条占位，左右视觉边距一致。
+
+**顺带核实（都是设计行为，非缺陷）**：
+- 列表底部最后一行呈淡出状态 = 16 DIP 的 `kListFade` 遮罩（旧 `.list` 的 mask），不是被裁断。
+- 组头吸顶时压住第一行 = `position: sticky` 的既定行为（绘制分两趟：先非粘性，后粘性）。
+- 底栏与分隔线在列表**之后**绘制（`Nav` 在 2156 行、列表裁剪在 1070 行），层级正确。
+
+排查过程中修正了两个测试脚本问题（都在 `tmp/` 下，不属于产品）：`margins2.py` 每次启动会把
+`busy-home/state.json` 覆盖回 3 个模型（导致一直测不到滑条），以及夹具需要 40 个模型才会真正滚动。
+
+门禁：`ctest` 全量 **22/22**（`h-models` 单跑 PASS）。
+产物 SHA `78191a17…` 已替换真机实例（PID 67216）。
+
+门禁：`ctest` 全量 **22/22**；`full_audit --quick` **114/0**。
+产物 SHA `9ee1da04…` 已替换真机实例（PID 42652）。
+
+### G82 七个真机反馈（2026-10-24）
+
+**① 添加页「添加」下面一大片空白 —— 子页分段整排被裁剪。**
+`AdminPages` 把绘制裁剪到 `layout.pageViewport`，而该视口的上沿是 `bodyTop`（正文起点）；
+添加页的「新建供应商 / 删除供应商」和「接口模式」两排分段都排在 `bodyTop` **之上**
+（页头之后、表单之前），于是被整排裁掉 —— 布局里它们存在（`_filters` 里有坐标、`control-at`
+能命中），只是画不出来。真机看到的就是"标题下面一片空白、表单直接开始"。
+修：视口上沿改成 `subTabs.top`（没有分段时退回页头下沿），分段与正文一起进入裁剪区。
+证据：修前 `add-top.png`（空白）→ 修后同一位置出现「新建供应商 / 删除供应商」。
+
+**② 回退链「模型 id」框有两个下拉三角 —— 重复绘制。**
+`Field()` 的 `kind==3`（下拉）分支已经画了一枚 chevron，回退链页面又在同一字段右侧
+补画了一枚（v1.16 的"模型 ▾ 存在提示"）。删掉后者。
+
+**③ 点「刷新同步」后像卡住 —— 按钮毫无反馈。**
+同步是在 worker 里逐供应商串行跑的，UI 只有顶部那条细忙碌条在动，按钮本身不变。
+修：按钮进入同步态时图标绕中心旋转、文案变「同步 n/N」；每完成一个供应商就投一帧
+`kSyncAllMessage(0)` 重绘（原来只在整批结束时投一次）。顺带把每轮固定 `Sleep(120)`
+改成**只在真的写了配置**时才等——全部无变化时 17 个供应商会白等 2 秒，正是"刷新很慢"的来源。
+
+**④ 设置页 WSL 发行版没右对齐 + 不知道这值干嘛。**
+该字段创建时 `alignRight=false`（另两个数字字段是 true），改成三者统一 `ES_RIGHT`；
+标签右侧新增说明「面板调用助手和配置所在的发行版」——它决定所有 `wsl.exe -d <发行版>`
+调用的目标，填错会让整条助手链路失败（G65 真机踩过 `WSL_E_DISTRO_NOT_FOUND`）。
+
+**⑤ 「连接 / 行为 / 快捷键 / 其他」小节标题太小不突出。**
+原来是 10.5px 正体 + `faint`（最淡的灰），比正文还弱。改成 `label_`（12.5/500）+ `dim`，
+左侧加一条 2 DIP 的 `accentLine` 竖条。
+
+**⑥ 「查看 / 诊断 / 用量」悬停闪过虚影 —— 两个原因。**
+(a) Ghost 皮肤的悬停底是 `raise2`，而浅色主题里 `raise2` 与页面底色 `ink` 几乎同色
+（实测 porcelain 差值 (0,1,3)、light (5,4,2)、sand (3,5,9)）——悬停根本看不出边界；
+(b) 离开时还有 90ms 的 "hot→normal" 淡出，快速划过就是一次可见残影。
+修：(a) 悬停态补 `accentLine` 描边；(b) `hoverSkin` 去掉离开淡出（进入仍淡入）。
+像素验证：修后悬停/正常两帧在按钮矩形内差 2850 px（修前 0——因为底色太接近）。
+
+**⑦ 贴条悬浮卡的模型名被截断。**
+卡片宽度写死 252 DIP。改成按「当前：<模型 id>」估算宽度自适应（下界 252、上界 520，
+再宽由 `HoverCardRect` 夹进工作区），并给这一行用不截断的格式（`cardBody_`）。
+实测长模型名（74 字符）卡片撑到 520 DIP、完整显示。
+
+门禁：`ctest` 全量 **22/22**。产物 SHA `7b08dcb4…` 已替换真机实例（PID 36588）。
+
+### G83 撤回 G81 的卡片右边距改动（2026-10-24，用户指出改错了）
+
+G81 为了让卡片"离开滑条"给列表盒加了 `dip(kPagePadX)` 的**右侧**内缩，结果右边距变成
+22.4 DIP、左边仍是 11 —— 用户一眼看出左右不对称，明确指出"滑条挪走后、只要左右边距保持一致
+就不会影响显示"。
+
+复核成立：滑条画在 `content.right+2..+8`（距窗口右缘 3.5 DIP），而卡片右缘本来就在
+`content.right`（距窗口右缘 11.5 DIP）——**卡片右缘始终在滑条左侧**，两者根本不重叠，
+不需要为滑条预留那一份内缩。撤回该内缩后实测：
+
+| 项 | 值 |
+|---|---|
+| 卡片左边距 | 11.0 DIP |
+| 卡片右边距 | 11.5 DIP（差的 0.5 是 `kStrokeInset` 描边内缩） |
+| 滑条位置 | 468.0–476.0 px（卡片右缘 465.6 px **之外**） |
+
+代码里留了注释说明这次反复（"不要为滑条额外收窄列表"），避免以后又改回去。
+
+门禁：`ctest` 全量 **22/22**。产物 SHA `8828f74a…` 已替换真机实例（PID 37468）。
+
+### G84 同步图标转得慢 + 悬浮卡入场文字卡顿（2026-10-24）
+
+**① 同步章图标像卡住。** 角度原来是 `kSpinTimer` 每拍 `syncSpinAngle_ += 30°` 累加：
+纸面 16ms 一拍 ≈ 1875°/s 很快，但定时器会被主面板重绘/其它工作挤晚，累加值就停在那儿
+（真机看："转得很慢，像卡住了"）。改为**按时间求角**：`angle = fmod(now - start, 360)`，
+速度固定 **1.6 圈/秒**（625ms 一圈，常见 spinner 节奏）；定时器只决定多久重绘一次，
+不再影响转速。
+
+**② 主面板重绘节流（顺带修了门禁抓到的回归）。** 同步期间按钮要显示「n/N」+旋转图标，
+需要在主面板上重绘。第一版改成每 2 拍刷一次——`motion` 门禁立刻失败：
+"an unchanged poll must not repaint the whole panel"（22 帧多余重绘）。这说明**后台静默轮询
+不该为了转圈动画整窗重画**。最终规则：只有**用户可见的忙碌**（手动刷新 / 同步 / 逐条探测 /
+一键探测）才重绘主面板，静默轮询只刷忙碌条子窗口；其中同步按 2 拍（≈32ms）限流，其余每拍。
+
+**③ 悬浮卡入场时文字卡顿。** 入场原来是"从下方 4 DIP 滑上 + 淡入"：
+卡片是分层窗口（`UpdateLayeredWindow`），位移每帧都要对整个内容做 `Translation` 变换，
+而 D2D 对**文本**做亚像素平移时会重新采样 —— 看到的抖动/发虚就是这个。
+另外 `RenderHoverCard` 每帧还调 `PositionHoverCard()`（内部 `CurrentView()` 重建整份视图
++ `SetWindowPos`），120ms 淡入里内容根本没变。
+修：入场只保留淡入（去掉位移，`cardOffsetDip` 恒为 0）；动画期间跳过重新定位，
+只在动画结束后定尺。文字位置恒定，字形始终清晰。
+
+门禁：`ctest` 全量 **22/22**（`motion` 通过：静默轮询零多余重绘）。产物 SHA `15db41d5…`
+已替换真机实例（PID 72932）。
+
+### G85 同步图标"不转只抖"（2026-10-24，G84 引入的回归）
+
+**现象**：G84 把角度改成纯按时间算（1.6 圈/秒）后，真机上图标看起来**不转、只在原地抖**。
+
+**实测定位**（新增 `dump.spin{angle,busy}` 采样）：
+- 角度本身是对的：每次 dump 递增、跨 360° 正确回绕；
+- 但**两次重绘之间隔了 90ms**：整窗 D2D 重绘在这个机器上实测 draw 段就要 168ms
+  （`busy paint 169ms (view 0 + layout 0 + draw 168)`），`InvalidateRect` 请求堆在队列里，
+  `WM_PAINT` 实际约 11fps 才处理一次；
+- 于是"按时间算"的 576°/s 落到每帧就是 **49° 一跳** —— 视觉上就是原地抖，不是转。
+
+**修法**：目标角度仍按时间算（保证长期转速稳定），但**实际角度每帧向目标靠拢、且单帧限幅 18°**：
+高帧率下平滑跟随，低帧率下宁可转得慢一点也保持"连续小步"；另外给推进加了 8ms 最小间隔，
+避免一帧内多次 `CurrentView()`（绘制 + 控件查询 + dump）把角度推进好几步。
+实测角度序列单调、步长稳定（每 90ms 前进 34°），不再出现回跳或大跳。
+
+**保留的诊断面**：`dump.spin` 与 `dump.hover` 都留在控制面里（Debug 版），以后遇到"动画不对劲"
+可以直接读数判断是角度问题还是重绘频率问题。
+
+门禁：`ctest` 全量 **22/22**（`h-add`/`h-fallback` 在整轮并行时偶发桌面争用失败，单跑均 PASS）。
+产物 SHA `2e55d903…` 已替换真机实例（PID 28572）。
+
+### G86 同步图标彻底改为独立子窗口 + 删除紧凑视图（2026-10-24）
+
+**① 同步图标「还是不转」——根因终于定位。**
+G84/G85 两轮都在调角度算法（按时间 / 按帧步进 / 限幅），但都治不了本：**动画挂在主面板重绘上**。
+实测主面板整窗 D2D 重绘 `busy paint 169ms (view 0 + layout 0 + draw 168)`，
+`InvalidateRect` 请求堆在队列里、`WM_PAINT` 约 11fps 才处理一次 —— 任何"每 33ms 变一次角度"
+的算法到这个刷新率都会变成每帧跳 30–50°，视觉上就是不动。而且静默轮询（`refreshQuiet_`）
+路径根本不重绘主面板，图标完全静止。
+
+**修法（照搬忙碌条的成熟做法）**：新增 `src/ui/spin_glyph.*` —— 一个独立子窗口，
+GDI 双缓冲画"带缺口的圆环"，**角度按时间算（1200ms 一圈）**，单帧 <0.2ms，
+由 `kSpinTimer` 直接 `Invalidate` 它自己，主面板完全不参与。
+主面板里原来那枚图标在忙碌时留空（子窗口正好盖住那一格）。
+同步进度「n/N」仍是主面板文字，只在**同步**时按 2 拍（≈66ms）重绘，静默轮询零重绘。
+
+实测（同步窗口内逐帧抓图标区域）：连续 13 帧每帧 12–29 像素变化 —— 真的在连续转。
+
+**② 删除紧凑视图（用户要求）**：`152 DIP` 在原生面板上装不下任何页面正文，
+留着只是一个"点进去什么都看不到"的档位。移除范围：
+托盘菜单项与命令分发、`SetTier()`、布局里的迷你模式提前返回分支（含 hero 迷你盒、
+底栏只留两枚入口的过滤）、`compactMini`/`heroMini` 两个布局标志与对应的渲染/审计分支、
+紧凑档的切页拦截、设置加载时强制归 `Tier::Full`（旧配置里的 `tier=1` 不再复活 152 DIP 窗口）。
+**保留** `Tier` 枚举与 `TierSize` 的 152 契约：几何门禁仍在断言它，`TierSize(Tier,dpi)` 重载
+也被 widget/app 尺寸测试直接调用；它现在只是不可达的内部档位。
+门禁侧同步调整：`tray` 门禁的菜单标签期望去掉「紧致视图」、删掉两条紧凑档断言与整段
+"compact view switch" 用例（功能删除属于契约变更，不是放宽断言）。
+
+门禁：`ctest` 全量 **22/22**。产物 SHA `c2dd565e…` 已替换真机实例（PID 12760）。
+
+### G87 旋转图标跑到了顶部时间戳旁边（2026-10-24）
+
+**现象**：同步时那枚旋转图标出现在顶部状态行「↻ 20:01」的位置，而不是搜索框右端的
+「刷新同步」按钮里（真机截图：`10:0↻` 旁边多出一个环）。
+
+**根因**：`SyncBusyBar` 里定位子窗口时用错了布局盒 —— 写的是 `layout.sync`，
+那是**顶部灯行右侧的同步章**（时间戳那格）；「刷新同步」按钮是 `layout.syncModels`。
+两者都在同一行附近、宽度相近，肉眼看代码很容易混。
+
+修：改用 `layout.syncModels`，并按主面板里那枚图标的真实几何对齐 ——
+距按钮左边 9 DIP、画 12 DIP、垂直居中；颜色用 `accentStrong`（与主面板忙碌态一致）。
+主面板在忙碌时这一格留空（`(void)iconBox`），由子窗口独占，不会出现两个图标叠在一起。
+
+实测：子窗口矩形 (562,299)-(577,314) 完全落在「刷新同步」按钮 (551,294)-(656,319) 内，
+顶部同步章区域内无子窗口；截图确认按钮显示为「↻ 同步 0/2」。
+
+门禁：`ctest` 全量 **22/22**。产物 SHA `a8a06593…` 已替换真机实例（PID 58776）。
+
+### G88 真机全功能实测（2026-10-24，用户："真实测试一下所有功能是否正常，然后还原"）
+
+只对**真实运行的 `dist-live` 实例**做真实鼠标/键盘/截图验证（不建隔离实例），
+每一项都用外部可观测证据断言：窗口矩形 / `settings.json` / 应用日志 / 逐帧截图对比。
+
+**查出的真 bug（都已修）**
+
+1. **设置页「关闭按钮」下拉的第二项被底栏盖住、点不到。** 下拉一直按「贴在字段下沿」展开，
+   而这个字段正好是视口最后一行，列表第二条（退出程序）整块落进导航栏里；截图确认只露出第一条。
+   修：`layout.cpp` 新增 `SelectListTop()` —— 下方装不下就整体翻到字段上方，
+   上方也放不下才夹进可用区。四处下拉（回退链来源 / 回退链模型 / 添加页供应商 / 设置页关闭按钮）
+   统一走这条规则。
+2. **下拉展开时悬停气泡还盖在选项上。** 气泡是最后绘制的浮层，悬停「关闭按钮」时它正好压住
+   列表里靠近指针的那一项（截图里「退出程序」被"点一下编辑"整块遮住）。
+   修：`CurrentView()` 里任一下拉展开时不出气泡（与"模态打开不出气泡"同一条规则）。
+3. **`/` 快捷键会把斜杠打进搜索框。** h-ime 门禁稳定 3/3 复现：`PASS / focuses the search box`
+   紧跟 `FAIL the focusing slash leaked into the field`。根因是我此前加的 `WM_KEYDOWN VK_OEM_2`
+   分支先把焦点交给原生 EDIT，紧跟的 `WM_CHAR '/'` 就落进了 EDIT。
+   修：删掉那条分支，只保留 `HandleFieldKey` 里原有的 `WM_CHAR '/'` 分支（聚焦 + 吞掉这一击）。
+
+**误判纠正（不是 bug）**
+
+- 「始终置顶」开关：先前判定"点了没反应"，实际是脚本落点算错 —— 扫描 300..344 DIP 命中的是
+  「自动重启网关」（日志里 `set autoReloadGateway = 1` 再 `= 0` 正好印证）。按实测行位
+  （开关行距 34 DIP，本行 y≈356）点击后 `topmost` True→False→True，日志 `set alwaysOnTop` 齐全。
+- 模型页分组折叠：折叠生效但当前供应商组恒展开（`group.open = group.active || expanded`），
+  所以点当前组看不出变化；换「其他供应商」下的组，折叠/展开差异 31400→0 像素。
+- 最小化：无边框窗口 `SW_MINIMIZE` 后 `IsWindowVisible` 仍为 true，改用 `IsIconic` 判定，
+  实测 iconic=1、矩形缩成 199×34，热键可正常唤回。
+
+**覆盖到的功能（全部 PASS）**：五页切换；搜索输入/Esc 清空；过滤三段；分组折叠；星标；
+行点击→切换确认卡→Esc 取消；刷新同步→确认卡→取消；回退链「+追加一条」表单、来源下拉
+（展开/选中/收起）、模型 id 下拉；添加页子页切换、空表单保存被校验拦下、接口模式分段、
+「保存后设为当前模型」开关；备份页 config/.env 过滤、刷新、回滚确认卡+Esc 取消；
+设置页 14 项（四个开关各点两次、延迟间隔 15↔5、挂件样式 铭牌↔胶囊、主题 深色↔瓷白、
+配置档案管理、关闭按钮下拉两项均可点）；窗口拖动、拖底边改高度并可还原、贴边收起→贴条→
+点贴条展开、最小化+热键唤回、关闭按钮按 `closeAction=hide` 隐藏+热键唤回。
+
+**还原**：`settings.json` 与基线逐项核对一致（`edge=0`、`float=[49,460]`、`height=669`、
+`tier=0`、`theme=porcelain`、`pollSeconds=20`、`distro=Ubuntu-24.04`、`webuiPort=8787`、
+`topmost=true`、`closeAction=hide`、`previewDiff=true`、`autoReloadGateway=false`、
+`latencyProbe=false`、`latencyMinutes=5`、`widgetStyle=capsule`）。窗口回到 (49,460)、停在模型页。
+`anchor` 为 500 而非基线记录的 969 —— 该字段在 `edge=0`（浮动态）下不参与布局、等于窗口 x，
+基线那个 969 属于贴边态的 y 值，强行改成 969 反而会与运行态不一致，故保持自洽值。
+
+门禁：`ctest -C Debug` 全量 **33/33**、`ctest -C Release` 构建零警告。
+产物 SHA `454186be…` 已替换真机实例（PID 37576）。
+
+### G89 状态机与窗口可见性脱节 → 整个面板拖不动（2026-10-24，G88 实测中查出的真 bug）
+
+**现象**：真机上整条标题栏点下去没有任何拖动反应，`WM_NCHITTEST` 在**所有页面、所有 y** 都返回
+`HTCLIENT`（1），而 Debug 实例同一位置返回 `HTCAPTION`（2）。底边拉伸条同样失效。
+
+**定位过程**（日志推断 > 猜测）：日志里 `state: hide 1->0` 之后**再没有任何 `state:` 记录**，
+但窗口一直可见、还能点。说明 `state_` 停在 `Hidden`，而窗口是可见的 —— 两者脱节。
+`HitTest()` 里第一个分支是 `if(state_!=State::Hidden)`，整块被跳过 → 恒返回 `HTCLIENT`，
+标题栏与底边条都不再认作可拖区域。
+
+**根因**：先用「最小化 + 热键」稳定复现。最小化时 `state_` 仍是 `Floating`（窗口 `iconic=1`），
+此时按热键走的是 `ToggleVisibility` 的 `Hide()` 分支 → `Visibility(Hidden)` 对退化窗口调
+`SW_HIDE`。**最小化窗口的 `SW_HIDE` 不会真的让它消失**：系统保留任务栏条目，之后窗口又恢复
+显示，而 `state_` 已经写成 `Hidden`。
+
+**修法（两处，互为保险）**
+1. `GeometryController::Visibility(Hidden)`：先 `if(IsIconic(panel_)) ShowWindow(panel_,SW_RESTORE);`
+   再 `SW_HIDE` —— 隐藏必须是真隐藏。
+2. `HitTest()` 的判据从 `state_ != Hidden` 改成 `state_ != Hidden || IsWindowVisible(panel_)`：
+   就算状态机再出岔子，可见的窗口也永远能拖。
+
+**验证**：真机上新产物上「最小化 → 热键」走完 `hide 1->0` / `show 0->1` 成对日志，
+窗口真的消失再出现，`WM_NCHITTEST` 恢复 2；实际拖动 (49,460)→(139,520) 生效。
+拖到右缘能收起成贴条、点贴条能展开、拖回原位。
+
+门禁：`ctest -C Debug` 全量 **33/33**。产物 SHA `75c47424…`（PID 12760）。
+
+### G90 G88 遗留项的补测结果（2026-10-24）
+
+**回退链页**（4/4 PASS）：逐条探测触发 `fallback-probe`；「+追加一条」表单可开可关；
+第二行「↑」上移后顺序改变（`fallback-move` 两次）、再「↓」下移复原。
+**注意**：`fallback-move` 会真的改写 `~/.hermes/config.yaml`。本轮上移+下移互相抵消，
+已用 `backups/config-changes/config-20261024_211008-fallback-move.yaml`（动作前快照）
+与当前文件逐行 diff 验证：**完全一致，无残留**。
+
+**添加页**：探测按钮在空表单下被校验拦下（红色提示「先填 Base URL」），日志无动作 —— 正确行为。
+
+**设置页**：诊断 / 用量模态均能弹出并在 Esc 后关闭（白像素 21520 / 14495，关后差异 0）。
+
+**状态灯**：点 WSL 灯触发 `data: refresh started` + `refresh from UNC snapshot`。
+
+**贴条悬浮卡**（4/4 PASS，此前因 G89 的拖动失效一直测不成）：拖出右缘 → 贴条出现 →
+悬停 2.2s 弹出卡片（351×165，显示时间/当前模型/三盏灯在线）→ 移开自动隐藏 →
+点贴条展开 → 拖回原位。
+
+**还原**：`settings.json` 15 项与基线逐项一致；`anchor=460`（`edge=0` 时等于窗口 x，
+不参与布局）。窗口在 (49,460)、模型页。
+
+### 真机实测中的方法教训（写下来避免重犯）
+
+- 截图坐标必须从**同一张当帧截图**量，不能跨帧复用：面板位置/页面滚动/悬停态都会让像素偏移。
+- 断言「界面变化」时要比**内容区**（避开底栏/滚动条/悬停高亮），否则 351 像素的滚动条抖动
+  会被当成"没变化"或"有变化"。
+- Release 版没有控制面，`controls` 命令只在 Debug 可用；但 Debug 的窗口尺寸/数据不同，
+  不能直接拿 Debug 的绝对坐标点真机 —— 只能用来读**相对布局规则**。
+- 测「会写盘」的动作（`fallback-move` / 回滚 / 保存）时，先想清楚补偿动作；
+  Hermes 的 `backups/config-changes/` 每次动作前都有快照，可用来验证是否还原干净。
+
+### G91 真机重启 / 托盘 / 同步全流程实测（2026-10-24）
+
+**重启持久化**：杀掉真机进程再启动，`panel startup target=(49,460,480,836) actual=(49,460,480,836)`
+完全吻合，`hotkeys: registered Control+Alt+H` 成功；`settings.json` 16 项（含 favorites/recents）
+与重启前逐项一致，零差异。热键循环 `visible 1 -> 0 -> 1` 正常。
+
+**托盘菜单**（Debug 实例 `dump.menu` 读真实 HMENU）：20 项、三个子菜单（切换到 / 主题 / 关闭按钮 /
+刷新间隔）+ 底部关于/退出，标签无乱码，勾选态与实际设置一致；tooltip 27 字符（远低于 NIF_TIP 的
+128 上限）。Win11 的任务栏是 XAML 实现，`Shell_TrayWnd` 下已无 `SysPager/ToolbarWindow32`，
+UIA 也只暴露面板窗口本身 —— **托盘图标无法用外部枚举证实**，只能靠应用侧
+`dump.tray.registered/iconLoaded` 与日志断言（tray 门禁覆盖）。
+
+**查出的真 bug：刷新间隔子菜单一个勾都没有。** 设置页的「刷新间隔」允许任意 5..3600 秒，
+而托盘菜单只列 30/60/120/300 四档、按 `stored_.pollSeconds==seconds` 勾选。真机基线是 **20 秒**，
+于是整个子菜单零勾选 —— 用户看不出当前间隔。
+修：当前值不在四档里时，额外加一条 `当前：N 秒`（`MF_CHECKED|MF_GRAYED`，只读展示）。
+实测 `pollSeconds=20` 时菜单变为 `30/60/120/300 全不勾 + 当前：20 秒 [v]`。
+
+**同步全流程**（隔离实例 + `fake-hermes` 当 WSL 可执行 + 800ms 延迟）：
+`done` 逐个推进 `1/3 -> 2/3 -> 3/3`，`changed` 同步累加到 3，过程中 `busy=true`，
+结算后 `{busy:false, done:3, total:3, changed:3}`。同时按 120ms 采样旋转角度：
+`35.7 -> 77.7 -> 120.0 -> 162.0 -> 18.6 -> 60.9 -> ...` —— 连续递增、跨 360° 正确回绕、
+无停滞无回跳，证实 G86 的独立 `SpinGlyph` 子窗口在真实同步期间确实在转。
+
+**隔离实测的坑（记下来省下次）**：`SyncAllModels()` 只把**同时有 base_url 和 provider_id**
+的供应商当目标；`fake-wsl` 返回的是通用 `{"ok":true,"data":{...}}`，provider 列表为空，
+所以同步 `total=0`、什么都不会发生。要把 `HERMES_WSL_EXE` 直接指向 `fake-hermes.exe`
+（它会应答 `list`），`readHelperPath` 只作为命令行参数存在、不影响执行。
+
+门禁：`ctest -C Debug` 全量 **33/33**（a-hover / a-edge / a-crossdpi 因桌面被占用跳过）。
+产物 SHA `12c9cd43…`（PID 70892）。
+
+### G92 输入框：同一字段第二次编辑静默丢失 + 组词与占位重叠（2026-10-25）
+
+用户要求"再看看还有没有问题"。这轮先用现成工具做了全量普查（`tools/full_audit.py`：**134 项全过**，
+覆盖六主题×五页布局越界、模态、模糊操作、资源泄漏、三态 CPU、多显示器 DPI、错误路径、日志清洁），
+再逐条走真实交互，查出两个都不在既有门禁覆盖里的真 bug。
+
+**① 同一字段的第二次编辑永远不提交（数据静默丢失）。**
+真机复现（Release 实例、面板在前台）：点 WebUI 端口字段 → 改值 → 点空白 → 提交 ✓；
+再点**同一个**字段 → 改值 → 点空白 → 日志里**没有任何 `settings: set`**，`settings.json` 保持旧值。
+连续三轮只有第一轮写盘。
+
+定位链：
+- `BlurField()` 的提交只在 `focusedField_` 非空时发生，说明"第二次点进字段"时应用侧没记住焦点；
+- 打点确认：原生 EDIT 已经持有键盘焦点时再点它**不产生 `WM_SETFOCUS`**，而应用完全依赖
+  `WM_SETFOCUS → Event::Focus` 来设置 `focusedField_`；
+- 于是输入进了控件（屏幕上看得到新值），但应用不知道在编辑，失焦时既不写回也不提交，
+  稍后镜像文本还可能把显示冲掉 —— 用户看到的是"改了没生效"。
+- 之前的自动化测试没抓到，是因为测试脚本每次都用 `Ctrl+A` 全选再输入、且多数场景是"换一个
+  字段"，正好绕开了"同一字段连点两次"。
+
+修：`NativeField` 增加 `Event::Pressed`，在 `WM_LBUTTONDOWN`/`WM_LBUTTONDBLCLK` 时单独通知一次
+（控件已有焦点也要通知）。外壳收到 `Pressed` 只把 `focusedField_` 指回来，**不做
+`field->Focus()`**——那会 `EM_SETSEL 0,-1` 全选，把用户刚点出来的插入点冲掉。
+顺带把"同步控件文本 + 提交设置页字段"抽成 `CommitFocusedField()`：`BlurField()` 用它，
+`Pressed` 切换字段时也用它（提交旧的但不抢新控件的焦点）。
+
+实测：同一字段连续 4 轮编辑 **4/4 全部提交**（修前 1/4）；真机同样 3/3 提交 + 还原值写入成功。
+
+**② 中文输入法组词期间，占位文字与组词文字叠在一起。**
+真机截图：搜索框里显示成「glm模型或供应商」两串字重叠。
+根因：组词文字还没上屏时控件的文本仍是空的，`EM_SETCUEBANNER` 的占位照常绘制，组词文字画在它上面。
+
+修：`NativeField` 记录 `WM_IME_STARTCOMPOSITION`/`WM_IME_ENDCOMPOSITION`，组词期间把 cue 推成空串
+（`ApplyCue()`），组词结束再推回真 cue。实测组词时搜索框只显示组词文字，Esc 后占位正常恢复。
+
+**测试过程中的自伤（记下来）**：这轮排查早期，我的脚本有一次 `SendInput` 的 mouse-up 没生效，
+按钮保持按下，随后的指针移动被当成拖动，把真机面板拖到左边缘贴边了。恢复方式：先连发几次
+mouse-up 清状态，再点贴条展开、长路径拖回 (49,460)。教训：合成输入的按下/抬起必须成对校验
+（`GetAsyncKeyState(VK_LBUTTON)`），移动指针前先确认没有按键残留。
+
+门禁：`ctest -C Debug` **串行 33/33** 全过（并行跑时 `h-add`/`settings` 偶发桌面争用失败，单跑均 PASS）。
+产物 SHA `510158302b…`（PID 58820）。

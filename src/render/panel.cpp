@@ -6,26 +6,19 @@
 #include <cstdio>
 #include <initializer_list>
 #include <stdexcept>
+#include "core/text.h"   // Widen（全产品一份）
 
 namespace hermes {
 namespace {
-std::wstring Widen(const std::string& value) {
-    if(value.empty()) return {};
-    const int length=MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0);
-    std::wstring result(static_cast<std::size_t>(length),L'\0');
-    MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),length);
-    return result;
-}
 void Check(HRESULT result,const char* what="panel render") {
     if(FAILED(result)) throw std::runtime_error(std::string(what)+" failed with hresult 0x"
         +[result]{char buffer[16]{};std::snprintf(buffer,sizeof(buffer),"%08lX",static_cast<unsigned long>(result));return std::string(buffer);}());
 }
+// 与 render/widgets.cpp 里的同名助手**语义必须一致**（两处都只做"换 alpha、不动 RGB"）。
+// 没合成一处是因为它太短、分布又广（本文件 37 处调用），合并带来的改动面大于收益；
+// 真要改语义（比如预乘）请同步改两处。
 D2D1_COLOR_F Fade(const D2D1_COLOR_F& colour,float alpha) {
     return D2D1::ColorF(colour.r,colour.g,colour.b,alpha);
-}
-// 两色混合（t=0 → b，t=1 → a）：挂件底色用当前供应商身份色轻轻染一层。
-D2D1_COLOR_F Blend(const D2D1_COLOR_F& a,const D2D1_COLOR_F& b,float t) {
-    return D2D1::ColorF(a.r*t+b.r*(1.0f-t),a.g*t+b.g*(1.0f-t),a.b*t+b.b*(1.0f-t),1.0f);
 }
 D2D1_COLOR_F LampColour(LampState state,const ThemePalette& palette) {
     switch(state) {
@@ -34,15 +27,6 @@ D2D1_COLOR_F LampColour(LampState state,const ThemePalette& palette) {
     case LampState::Err: return palette.err;
     default: return palette.faint;
     }
-}
-LampState WorstLamp(const std::vector<LampView>& lamps) {
-    LampState worst=LampState::Idle;
-    for(const auto& lamp:lamps) {
-        if(lamp.state==LampState::Err) return LampState::Err;
-        if(lamp.state==LampState::Warn) worst=LampState::Warn;
-        else if(lamp.state==LampState::Ok&&worst!=LampState::Warn) worst=LampState::Ok;
-    }
-    return worst;
 }
 // 徽章中央的 1-2 个字符：ASCII 取字母数字并大写；CJK 取第一个码点。
 std::string Initials(const std::string& model) {
@@ -179,6 +163,7 @@ void PanelRenderer::EnsureResources(ID2D1RenderTarget* target,IDWriteFactory* te
         make(monoFamily,widgets::kPlateFont,DWRITE_FONT_WEIGHT_MEDIUM,heroModel_,true);
         make(ui,12.5f,DWRITE_FONT_WEIGHT_MEDIUM,label_,true);
         make(ui,12.0f,DWRITE_FONT_WEIGHT_NORMAL,body_,true);
+        make(ui,12.0f,DWRITE_FONT_WEIGHT_NORMAL,cardBody_);   // 悬浮卡专用：不截断
         make(ui,11.0f,DWRITE_FONT_WEIGHT_NORMAL,caption_,true);
         make(monoFamily,11.5f,DWRITE_FONT_WEIGHT_NORMAL,mono_,true);
         make(ui,10.0f,DWRITE_FONT_WEIGHT_NORMAL,tiny_);
@@ -233,51 +218,12 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
     const auto style=WidgetStyleFromName(view.widgetStyle);
     const auto metrics=WidgetMetricsFor(style,static_cast<unsigned>(std::lround(scale*96.0f)));
     const float radius=static_cast<float>(metrics.radius);
-    const float gap=static_cast<float>(metrics.gap);
     const float spine=static_cast<float>(metrics.spine);
-    const float tail=static_cast<float>(metrics.tail);
     const float accent=static_cast<float>(metrics.accent);
-    const float phase=view.widgetPhase;
     const auto centre=D2D1::Point2F(width/2.0f,height/2.0f);
-    const auto lampAt=[&](std::size_t index) {
-        return index<view.lamps.size()?LampColour(view.lamps[index].state,palette):palette.faint;
-    };
-    const auto worst=LampColour(WorstLamp(view.lamps),palette);
-    const auto dot=[&](float x,float y,float dotRadius,const D2D1_COLOR_F& colour) {
-        // 光晕必须是**连续衰减**的：硬边圆环（同色 18% 画一个更大的圆）看着像"圆点套圈"。
-        // 用径向渐变从中心 30% 一路淡到 0，边缘完全消失，才是光。
-        const auto centre=D2D1::Point2F(x,y);
-        const float haloRadius=dotRadius*(palette.light?1.9f:2.2f);
-        D2D1_GRADIENT_STOP halo[3];
-        halo[0].position=0.0f; halo[0].color=Fade(colour,0.26f);
-        halo[1].position=0.50f; halo[1].color=Fade(colour,0.07f);
-        halo[2].position=1.0f; halo[2].color=Fade(colour,0.0f);
-        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-        if(SUCCEEDED(target->CreateGradientStopCollection(halo,3,D2D1_GAMMA_2_2,
-            D2D1_EXTEND_MODE_CLAMP,&stops))) {
-            Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glow;
-            if(SUCCEEDED(target->CreateRadialGradientBrush(
-                D2D1::RadialGradientBrushProperties(centre,D2D1::Point2F(0,0),
-                    haloRadius,haloRadius),stops.Get(),&glow))) {
-                target->FillEllipse(D2D1::Ellipse(centre,haloRadius,haloRadius),glow.Get());
-            }
-        }
-        brush_->SetColor(colour);
-        target->FillEllipse(D2D1::Ellipse(centre,dotRadius,dotRadius),brush_.Get());
-    };
-    const auto fill=[&](const D2D1_RECT_F& rect,float r,const D2D1_COLOR_F& colour) {
-        brush_->SetColor(colour);
-        target->FillRoundedRectangle(D2D1::RoundedRect(rect,r,r),brush_.Get());
-    };
-    // 异常段的呼吸微光：这是挂件唯一的动画，含义 = 这条链路需要你处理。
-    const auto glow=[&](const D2D1_RECT_F& rect,float r,const D2D1_COLOR_F& colour,float alpha) {
-        brush_->SetColor(Fade(colour,alpha));
-        const D2D1_RECT_F expanded{rect.left-accent,rect.top-accent,rect.right+accent,rect.bottom+accent};
-        target->FillRoundedRectangle(D2D1::RoundedRect(expanded,r+accent,r+accent),brush_.Get());
-    };
     // 形状整体旋转：左=不动，右=180°，上=+90°（+x 朝下），下=−90°（+x 朝上）。
     // 变换必须是「平移到画布中心 → 旋转 → 退回 canonical 原点」：直接绕窗口中心转，
-    // 在宽高互换的横向挂件上会把整块形状转出窗口（文字走另一条路径，所以只剩字）。
+    // 在宽高互换的横向挂件上会把整块形状转出窗口（内容走屏幕空间路径，所以只剩形状不见）。
     float angle=0.0f;
     switch(view.widgetEdge) {
     case 2: angle=180.0f;break;
@@ -294,50 +240,23 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
         :D2D1::Matrix3x2F::Identity();
     if(angle!=0.0f) target->SetTransform(stripTransform);
     // 像素对齐：形状边界落在半像素上会被抗锯齿糊成灰边（真机截图可见）。
-    std::string tag;
-    if(style==WidgetStyle::Beacon) {
-        // 三段灯柱：每段 = 一条链路（WSL / 网关 / WebUI）；段间留缝，直接透出桌面。
-        const float block=(ch-gap*2.0f)/3.0f;
-        for(int index=0;index<3;++index) {
-            const auto top=static_cast<float>(index)*(block+gap);
-            const D2D1_RECT_F rect{0.0f,top,cw,top+block};
-            const auto colour=lampAt(static_cast<std::size_t>(index));
-            const auto state=index<static_cast<int>(view.lamps.size())
-                ?view.lamps[static_cast<std::size_t>(index)].state:LampState::Idle;
-            if(state==LampState::Err||state==LampState::Warn)
-                glow(rect,radius,colour,0.12f+0.10f*(0.5f+0.5f*std::sin(phase)));
-            fill(rect,radius,colour);
-            // 桌面侧 1px 高光：薄条也有体积感。
-            brush_->SetColor(Fade(palette.text,0.16f));
-            target->FillRectangle(D2D1::RectF(cw-1.0f,top+radius,cw,top+block-radius),brush_.Get());
-        }
-    } else if(style==WidgetStyle::Tag) {
-        // 铭牌：实心牌 + 贴边侧身份色轨 + 竖排模型名 + 底部三灯；顶部琥珀条 = 待重启。
-        fill({0.0f,0.0f,cw,ch},radius,palette.surf);
-        brush_->SetColor(Fade(palette.line2,0.9f));
-        target->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0.5f,0.5f,cw-0.5f,ch-0.5f),
-            radius,radius),brush_.Get(),1.0f);
-        if(spine>0.0f)
-            fill({0.0f,0.0f,spine,ch},std::min(radius,spine*0.5f),widgets::IdentityColour(view.heroHue));
-        if(view.pendingGatewayRestart||!view.statuses.empty())
-            fill({0.0f,0.0f,cw,accent},accent*0.5f,palette.warn);
-        for(int index=0;index<3;++index)
-            dot(cw/2.0f,ch-Dip(7.0f,scale)-static_cast<float>(index)*Dip(6.0f,scale),
-                Dip(2.0f,scale),lampAt(static_cast<std::size_t>(index)));
-        tag=ModelTag(view.currentModel,4);
-    } else if(style==WidgetStyle::Capsule) {
-        // 胶囊（真机主力样式）：贴边时贴边侧两角收小、桌面侧全椭圆；拖离贴边（浮起）
-        // 过渡到**完整椭圆**（四角全半径）—— docked 0..1 插值驱动（贴边↔中间切换动画）。
-        // 液态玻璃质感：纵向亮度渐变底 + 顶部高光带 + 内描边 + 贴边侧微投影（与桌面分层）。
-        const float docked=std::clamp(view.motion.capsuleDocked,0.0f,1.0f);
-        const float full=cw*0.5f;                             // 全椭圆半径 = 半个厚度
-        // 贴边侧两角：docked=1 → 近乎直角（留 2 DIP 防尖刺），docked=0 → **也是全半径**，
-        // 四角同半径才是真正的椭圆。以前浮起时贴边侧仍只收 3 DIP，看起来还是一头平一头圆。
-        const float edgeR=docked<=0.001f?full
-            :std::max(full*(1.0f-docked),Dip(2.0f,scale));
-        Microsoft::WRL::ComPtr<ID2D1Factory> factory;
-        target->GetFactory(factory.GetAddressOf());
-        if(factory) {
+    //
+    // ---- 形状：两样式共用一条几何（canonical：x=厚度，贴边侧 x=0；y=长向）----
+    // 胶囊按离边距离插值（贴边侧收直角 ↔ 浮起时四角全半径的完整椭圆）；铭牌是固定 4 DIP 圆角的牌。
+    // 两者喂同一条玻璃管线，材质才可能长成一样（真机：铭牌此前是"实心贴纸"，与胶囊两个物种）。
+    Microsoft::WRL::ComPtr<ID2D1Factory> factory;
+    target->GetFactory(factory.GetAddressOf());
+    Microsoft::WRL::ComPtr<ID2D1Geometry> shape;
+    float docked=1.0f;                       // 铭牌只以贴边形态存在；胶囊由动画值驱动
+    if(factory) {
+        if(style==WidgetStyle::Capsule) {
+            // 贴边时贴边侧两角收小、桌面侧全椭圆；拖离贴边（浮起）过渡到**完整椭圆**（四角全半径）。
+            const float full=cw*0.5f;                             // 全椭圆半径 = 半个厚度
+            docked=std::clamp(view.motion.capsuleDocked,0.0f,1.0f);
+            // 贴边侧两角：docked=1 → 近乎直角（留 2 DIP 防尖刺），docked=0 → **也是全半径**，
+            // 四角同半径才是真正的椭圆。以前浮起时贴边侧仍只收 3 DIP，看起来还是一头平一头圆。
+            const float edgeR=docked<=0.001f?full
+                :std::max(full*(1.0f-docked),Dip(2.0f,scale));
             Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
             Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
             if(SUCCEEDED(factory->CreatePathGeometry(path.GetAddressOf()))
@@ -358,300 +277,281 @@ void PanelRenderer::Widget(ID2D1RenderTarget* target,D2D1_SIZE_F size,float scal
                     D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
                 sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                 sink->Close();
-                // ---- 液态玻璃（真背景 + 分层高光）----
-                // 拖动中不抓快照（窗口每帧在动，抓取要隐藏窗口→会闪）：这时用**接近不透明**
-                // 的主题底色撑住实体感，落手后重新抓取、玻璃再把桌面透出来。
-                const bool hasBackdrop=view.backdrop.pixels&&view.backdrop.width>0
-                    &&view.backdrop.height>0;
-                // ① 桌面快照（Surface 已抓取并模糊）**放大 6% 画进胶囊**：磨砂玻璃的
-                //    折射感来自"背后内容被透镜放大"，1:1 只是透明、放大才有玻璃味。
-                if(hasBackdrop) {
-                    if(!backdrop_||backdropGeneration_!=view.backdrop.generation) {
-                        backdrop_.Reset();
-                        const auto properties=D2D1::BitmapProperties(
-                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE));
-                        if(SUCCEEDED(target->CreateBitmap(D2D1::SizeU(
-                            static_cast<UINT32>(view.backdrop.width),
-                            static_cast<UINT32>(view.backdrop.height)),view.backdrop.pixels,
-                            static_cast<UINT32>(view.backdrop.width)*4u,properties,
-                            backdrop_.GetAddressOf()))) {
-                            backdropGeneration_=view.backdrop.generation;
-                        }
-                    }
-                    Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> screenPath;
-                    if(backdrop_&&SUCCEEDED(factory->CreateTransformedGeometry(path.Get(),
-                        stripTransform,screenPath.GetAddressOf()))) {
-                        target->SetTransform(D2D1::Matrix3x2F::Identity());
-                        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),
-                            screenPath.Get(),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),nullptr);
-                        // 以窗口中心为锚放大：快照 1.06× 绘制，边缘多出来的 3% 被胶囊裁掉。
-                        const float zoom=1.06f;
-                        const auto zoomed=D2D1::RectF(
-                            width/2.0f*(1.0f-zoom),height/2.0f*(1.0f-zoom),
-                            width/2.0f*(1.0f+zoom),height/2.0f*(1.0f+zoom));
-                        target->DrawBitmap(backdrop_.Get(),zoomed,1.0f,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                        target->PopLayer();
-                        target->SetTransform(stripTransform);
-                    }
-                }
-                // ② 主体：把圆柱明暗**烘焙进渐变**（不是均匀底色上叠高光——那样在浅色底上
-                //    必然看起来是一块平板）。顺序：贴边侧暗（受屏幕遮挡）→ 中间本色 →
-                //    桌面侧渐亮 → 一条极窄的高光线 → 回落到略亮。
-                //    六段停靠点保证连续过渡，没有任何硬边。
-                {
-                    const auto mixTo=[&](const D2D1_COLOR_F& base,float target,float t) {
-                        return D2D1::ColorF(base.r+(target-base.r)*t,base.g+(target-base.g)*t,
-                            base.b+(target-base.b)*t,1.0f);
-                    };
-                    const auto base=palette.stripTop;
-                    const float darkT=palette.light?0.30f:0.34f;   // 暗缘强度
-                    const auto dark=mixTo(base,0.0f,darkT);
-                    const auto dim=mixTo(base,0.0f,darkT*0.45f);
-                    const auto lit=mixTo(base,1.0f,0.30f);
-                    const auto hot=mixTo(base,1.0f,0.52f);
-                    const float bodyAlpha=hasBackdrop?(palette.light?0.86f:0.84f):1.0f;
-                    D2D1_GRADIENT_STOP body[6];
-                    body[0].position=0.0f; body[0].color=Fade(dark,bodyAlpha);
-                    body[1].position=0.10f; body[1].color=Fade(dim,bodyAlpha);
-                    body[2].position=0.42f; body[2].color=Fade(base,bodyAlpha);
-                    body[3].position=0.76f; body[3].color=Fade(lit,bodyAlpha);
-                    body[4].position=0.90f; body[4].color=Fade(hot,bodyAlpha);
-                    body[5].position=1.0f; body[5].color=Fade(lit,bodyAlpha);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(body,6,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> bodyBrush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(cw,0)),stops.Get(),&bodyBrush))) {
-                            target->FillGeometry(path.Get(),bodyBrush.Get());
-                        }
-                    }
-                }
-                // ③ 贴边侧接触阴影（只在贴边时有，随 docked 淡出）+ 1px 轮廓线。
-                //    **没有黑色粗描边**：轮廓靠一条 1px 的渐变细线锁住。
-                if(docked>0.01f) {
-                    D2D1_GRADIENT_STOP contact[2];
-                    contact[0].position=0.0f;
-                    contact[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.30f*docked);
-                    contact[1].position=1.0f; contact[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(contact,2,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(cw*0.55f,0)),stops.Get(),&brush))) {
-                            target->FillGeometry(path.Get(),brush.Get());
-                        }
-                    }
-                }
-                {
-                    D2D1_GRADIENT_STOP rim[4];
-                    rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.0f);
-                    rim[1].position=0.5f; rim[1].color=Fade(palette.text,0.05f);
-                    rim[2].position=0.85f; rim[2].color=Fade(palette.text,0.16f);
-                    rim[3].position=1.0f; rim[3].color=Fade(palette.text,0.30f);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
-                            target->DrawGeometry(path.Get(),brush.Get(),1.0f);
-                        }
-                    }
-                }
-                // ④ 长向单向受光：光从"起点端"打过来（0..10% 亮），末端（90..100%）压暗。
-                //    对称的双端亮光是错的 —— 那样只像一根发亮的棍子，没有方向就没有立体。
-                {
-                    const float lift=0.09f*(1.0f-docked*0.4f);
-                    D2D1_GRADIENT_STOP sweep[5];
-                    sweep[0].position=0.0f; sweep[0].color=D2D1::ColorF(1.0f,1.0f,1.0f,lift);
-                    sweep[1].position=0.10f; sweep[1].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
-                    sweep[2].position=0.5f; sweep[2].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
-                    sweep[3].position=0.86f; sweep[3].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    sweep[4].position=1.0f;
-                    sweep[4].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.10f*(0.4f+0.6f*docked));
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(sweep,5,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(0,ch)),stops.Get(),&brush))) {
-                            target->FillGeometry(path.Get(),brush.Get());
-                        }
-                    }
-                }
-                // ⑤ 1px 细边：只用来锁住轮廓，不做"厚边"。亮边在桌面侧最强，贴边侧几乎无。
-                //    浅色主题用 text（深）低透明，深色主题用白色低透明 —— 都不是黑色粗框。
-                {
-                    D2D1_GRADIENT_STOP rim[4];
-                    rim[0].position=0.0f; rim[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    rim[1].position=0.45f; rim[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
-                    rim[2].position=0.80f;
-                    rim[2].color=palette.light?Fade(palette.text,0.10f):D2D1::ColorF(1,1,1,0.14f);
-                    rim[3].position=1.0f;
-                    rim[3].color=palette.light?Fade(palette.text,0.24f):D2D1::ColorF(1,1,1,0.34f);
-                    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
-                    if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,&stops))) {
-                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
-                        if(SUCCEEDED(target->CreateLinearGradientBrush(
-                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
-                                D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
-                            target->DrawGeometry(path.Get(),brush.Get(),1.0f);
-                        }
-                    }
-                }
+                shape=path;
             }
+        } else {
+            Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> rounded;
+            if(SUCCEEDED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(D2D1::RectF(0.0f,0.0f,cw,ch),radius,radius),rounded.GetAddressOf())))
+                shape=rounded;
         }
-        // ---- 内容：按**屏幕空间**布局（真机要求：内容朝向不随贴条旋转）----
-        // 水平边（上/下）：模型名在左 → 三灯 WSL/WebUI/网关 从左到右 → logo 在右；
-        // 垂直边（左/右）：logo 在上 → 三灯 网关/WebUI/WSL 从上到下 → 模型名在下；
-        // logo 永远横向正着；只有文字在垂直边时转 90°（从下往上读）。
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
-        {
-            const float logo=Dip(14.0f,scale);
-            const float dotR=Dip(3.4f,scale);
-            const auto label=ModelTag(view.currentModel,4);
-            if(view.widgetVertical) {
-                Icon(target,D2D1::RectF(width/2.0f-logo/2.0f,Dip(9.0f,scale),
-                    width/2.0f+logo/2.0f,Dip(9.0f,scale)+logo),
-                    IconId::Activity,palette.accentStrong,1.8f);
-                for(int index=0;index<3;++index)
-                    dot(width/2.0f,height*0.36f+height*0.115f*static_cast<float>(index),dotR,
-                        lampAt(static_cast<std::size_t>(2-index)));   // 从上到下：网关/WebUI/WSL
-                const float y0=height*0.62f,y1=height-Dip(4.0f,scale);
-                const float limit=std::max(1.0f,y1-y0);
-                auto shown=label;
-                if(Measure(count_.Get(),shown).width>limit)
-                    shown=Ellipsize(count_.Get(),shown,limit);
-                const auto converted=Widen(shown);
-                if(!converted.empty()) {
-                    count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    brush_->SetColor(palette.text);
-                    target->SetTransform(D2D1::Matrix3x2F::Rotation(-90.0f)
-                        *D2D1::Matrix3x2F::Translation(0.0f,y1));
-                    target->DrawTextW(converted.c_str(),
-                        static_cast<UINT32>(converted.size()),count_.Get(),
-                        D2D1::RectF(0.0f,0.0f,limit,width),brush_.Get());
-                    target->SetTransform(D2D1::Matrix3x2F::Identity());
-                }
-            } else {
-                Icon(target,D2D1::RectF(width-Dip(9.0f,scale)-logo,height/2.0f-logo/2.0f,
-                    width-Dip(9.0f,scale),height/2.0f+logo/2.0f),
-                    IconId::Activity,palette.accentStrong,1.8f);
-                for(int index=0;index<3;++index)
-                    dot(width*0.47f+width*0.105f*static_cast<float>(index),height/2.0f,dotR,
-                        lampAt(static_cast<std::size_t>(index)));     // 从左到右：WSL/WebUI/网关
-                const float x0=Dip(4.0f,scale),x1=width*0.40f;
-                const float limit=std::max(1.0f,x1-x0);
-                auto shown=label;
-                if(Measure(count_.Get(),shown).width>limit)
-                    shown=Ellipsize(count_.Get(),shown,limit);
-                Text(target,shown,D2D1::RectF(x0,0.0f,x1,height),count_.Get(),palette.text,
-                    DWRITE_TEXT_ALIGNMENT_CENTER,true);
-            }
-        }
-        tag.clear();   // 内容已在屏幕空间画完，通用文字块跳过
-    } else {
-        const auto field=Blend(worst,palette.surf,0.55f);
-        fill({0.0f,0.0f,cw,ch-tail},radius,field);
-        Microsoft::WRL::ComPtr<ID2D1Factory> factory;
-        target->GetFactory(factory.GetAddressOf());
-        if(factory) {
-            Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
-            Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
-            if(SUCCEEDED(factory->CreatePathGeometry(path.GetAddressOf()))
-                &&SUCCEEDED(path->Open(sink.GetAddressOf()))) {
-                sink->BeginFigure(D2D1::Point2F(0.0f,ch-tail),D2D1_FIGURE_BEGIN_FILLED);
-                sink->AddLine(D2D1::Point2F(cw,ch-tail));
-                sink->AddLine(D2D1::Point2F(cw/2.0f,ch));
-                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-                sink->Close();
-                brush_->SetColor(field);
-                target->FillGeometry(path.Get(),brush_.Get());
-            }
-        }
-        if(spine>0.0f) fill({0.0f,0.0f,spine,ch-tail},std::min(radius,spine*0.5f),worst);
-        // 不画三灯：16 DIP 厚度里会和文字挤在一起。最差状态由色场 + 亮条表达，
-        // 具体是哪条链路坏了下拉/展开后寄存器行和悬浮卡里都有。
-        tag=Initials(view.currentModel);
     }
-    target->SetTransform(D2D1::Matrix3x2F::Identity());
-    if(!tag.empty()) {
-        // 文字与贴条是**同一个刚体**：竖边把整串字放进一个横排盒，整体旋转 90° 后再套上
-        // 贴条自身的旋转矩阵 —— 左边 = 横向 DEEP 左转 90°（从下往上读、字顶朝屏幕边），
-        // 右边是它的 180° 镜像（从上往下读、字顶朝桌面）。横边仍横排（不把字倒过来）。
-        // 截断按段长量：Measure 是横排宽度，旋转后长度不变。
-        const float along=ch;
-        // Tag 样式的三盏灯钉在 canonical 长向底部（ch-Dip7 起向上排）：文字段给灯让位。
-        const float x0=style==WidgetStyle::Capsule?along*0.62f:Dip(3.0f,scale);
-        const float x1=style==WidgetStyle::Capsule?along-Dip(4.0f,scale)
-            :(style==WidgetStyle::Tag?along-Dip(22.0f,scale):along-Dip(3.0f,scale));
-        std::string shown=tag;
-        const float available=x1-x0;
-        if(Measure(count_.Get(),shown).width>available) {
-            const std::string ellipsis="\xE2\x80\xA6";
-            std::size_t low=0,high=shown.size();
-            const auto boundaryAt=[&](std::size_t index) {
-                std::size_t end=std::min(index,shown.size());
-                while(end>0&&end<shown.size()&&(static_cast<unsigned char>(shown[end])&0xC0)==0x80) --end;
-                return end;
-            };
-            const auto fits=[&](std::size_t index) {
-                return Measure(count_.Get(),shown.substr(0,boundaryAt(index))+ellipsis).width<=available;
-            };
-            while(low<high) {
-                const std::size_t mid=low+(high-low+1)/2;
-                if(fits(mid)) low=mid; else high=mid-1;
+    // 屏幕空间的形状：背景快照层与铭牌的装饰层都拿它当遮罩（变换后形状 = 屏幕上的轮廓）。
+    Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> screenShape;
+    if(factory&&shape)
+        factory->CreateTransformedGeometry(shape.Get(),stripTransform,screenShape.GetAddressOf());
+    if(shape) {
+        // ---- 液态玻璃（真背景 + 分层高光；两样式同一份）----
+        // 拖动中不抓快照（窗口每帧在动，抓取要隐藏窗口→会闪）：这时用**接近不透明**的
+        // 主题底色撑住实体感，落手后重新抓取、玻璃再把桌面透出来。
+        const bool hasBackdrop=view.backdrop.pixels&&view.backdrop.width>0
+            &&view.backdrop.height>0;
+        // ① 桌面快照（Surface 已抓取并模糊）**放大 6% 画进形状**：磨砂玻璃的
+        //    折射感来自"背后内容被透镜放大"，1:1 只是透明、放大才有玻璃味。
+        if(hasBackdrop&&screenShape) {
+            if(!backdrop_||backdropGeneration_!=view.backdrop.generation) {
+                backdrop_.Reset();
+                const auto properties=D2D1::BitmapProperties(
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE));
+                if(SUCCEEDED(target->CreateBitmap(D2D1::SizeU(
+                    static_cast<UINT32>(view.backdrop.width),
+                    static_cast<UINT32>(view.backdrop.height)),view.backdrop.pixels,
+                    static_cast<UINT32>(view.backdrop.width)*4u,properties,
+                    backdrop_.GetAddressOf()))) {
+                    backdropGeneration_=view.backdrop.generation;
+                }
             }
-            shown=shown.substr(0,boundaryAt(low))+ellipsis;
+            if(backdrop_) {
+                target->SetTransform(D2D1::Matrix3x2F::Identity());
+                target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),
+                    screenShape.Get(),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),nullptr);
+                // 以窗口中心为锚放大：快照 1.06× 绘制，边缘多出来的 3% 被形状裁掉。
+                const float zoom=1.06f;
+                const auto zoomed=D2D1::RectF(
+                    width/2.0f*(1.0f-zoom),height/2.0f*(1.0f-zoom),
+                    width/2.0f*(1.0f+zoom),height/2.0f*(1.0f+zoom));
+                target->DrawBitmap(backdrop_.Get(),zoomed,1.0f,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                target->PopLayer();
+                target->SetTransform(stripTransform);
+            }
         }
-        if(!shown.empty()&&vertical) {
-            // 局部排版盒：宽=段长（阅读方向），高=厚度；旋转 −90°（视觉左转）后
-            // (u,v)→(v,−u)，再平移 (0,x1) 落进 canonical 段 [x0,x1]。
-            const float length=x1-x0;
-            const auto local=D2D1::Matrix3x2F::Rotation(-90.0f)
-                *D2D1::Matrix3x2F::Translation(0.0f,x1);
-            target->SetTransform(local*stripTransform);
-            brush_->SetColor(palette.text);
+        // ② 主体：把圆柱明暗**烘焙进渐变**（不是均匀底色上叠高光——那样在浅色底上
+        //    必然看起来是一块平板）。顺序：贴边侧暗（受屏幕遮挡）→ 中间本色 →
+        //    桌面侧渐亮 → 一条极窄的高光线 → 回落到略亮。
+        //    六段停靠点保证连续过渡，没有任何硬边。
+        {
+            const auto mixTo=[&](const D2D1_COLOR_F& base,float target,float t) {
+                return D2D1::ColorF(base.r+(target-base.r)*t,base.g+(target-base.g)*t,
+                    base.b+(target-base.b)*t,1.0f);
+            };
+            const auto base=palette.stripTop;
+            const float darkT=palette.light?0.30f:0.34f;   // 暗缘强度
+            const auto dark=mixTo(base,0.0f,darkT);
+            const auto dim=mixTo(base,0.0f,darkT*0.45f);
+            const auto lit=mixTo(base,1.0f,0.30f);
+            const auto hot=mixTo(base,1.0f,0.52f);
+            const float bodyAlpha=hasBackdrop?(palette.light?0.86f:0.84f):1.0f;
+            D2D1_GRADIENT_STOP body[6];
+            body[0].position=0.0f; body[0].color=Fade(dark,bodyAlpha);
+            body[1].position=0.10f; body[1].color=Fade(dim,bodyAlpha);
+            body[2].position=0.42f; body[2].color=Fade(base,bodyAlpha);
+            body[3].position=0.76f; body[3].color=Fade(lit,bodyAlpha);
+            body[4].position=0.90f; body[4].color=Fade(hot,bodyAlpha);
+            body[5].position=1.0f; body[5].color=Fade(lit,bodyAlpha);
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+            if(SUCCEEDED(target->CreateGradientStopCollection(body,6,D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> bodyBrush;
+                if(SUCCEEDED(target->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                        D2D1::Point2F(cw,0)),stops.Get(),&bodyBrush))) {
+                    target->FillGeometry(shape.Get(),bodyBrush.Get());
+                }
+            }
+        }
+        // ③ 贴边侧接触阴影（只在贴边时有，随 docked 淡出）+ 1px 轮廓线。
+        //    **没有黑色粗描边**：轮廓靠一条 1px 的渐变细线锁住。
+        if(docked>0.01f) {
+            D2D1_GRADIENT_STOP contact[2];
+            contact[0].position=0.0f;
+            contact[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.30f*docked);
+            contact[1].position=1.0f; contact[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+            if(SUCCEEDED(target->CreateGradientStopCollection(contact,2,D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                if(SUCCEEDED(target->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                        D2D1::Point2F(cw*0.55f,0)),stops.Get(),&brush))) {
+                    target->FillGeometry(shape.Get(),brush.Get());
+                }
+            }
+        }
+        {
+            D2D1_GRADIENT_STOP rim[4];
+            rim[0].position=0.0f; rim[0].color=Fade(palette.text,0.0f);
+            rim[1].position=0.5f; rim[1].color=Fade(palette.text,0.05f);
+            rim[2].position=0.85f; rim[2].color=Fade(palette.text,0.16f);
+            rim[3].position=1.0f; rim[3].color=Fade(palette.text,0.30f);
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+            if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                if(SUCCEEDED(target->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                        D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
+                    target->DrawGeometry(shape.Get(),brush.Get(),1.0f);
+                }
+            }
+        }
+        // ④ 长向单向受光：光从"起点端"打过来（0..10% 亮），末端（90..100%）压暗。
+        //    对称的双端亮光是错的 —— 那样只像一根发亮的棍子，没有方向就没有立体。
+        {
+            const float lift=0.09f*(1.0f-docked*0.4f);
+            D2D1_GRADIENT_STOP sweep[5];
+            sweep[0].position=0.0f; sweep[0].color=D2D1::ColorF(1.0f,1.0f,1.0f,lift);
+            sweep[1].position=0.10f; sweep[1].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
+            sweep[2].position=0.5f; sweep[2].color=D2D1::ColorF(1.0f,1.0f,1.0f,0.0f);
+            sweep[3].position=0.86f; sweep[3].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+            sweep[4].position=1.0f;
+            sweep[4].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.10f*(0.4f+0.6f*docked));
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+            if(SUCCEEDED(target->CreateGradientStopCollection(sweep,5,D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                if(SUCCEEDED(target->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                        D2D1::Point2F(0,ch)),stops.Get(),&brush))) {
+                    target->FillGeometry(shape.Get(),brush.Get());
+                }
+            }
+        }
+        // ⑤ 1px 细边：只用来锁住轮廓，不做"厚边"。亮边在桌面侧最强，贴边侧几乎无。
+        //    浅色主题用 text（深）低透明，深色主题用白色低透明 —— 都不是黑色粗框。
+        {
+            D2D1_GRADIENT_STOP rim[4];
+            rim[0].position=0.0f; rim[0].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+            rim[1].position=0.45f; rim[1].color=D2D1::ColorF(0.0f,0.0f,0.0f,0.0f);
+            rim[2].position=0.80f;
+            rim[2].color=palette.light?Fade(palette.text,0.10f):D2D1::ColorF(1,1,1,0.14f);
+            rim[3].position=1.0f;
+            rim[3].color=palette.light?Fade(palette.text,0.24f):D2D1::ColorF(1,1,1,0.34f);
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+            if(SUCCEEDED(target->CreateGradientStopCollection(rim,4,D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,&stops))) {
+                Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+                if(SUCCEEDED(target->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),
+                        D2D1::Point2F(cw,0)),stops.Get(),&brush))) {
+                    target->DrawGeometry(shape.Get(),brush.Get(),1.0f);
+                }
+            }
+        }
+    }
+    // ---- 铭牌专属装饰：贴边侧身份色轨 + 待重启琥珀条（裁进形状轮廓，圆角处不探出）----
+    if(style==WidgetStyle::Tag&&screenShape) {
+        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),screenShape.Get(),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),nullptr);
+        if(spine>0.0f) {
+            // 身份色轨贴**屏幕边**的那一侧（贴哪条边就贴哪条边）：它是唯一必须跟随形体的元素。
+            D2D1_RECT_F rail=D2D1::RectF(0.0f,0.0f,width,height);
+            switch(view.widgetEdge) {
+            case 2: rail.left=width-spine;break;      // 右贴边
+            case 3: rail.bottom=spine;break;          // 上贴边
+            case 4: rail.top=height-spine;break;      // 下贴边
+            default: rail.right=spine;break;          // 左贴边（含未贴边）
+            }
+            brush_->SetColor(widgets::IdentityColour(view.heroHue));
+            target->FillRectangle(rail,brush_.Get());
+        }
+        if(view.pendingGatewayRestart||!view.statuses.empty()) {
+            // 琥珀条画在**屏幕空间起点端**（竖直边=顶边、水平边=左边）：不再随形体翻到另一端。
+            const auto stripe=vertical?D2D1::RectF(0.0f,0.0f,width,accent)
+                :D2D1::RectF(0.0f,0.0f,accent,height);
+            brush_->SetColor(palette.warn);
+            target->FillRectangle(stripe,brush_.Get());
+        }
+        target->PopLayer();
+        target->SetTransform(stripTransform);
+    }
+    // ---- 内容：按**屏幕空间**排布（两样式共用；朝向不随贴条旋转）----
+    target->SetTransform(D2D1::Matrix3x2F::Identity());
+    WidgetContent(target,view,palette,scale,width,height,style);
+}
+// 挂件内容：竖直边 = logo 在上 → 三灯 网关/WebUI/WSL 从上到下 → 模型名在下（从下往上读）；
+// 水平边 = 名字在左 → 三灯 从左到右 → logo 在右。两样式只差尺寸档（logo/灯点/文字盒），
+// 排布规则完全一致 —— 贴哪条边、用哪个样式，读感都是同一个（真机：铭牌此前会整块 180° 镜像）。
+void PanelRenderer::WidgetContent(ID2D1RenderTarget* target,const PanelViewModel& view,
+    const ThemePalette& palette,float scale,float width,float height,WidgetStyle style) {
+    const bool vertical=view.widgetVertical;
+    const bool tag=style==WidgetStyle::Tag;
+    const auto lampAt=[&](std::size_t index) {
+        return index<view.lamps.size()?LampColour(view.lamps[index].state,palette):palette.faint;
+    };
+    // 尺寸档：胶囊 14 DIP logo / 3.4 DIP 灯点；铭牌 10.5 DIP logo / 2.2 DIP 灯点（14 DIP 厚的窄牌）。
+    const float logo=Dip(tag?10.5f:14.0f,scale);
+    const float dotR=Dip(tag?2.2f:3.4f,scale);
+    const auto label=ModelTag(view.currentModel,4);
+    if(vertical) {
+        const float logoTop=Dip(tag?4.0f:9.0f,scale);
+        Icon(target,D2D1::RectF(width/2.0f-logo/2.0f,logoTop,width/2.0f+logo/2.0f,logoTop+logo),
+            IconId::Activity,palette.accentStrong,1.8f);
+        const float lampTop=tag?Dip(20.0f,scale):height*0.36f;
+        const float lampPitch=tag?Dip(6.0f,scale):height*0.115f;
+        for(int index=0;index<3;++index)
+            LampDot(target,width/2.0f,lampTop+lampPitch*static_cast<float>(index),dotR,
+                lampAt(static_cast<std::size_t>(2-index)),palette);   // 从上到下：网关/WebUI/WSL
+        const float y0=tag?Dip(37.0f,scale):height*0.62f;
+        const float y1=height-Dip(tag?5.0f:4.0f,scale);
+        const float limit=std::max(1.0f,y1-y0);
+        auto shown=label;
+        if(Measure(count_.Get(),shown).width>limit)
+            shown=Ellipsize(count_.Get(),shown,limit);
+        const auto converted=Widen(shown);
+        if(!converted.empty()) {
             count_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             count_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            const auto converted=Widen(shown);
-            if(!converted.empty()) {
-                target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),
-                    count_.Get(),D2D1::RectF(0.0f,0.0f,length,cw),brush_.Get());
-            }
+            brush_->SetColor(palette.text);
+            target->SetTransform(D2D1::Matrix3x2F::Rotation(-90.0f)
+                *D2D1::Matrix3x2F::Translation(0.0f,y1));
+            target->DrawTextW(converted.c_str(),
+                static_cast<UINT32>(converted.size()),count_.Get(),
+                D2D1::RectF(0.0f,0.0f,limit,width),brush_.Get());
             target->SetTransform(D2D1::Matrix3x2F::Identity());
-        } else if(!shown.empty()) {
-            // 横边：canonical 段矩形四角 → 屏幕 bbox，直接横排（上边段在左端、下边段在右端）。
-            const auto tagCentre=D2D1::Point2F(width/2.0f,height/2.0f);
-            const auto mapPoint=[&](float x,float y) {
-                if(angle==0.0f) return D2D1::Point2F(x,y);
-                const auto t=D2D1::Matrix3x2F::Translation(-cw/2.0f,-ch/2.0f)
-                    *D2D1::Matrix3x2F::Rotation(angle)
-                    *D2D1::Matrix3x2F::Translation(tagCentre.x,tagCentre.y);
-                // 行向量约定：(x,y)·M；Matrix3x2F 的数据是 (m11,m12,m21,m22,dx,dy)。
-                return D2D1::Point2F(x*t.m11+y*t.m21+t.dx,x*t.m12+y*t.m22+t.dy);
-            };
-            const D2D1_POINT_2F corners[4]={
-                mapPoint(0.0f,x0),mapPoint(static_cast<float>(cw),x0),
-                mapPoint(static_cast<float>(cw),x1),mapPoint(0.0f,x1)};
-            float minX=corners[0].x,maxX=corners[0].x,minY=corners[0].y,maxY=corners[0].y;
-            for(const auto& corner:corners) {
-                minX=std::min(minX,corner.x);maxX=std::max(maxX,corner.x);
-                minY=std::min(minY,corner.y);maxY=std::max(maxY,corner.y);
-            }
-            Text(target,shown,D2D1::RectF(minX,minY,maxX,maxY),count_.Get(),palette.text,
-                DWRITE_TEXT_ALIGNMENT_CENTER,true);
+        }
+    } else {
+        const float logoInset=Dip(tag?4.0f:9.0f,scale);
+        Icon(target,D2D1::RectF(width-logoInset-logo,height/2.0f-logo/2.0f,
+            width-logoInset,height/2.0f+logo/2.0f),
+            IconId::Activity,palette.accentStrong,1.8f);
+        const float lampLeft=tag?width*0.50f:width*0.47f;
+        const float lampPitch=width*0.105f;
+        for(int index=0;index<3;++index)
+            LampDot(target,lampLeft+lampPitch*static_cast<float>(index),height/2.0f,dotR,
+                lampAt(static_cast<std::size_t>(index)),palette);     // 从左到右：WSL/WebUI/网关
+        const float x0=Dip(4.0f,scale),x1=tag?width*0.42f:width*0.40f;
+        const float limit=std::max(1.0f,x1-x0);
+        auto shown=label;
+        if(Measure(count_.Get(),shown).width>limit)
+            shown=Ellipsize(count_.Get(),shown,limit);
+        Text(target,shown,D2D1::RectF(x0,0.0f,x1,height),count_.Get(),palette.text,
+            DWRITE_TEXT_ALIGNMENT_CENTER,true);
+    }
+}
+void PanelRenderer::LampDot(ID2D1RenderTarget* target,float x,float y,float radius,
+    const D2D1_COLOR_F& colour,const ThemePalette& palette) {
+    // 光晕必须是**连续衰减**的：硬边圆环（同色 18% 画一个更大的圆）看着像"圆点套圈"。
+    // 用径向渐变从中心 30% 一路淡到 0，边缘完全消失，才是光。
+    const auto dotCentre=D2D1::Point2F(x,y);
+    const float haloRadius=radius*(palette.light?1.9f:2.2f);
+    D2D1_GRADIENT_STOP halo[3];
+    halo[0].position=0.0f; halo[0].color=Fade(colour,0.26f);
+    halo[1].position=0.50f; halo[1].color=Fade(colour,0.07f);
+    halo[2].position=1.0f; halo[2].color=Fade(colour,0.0f);
+    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stops;
+    if(SUCCEEDED(target->CreateGradientStopCollection(halo,3,D2D1_GAMMA_2_2,
+        D2D1_EXTEND_MODE_CLAMP,&stops))) {
+        Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> haloTarget;
+        if(SUCCEEDED(target->CreateRadialGradientBrush(
+            D2D1::RadialGradientBrushProperties(dotCentre,D2D1::Point2F(0,0),
+                haloRadius,haloRadius),stops.Get(),&haloTarget))) {
+            target->FillEllipse(D2D1::Ellipse(dotCentre,haloRadius,haloRadius),haloTarget.Get());
         }
     }
+    brush_->SetColor(colour);
+    target->FillEllipse(D2D1::Ellipse(dotCentre,radius,radius),brush_.Get());
 }
 std::string PanelRenderer::Ellipsize(IDWriteTextFormat* format,const std::string& value,float width) {    // 旧 CSS 的 text-overflow: ellipsis 等价物。DWrite 自己的 trimming 在真机上没画出省略号
     // （放不下的字符直接消失），所以这里按测量值自己截：二分找最长能放下的前缀 + 省略号。
@@ -691,14 +591,23 @@ void PanelRenderer::Text(ID2D1RenderTarget* target,const std::string& value,D2D1
     target->DrawTextW(converted.c_str(),static_cast<UINT32>(converted.size()),format,rect,brush_.Get());
 }
 D2D1_SIZE_F PanelRenderer::Measure(IDWriteTextFormat* format,const std::string& value) {
+    if(value.empty()||!format||!factoryText_) return D2D1::SizeF(0,0);
+    const auto key=std::make_pair(reinterpret_cast<std::uintptr_t>(format),value);
+    const auto found=measureCache_.find(key);
+    if(found!=measureCache_.end()) { ++measureHits_;return found->second; }
+    ++measureMisses_;
     const auto converted=Widen(value);
-    if(converted.empty()||!format||!factoryText_) return D2D1::SizeF(0,0);
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-    if(FAILED(factoryText_->CreateTextLayout(converted.c_str(),static_cast<UINT32>(converted.size()),format,
-        4096.0f,4096.0f,layout.GetAddressOf()))) return D2D1::SizeF(0,0);
-    DWRITE_TEXT_METRICS metrics{};
-    if(FAILED(layout->GetMetrics(&metrics))) return D2D1::SizeF(0,0);
-    return D2D1::SizeF(metrics.width,metrics.height);
+    D2D1_SIZE_F size{};
+    if(SUCCEEDED(factoryText_->CreateTextLayout(converted.c_str(),
+        static_cast<UINT32>(converted.size()),format,4096.0f,4096.0f,layout.GetAddressOf()))) {
+        DWRITE_TEXT_METRICS metrics{};
+        if(SUCCEEDED(layout->GetMetrics(&metrics))) size=D2D1::SizeF(metrics.width,metrics.height);
+    }
+    // 有界：模型名/搜索词会不断累积；到 2048 条整体清空（重建成本远低于无界增长）。
+    if(measureCache_.size()>=2048) measureCache_.clear();
+    measureCache_.emplace(key,size);
+    return size;
 }
 void PanelRenderer::TextWrapped(ID2D1RenderTarget* target,const std::string& value,D2D1_RECT_F rect,
     IDWriteTextFormat* format,const D2D1_COLOR_F& colour,DWRITE_TEXT_ALIGNMENT alignment) {
@@ -933,10 +842,7 @@ void PanelRenderer::SearchRow(ID2D1RenderTarget* target,const PanelLayout& layou
         target->FillRectangle(D2D1::RectF(cursorX,layout.searchText.top+7.0f*scale_,cursorX+1.0f*scale_,
             layout.searchText.bottom-7.0f*scale_),brush_.Get());
     }
-    if(shown.empty()&&!field->Composing()) {
-        Text(target,"\xE6\x90\x9C\xE7\xB4\xA2\xE6\xA8\xA1\xE5\x9E\x8B\xE6\x88\x96\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86",
-            layout.searchText,caption_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-    }
+    // v1.23：占位文案由原生 EDIT 的 cue banner 提供（自绘提示会被控件盖住、或从左侧缝里露出半格）。
 }
 void PanelRenderer::Filters(ID2D1RenderTarget* target,const PanelLayout& layout,const PanelViewModel& view,
     const ThemePalette& palette) {
@@ -1207,7 +1113,7 @@ void PanelRenderer::List(ID2D1RenderTarget* target,const PanelLayout& layout,con
             const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
             thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
         }
-        brush_->SetColor(hot?palette.line:palette.raise2);
+        brush_->SetColor(hot?palette.line:palette.line2);
         target->FillRoundedRectangle(D2D1::RoundedRect(thumb,widgets::kScrollBarWidth*scale_/2.0f,
             widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
     }
@@ -1234,6 +1140,11 @@ void PanelRenderer::PageHead(ID2D1RenderTarget* target,const PanelLayout& layout
 void PanelRenderer::Field(ID2D1RenderTarget* target,const PanelLayout::FieldBox& field,
     const std::string& label,const std::string& value,bool focused,bool masked,const char* hint,
     const ThemePalette& palette) {
+    FieldWithCaret(target,field,label,value,focused,masked,hint,palette,-1,false);
+}
+void PanelRenderer::FieldWithCaret(ID2D1RenderTarget* target,const PanelLayout::FieldBox& field,
+    const std::string& label,const std::string& value,bool focused,bool masked,const char* hint,
+    const ThemePalette& palette,int caretIndex,bool multiline) {
     // .fld: an 11px dim label with a 4px gap, then the input box (.fld input: raise fill, line border,
     // radius 9, 6px 9px padding; focus = accent-line + accent-soft halo).
     Text(target,label,field.label,busy_.Get(),palette.dim,DWRITE_TEXT_ALIGNMENT_LEADING,true);
@@ -1257,16 +1168,43 @@ void PanelRenderer::Field(ID2D1RenderTarget* target,const PanelLayout::FieldBox&
     }
     if(value.empty()) {
         Text(target,hint?hint:"",textRect,caption_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-        return;
-    }
-    if(masked) {
+    } else if(masked) {
         // 掩码：每个字符一个 U+2022（旧 input[type=password] 的等宽点）
         std::string dots;
         for(std::size_t index=0;index<value.size();++index) dots+="\xE2\x80\xA2";
         Text(target,dots,textRect,body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-        return;
+    } else {
+        Text(target,value,textRect,body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
     }
-    Text(target,value,textRect,body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+    // v1.21（真机反馈"所有输入框都应该有光标"）：表单字段也画插入符。
+    // 此前只有搜索框有，表单只有一圈高亮。
+    if(!focused||!caretOn_||caretIndex<0) return;
+    std::wstring prefix;
+    if(masked) {
+        for(int index=0;index<caretIndex;++index) prefix+=L"\u2022";
+    } else {
+        const auto wide=Widen(value);
+        const auto limit=std::min<std::size_t>(static_cast<std::size_t>(caretIndex),wide.size());
+        prefix=wide.substr(0,limit);
+    }
+    float cursorX=textRect.left;
+    float cursorTop=textRect.top+Dip(7.0f,scale_);
+    float cursorBottom=textRect.bottom-Dip(7.0f,scale_);
+    if(multiline) {
+        // 多行：插入符落在"最后一个换行之后"那一行；行高 18 DIP。
+        const auto line=static_cast<float>(std::count(prefix.begin(),prefix.end(),L'\n'));
+        const auto lastBreak=prefix.find_last_of(L'\n');
+        const auto column=lastBreak==std::wstring::npos?prefix:prefix.substr(lastBreak+1);
+        cursorX=textRect.left+Measure(body_.Get(),Utf8(column)).width;
+        const auto lineHeight=Dip(18.0f,scale_);
+        cursorTop=textRect.top+Dip(4.0f,scale_)+line*lineHeight+Dip(2.0f,scale_);
+        cursorBottom=cursorTop+lineHeight-Dip(4.0f,scale_);
+    } else {
+        cursorX=textRect.left+Measure(body_.Get(),Utf8(prefix)).width;
+    }
+    if(cursorX>textRect.right-Dip(1.0f,scale_)) cursorX=textRect.right-Dip(1.0f,scale_);
+    brush_->SetColor(palette.accent);
+    target->FillRectangle(D2D1::RectF(cursorX,cursorTop,cursorX+1.0f*scale_,cursorBottom),brush_.Get());
 }
 void PanelRenderer::FallbackPage(ID2D1RenderTarget* target,const PanelLayout& layout,
     const PanelViewModel& view,const ThemePalette& palette) {
@@ -1413,17 +1351,8 @@ void PanelRenderer::FallbackPage(ID2D1RenderTarget* target,const PanelLayout& la
             Field(target,layout.fields[0],"来源供应商",source,false,false,nullptr,palette);
             Field(target,layout.fields[1],"模型 id",page.modelValue,false,false,
                 "deepseek-v4.1-flash",palette);
-            if(layout.fields.size()>=6) {
-                // 手填模式：provider/Base URL 与 Key 变量名/API Key 各占一行（见 layout 里的说明）。
-                const char* labels[6]={nullptr,nullptr,"provider 名","Base URL",
-                    "Key 变量名（可选）","API Key（可选，写入 .env）"};
-                const char* hints[6]={nullptr,nullptr,"例如 myrelay","https://…/v1","MYRELAY_API_KEY",nullptr};
-                const std::string values[6]={std::string{},std::string{},page.providerValue,page.urlValue,
-                    page.keyEnvValue,page.keyValue};
-                for(int index=2;index<=5;++index)
-                    Field(target,layout.fields[static_cast<std::size_t>(index)],labels[index],values[index],
-                        false,index==5,hints[index],palette);
-            }
+            // 模型 id 的 ▾ 由 Field() 的 kind==3 分支画（字段本身就是下拉，右侧已有 chevron）。
+            // 这里以前又画了一个，真机上变成一个框里两个三角。
             Button(target,layout.primaryButton,page.buttonLabel,IconId::Plus,
                 widgets::ButtonSkinOf(widgets::ButtonVariant::Primary,widgets::Visual::Normal,palette),false);
             if(!page.error.empty())
@@ -1494,12 +1423,20 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             palette);
     }
     // 正文裁剪到视口（窗口档位固定，正文比它高时整页滚动 —— 旧 body.clamped .page 的等价物）
-    target->PushAxisAlignedClip(layout.content,D2D1_ANTIALIAS_MODE_ALIASED);
+    target->PushAxisAlignedClip(layout.pageViewport,D2D1_ANTIALIAS_MODE_ALIASED);
     for(const auto& note:layout.notes) {
-        if(note.kind>0)
-            Text(target,note.text,D2D1::RectF(note.rect.left+Dip(11,scale_),note.rect.top,note.rect.right,
-                note.rect.bottom),busy_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-        else if(!note.text.empty())
+        if(note.kind>0) {
+            // 小节标题（连接 / 行为 / 快捷键 / 其他）：以前用 10.5px 正体 + faint（最淡的灰），
+            // 比正文还弱，真机反馈"很小、不突出"。改成 label_ 字号（12.5/500）+ dim，
+            // 左侧再加一条 2 DIP 的强调竖条——扫一眼就能分出层级，不依赖放大字号。
+            const auto bar=D2D1::RectF(note.rect.left,note.rect.top+Dip(6,scale_),
+                note.rect.left+2.0f*scale_,note.rect.bottom-Dip(6,scale_));
+            brush_->SetColor(palette.accentLine);
+            target->FillRoundedRectangle(D2D1::RoundedRect(bar,1.0f*scale_,1.0f*scale_),brush_.Get());
+            Text(target,note.text,D2D1::RectF(note.rect.left+Dip(8,scale_),note.rect.top,
+                note.rect.right,note.rect.bottom),label_.Get(),palette.dim,
+                DWRITE_TEXT_ALIGNMENT_LEADING,true);
+        } else if(!note.text.empty())
             // 这些是字段/分段的说明或标签（旧 .fld > span、.srow small 都左对齐），不居中。
             TextWrapped(target,note.text,note.rect,caption_.Get(),palette.faint,
                 DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1520,7 +1457,11 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             if(field.index<0||field.index>=static_cast<int>(page.fields.size())) continue;
             const auto& source=page.fields[static_cast<std::size_t>(field.index)];
             const bool focused=view.focusedFormField==field.index;
-            Field(target,field,source.label,source.value,focused,source.masked,source.hint.c_str(),palette);
+            // v1.23：原生 EDIT 自己画光标/选区，自绘层不再叠一个（否则会看到两个光标）。
+            const bool drawCaret=focused&&!view.focusedFormNative;
+            FieldWithCaret(target,field,source.label,source.value,focused,source.masked,
+                source.hint.c_str(),palette,drawCaret?view.focusedFormCaret:-1,
+                drawCaret?view.focusedFormMultiline:false);
             if(!source.note.empty()) {
                 const auto labelWidth=Measure(busy_.Get(),source.label).width;
                 const auto noteLeft=field.label.left+labelWidth+Dip(6,scale_);
@@ -1544,10 +1485,77 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
         SegRow(target,layout,subTabs,0,palette);
         if(page.sub==0&&!page.modes.empty())
             SegRow(target,layout,page.modes,subTabs.size(),palette);
-        if(!page.chips.empty()) {
-            std::vector<PanelViewModel::FilterSeg> chips;
-            for(const auto& chip:page.chips) chips.push_back({chip.model,0,false});
-            SegRow(target,layout,chips,subTabs.size()+page.modes.size(),palette);
+        // v1.21（用户要求）：模型列表——可滚动；点一行切换是否写入；表头全选/全不选。
+        if(!page.chips.empty()&&layout.modelList.right>layout.modelList.left) {
+            const auto box=layout.modelList;
+            brush_->SetColor(palette.surf);
+            target->FillRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get());
+            brush_->SetColor(palette.line);
+            target->DrawRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get(),
+                1.0f*scale_);
+            target->PushAxisAlignedClip(box,D2D1_ANTIALIAS_MODE_ALIASED);
+            // 表头：全选 / 全不选（按当前是否全选切换文案）
+            int selected=0;
+            for(const auto& chip:page.chips) if(chip.selected) ++selected;
+            const bool all=selected==static_cast<int>(page.chips.size());
+            const auto header=layout.modelList.top;
+            const auto headerBox=D2D1::RectF(box.left,header,box.right-Dip(4,scale_),
+                header+Dip(26,scale_));
+            brush_->SetColor(palette.raise2);
+            target->FillRectangle(headerBox,brush_.Get());
+            const auto checkBox=Dip(13.0f,scale_);
+            const auto checkRect=D2D1::RectF(box.left+Dip(9,scale_),
+                header+(Dip(26,scale_)-checkBox)/2.0f,box.left+Dip(9,scale_)+checkBox,
+                header+(Dip(26,scale_)+checkBox)/2.0f);
+            if(all) {
+                Icon(target,checkRect,IconId::Check,palette.accentStrong,2.0f);
+            } else {
+                brush_->SetColor(palette.line2);
+                target->DrawRoundedRectangle(D2D1::RoundedRect(checkRect,Dip(3,scale_),Dip(3,scale_)),
+                    brush_.Get(),1.0f*scale_);
+            }
+            Text(target,(all?"\xE5\x85\xA8\xE4\xB8\x8D\xE9\x80\x89":"\xE5\x85\xA8\xE9\x80\x89")
+                    +std::string(" \xEF\xBC\x88")+std::to_string(selected)+"/"
+                    +std::to_string(page.chips.size())+"\xEF\xBC\x89",
+                D2D1::RectF(checkRect.right+Dip(7,scale_),header,box.right-Dip(10,scale_),
+                    header+Dip(26,scale_)),caption_.Get(),palette.dim,
+                DWRITE_TEXT_ALIGNMENT_LEADING,true);
+            // 行
+            for(std::size_t index=0;index<layout.modelRows.size();++index) {
+                const auto& row=layout.modelRows[index];
+                const auto chipIndex=static_cast<std::size_t>(std::max(0,row.index));
+                if(chipIndex>=page.chips.size()) continue;
+                const auto& chip=page.chips[chipIndex];
+                const auto rect=row.rect;
+                // 悬停高亮：hoverControl_ 只记控件 id，行号用 hoverIndex_（由渲染前同步）。
+                if(hovered_(ControlId::ModelRow)&&page.hoverIndex==row.index) {
+                    brush_->SetColor(palette.raise2);
+                    target->FillRectangle(rect,brush_.Get());
+                }
+                const auto mark=Dip(12.0f,scale_);
+                const auto markRect=D2D1::RectF(rect.left+Dip(9,scale_),
+                    (rect.top+rect.bottom)/2.0f-mark/2.0f,rect.left+Dip(9,scale_)+mark,
+                    (rect.top+rect.bottom)/2.0f+mark/2.0f);
+                if(chip.selected) {
+                    Icon(target,markRect,IconId::Check,palette.accentStrong,2.0f);
+                } else {
+                    brush_->SetColor(palette.line2);
+                    target->DrawRoundedRectangle(D2D1::RoundedRect(markRect,Dip(3,scale_),Dip(3,scale_)),
+                        brush_.Get(),1.0f*scale_);
+                }
+                Text(target,chip.model,D2D1::RectF(markRect.right+Dip(7,scale_),rect.top,
+                    rect.right-Dip(8,scale_),rect.bottom),body_.Get(),
+                    chip.selected?palette.text:palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+            }
+            target->PopAxisAlignedClip();
+            if(layout.modelListThumb.right>layout.modelListBar.left) {
+                brush_->SetColor(Fade(palette.line2,0.55f));
+                target->FillRoundedRectangle(D2D1::RoundedRect(layout.modelListBar,
+                    Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
+                brush_->SetColor(Fade(palette.text,0.55f));
+                target->FillRoundedRectangle(D2D1::RoundedRect(layout.modelListThumb,
+                    Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
+            }
         }
         for(const auto& control:layout.controls) {
             if(control.id!=ControlId::SwitchRowControl||control.index<0
@@ -1555,30 +1563,6 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             const auto& row=page.switches[static_cast<std::size_t>(control.index)];
             SwitchLine(target,control.rect,row.label,std::string{},row.on,false,palette);
         }
-        if(layout.primaryButton.right>layout.primaryButton.left) {
-            // 删除页的主按钮是 danger 皮肤，且名称没匹配上时按禁用画（旧 disabled）。
-            const auto variant=page.danger?widgets::ButtonVariant::Danger:widgets::ButtonVariant::Primary;
-            const auto label=page.sub==1?"\xE8\xBF\xBD\xE5\x8A\xA0"
-                :(page.danger?"\xE5\x88\xA0\xE9\x99\xA4\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86":"\xE4\xBF\x9D\xE5\xAD\x98");
-            const auto visual=page.primaryDisabled?widgets::Visual::Disabled
-                :widgets::Visual::Normal;
-            Button(target,layout.primaryButton,label,page.danger?IconId::Trash2:IconId::None,
-                page.primaryDisabled?widgets::ButtonSkinOf(variant,visual,palette)
-                    :hoverSkin(ControlId::PrimaryButton,variant,palette),page.primaryDisabled);
-        }
-        if(layout.secondaryButton.right>layout.secondaryButton.left)
-            Button(target,layout.secondaryButton,page.sub==1?
-                "\xE4\xBB\x8E\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86\xE6\x8E\xA2\xE6\xB5\x8B\xE5\xA1\xAB\xE5\x85\x85"
-                :"\xE6\x8E\xA2\xE6\xB5\x8B",IconId::Activity,
-                hoverSkin(ControlId::ProbeButton,widgets::ButtonVariant::Normal,palette),
-                false);
-        if(!page.error.empty())
-            Text(target,page.error,layout.errorLine,caption_.Get(),palette.err,
-                DWRITE_TEXT_ALIGNMENT_LEADING,true);
-        else if(!page.summary.empty())
-            // 旧 .foot .note 是 flex:1 的 span：宽度不够时换行（不是省略号）。
-            TextWrapped(target,page.summary,layout.errorLine,caption_.Get(),palette.faint,
-                DWRITE_TEXT_ALIGNMENT_LEADING);
     } else if(backupPage) {
         const auto& page=view.backup;
         SegRow(target,layout,page.filters,0,palette);
@@ -1623,10 +1607,6 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
                     layout.cards.right-12.0f*scale_,layout.cards.top+Dip(69,scale_)),emptyText_.Get(),
                 palette.faint);
         } else {
-            // 脚注是列表里最后一段 .note（旧 <p class="note"> 是列表的最后一个孩子）：在同一个裁剪里画，
-            // 否则它会盖在行上（真机反馈的"穿模"之一）。左对齐（TextWrapped 默认居中）。
-            TextWrapped(target,page.footNote,layout.cardFoot,caption_.Get(),palette.faint,
-                DWRITE_TEXT_ALIGNMENT_LEADING);
             target->PopAxisAlignedClip();
         }
     } else {
@@ -1646,9 +1626,23 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             if(capturing) { fieldSkin.fill=palette.accentSoft;fieldSkin.border=palette.accent; }
             widgets::DrawButtonShape(target,brush_.Get(),field.box,fieldSkin,scale_);
             const bool dropdown=source.kind==3;
-            Text(target,source.value,D2D1::RectF(field.box.left+Dip(7,scale_),field.box.top,
-                field.box.right-Dip(dropdown?24.0f:7.0f,scale_),field.box.bottom),mono_.Get(),palette.text,
+            // 左右内缩 9 DIP：与原生 EDIT 的摆放内缩一致。以前是 7 DIP，EDIT 盖不住自绘文字，
+            // 右边会漏出 2 DIP 的"半截字"（真机截图里 8787 后面的那一道）。
+            const auto textRight=field.box.right-Dip(dropdown?24.0f:9.0f,scale_);
+            Text(target,source.value,D2D1::RectF(field.box.left+Dip(9,scale_),field.box.top,
+                textRight,field.box.bottom),mono_.Get(),palette.text,
                 DWRITE_TEXT_ALIGNMENT_TRAILING,true);
+            // v1.21：设置页的输入框也要有光标（右对齐：从右边界回推剩余文本宽度）。
+            if(field.index==view.focusedFormField&&!view.focusedFormNative
+                &&view.focusedFormCaret>=0&&caretOn_) {
+                const auto wide=Widen(source.value);
+                const auto limit=std::min<std::size_t>(
+                    static_cast<std::size_t>(view.focusedFormCaret),wide.size());
+                const auto cursorX=textRight-Measure(mono_.Get(),Utf8(wide.substr(limit))).width;
+                brush_->SetColor(palette.accent);
+                target->FillRectangle(D2D1::RectF(cursorX,field.box.top+Dip(7,scale_),
+                    cursorX+1.0f*scale_,field.box.bottom-Dip(7,scale_)),brush_.Get());
+            }
             if(dropdown) {
                 const auto glyph=Dip(13,scale_);
                 Icon(target,D2D1::RectF(field.box.right-Dip(22,scale_),
@@ -1692,10 +1686,48 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             DWRITE_TEXT_ALIGNMENT_LEADING);
     }
     target->PopAxisAlignedClip();
+    if(addPage) {
+        const auto& page=view.add;
+        if(layout.primaryButton.right>layout.primaryButton.left) {
+            // 删除页的主按钮是 danger 皮肤，且名称没匹配上时按禁用画（旧 disabled）。
+            const auto variant=page.danger?widgets::ButtonVariant::Danger:widgets::ButtonVariant::Primary;
+            // v1.21：子页只剩新建 / 删除——删除页必须写「删除供应商」，不能沿用「追加」。
+            const auto label=page.danger?"\xE5\x88\xA0\xE9\x99\xA4\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86"
+                :"\xE4\xBF\x9D\xE5\xAD\x98";
+            const auto visual=page.primaryDisabled?widgets::Visual::Disabled
+                :widgets::Visual::Normal;
+            Button(target,layout.primaryButton,label,page.danger?IconId::Trash2:IconId::None,
+                page.primaryDisabled?widgets::ButtonSkinOf(variant,visual,palette)
+                    :hoverSkin(ControlId::PrimaryButton,variant,palette),page.primaryDisabled);
+        }
+        if(layout.secondaryButton.right>layout.secondaryButton.left)
+            Button(target,layout.secondaryButton,page.sub==1?
+                "\xE4\xBB\x8E\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86\xE6\x8E\xA2\xE6\xB5\x8B\xE5\xA1\xAB\xE5\x85\x85"
+                :"\xE6\x8E\xA2\xE6\xB5\x8B",IconId::Activity,
+                hoverSkin(ControlId::ProbeButton,widgets::ButtonVariant::Normal,palette),
+                false);
+        if(!page.error.empty())
+            Text(target,page.error,layout.errorLine,caption_.Get(),palette.err,
+                DWRITE_TEXT_ALIGNMENT_LEADING,true);
+        else if(!page.summary.empty())
+            // 旧 .foot .note 是 flex:1 的 span：宽度不够时换行（不是省略号）。
+            TextWrapped(target,page.summary,layout.errorLine,caption_.Get(),palette.faint,
+                DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
     if(layout.pageScrollVisible) {
-        // line2：浅色主题下 raise2 与内容底几乎同色（真机反馈"滑条看不见"）。
-        brush_->SetColor(palette.line2);
-        target->FillRoundedRectangle(D2D1::RoundedRect(layout.pageScrollThumb,
+        // 与模型页列表滑条同一套：同一条竖线（content.right+2）、同色（line2，浅色主题下
+        // raise2 几乎看不见）、悬停加粗到 8 DIP。
+        const bool hot=view.pointerInside
+            &&view.pointerX>=layout.pageScrollTrack.left-Dip(2.0f,scale_)
+            &&view.pointerX<=layout.pageScrollTrack.right+Dip(2.0f,scale_)
+            &&view.pointerY>=layout.pageScrollTrack.top&&view.pointerY<=layout.pageScrollTrack.bottom;
+        auto thumb=layout.pageScrollThumb;
+        if(hot) {
+            const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
+            thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
+        }
+        brush_->SetColor(hot?palette.line:palette.line2);
+        target->FillRoundedRectangle(D2D1::RoundedRect(thumb,
             widgets::kScrollBarWidth*scale_/2.0f,widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
     }
 }
@@ -1797,7 +1829,8 @@ void PanelRenderer::Nav(ID2D1RenderTarget* target,const PanelLayout& layout,cons
         ControlId::TabBackup,ControlId::TabSettings};
     for(std::size_t index=0;index<layout.navItems.size()&&index<5;++index) {
         const auto& item=layout.navItems[index];
-        const bool active=index<view.nav.size()&&view.nav[index].active;
+        const std::size_t navIndex=index;
+        const bool active=navIndex<view.nav.size()&&view.nav[navIndex].active;
         const bool hovered=hovered_(ids[index]);
         if(active) {
             // .tab.active::before: a 34x23 rounded pill behind the icon, not a full-width fill.
@@ -1814,15 +1847,15 @@ void PanelRenderer::Nav(ID2D1RenderTarget* target,const PanelLayout& layout,cons
             target->FillRectangle(item.box,brush_.Get());
         }
         const auto colour=active?palette.accentStrong:(hovered?palette.dim:palette.faint);
-        Icon(target,item.icon,icons[index],colour,1.7f);
-        if(index<view.nav.size()) {
-            Text(target,view.nav[index].label,item.label,tiny_.Get(),colour,DWRITE_TEXT_ALIGNMENT_CENTER,false);
-            if(view.nav[index].badge>0) {
+        Icon(target,item.icon,icons[navIndex],colour,1.7f);
+        if(navIndex<view.nav.size()) {
+            Text(target,view.nav[navIndex].label,item.label,tiny_.Get(),colour,DWRITE_TEXT_ALIGNMENT_CENTER,false);
+            if(view.nav[navIndex].badge>0) {
                 // .tab b: a small mono count pill right of the icon.
                 const auto box=item.badge;
                 brush_->SetColor(palette.raise2);
                 target->FillRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get());
-                Text(target,std::to_string(view.nav[index].badge),box,navBadge_.Get(),palette.dim,
+                Text(target,std::to_string(view.nav[navIndex].badge),box,navBadge_.Get(),palette.dim,
                     DWRITE_TEXT_ALIGNMENT_CENTER,true);
             }
         }
@@ -1932,43 +1965,9 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
                 pill.right-Dip(7.0f,scale_),pill.bottom),caption_.Get(),palette.accentStrong,
             DWRITE_TEXT_ALIGNMENT_LEADING,true);
     }
-    if(view.busy) {
-        // .busy: the 2px indeterminate sweep bar along the top of the page（旧 body.busy .app::before
-        // 是流动动画；之前被画成静态半根，真机反馈"只有一根没有变化"）。现在复刻流动：
-        // 一段 55% 宽的渐变块在轨道上循环滑动（sin 驱动，无缝循环），尾迹渐隐。
-        const float trackLeft=layout.content.left;
-        const float trackWidth=layout.content.right-layout.content.left;
-        const float trackTop=layout.lampRow.top;
-        const float trackBottom=trackTop+widgets::kBannerHeight*scale_;
-        const float phase=view.busySweep*3.14159265f/180.0f;      // busySweep：0..720 循环（两拍）
-        const float cycle=std::sin(phase);                         // -1..1 → 位置 0..1
-        const float position=(cycle+1.0f)*0.5f;
-        const float block=trackWidth*0.5f;
-        const float head=trackLeft+position*(trackWidth-block);
-        const float tail=head+block;
-        // 三段渐变：透明 → accent → 透明（D2D 线性渐变笔刷按轨道坐标定位）。
-        D2D1_GRADIENT_STOP stops[3];
-        stops[0].position=0.0f; stops[0].color=Fade(palette.accent,0.0f);
-        stops[1].position=0.5f; stops[1].color=palette.accent;
-        stops[2].position=1.0f; stops[2].color=Fade(palette.accent,0.0f);
-        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> collection;
-        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> sweep;
-        if(SUCCEEDED(target->CreateGradientStopCollection(stops,3,D2D1_GAMMA_2_2,
-            D2D1_EXTEND_MODE_CLAMP,&collection))) {
-            const D2D1_POINT_2F start{head,trackTop},finish{tail,trackTop};
-            if(FAILED(target->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(start,finish),collection.Get(),&sweep))) {
-                sweep.Reset();
-            }
-        }
-        // 兜底：渐变笔刷创建失败时至少画实心段（不回到"永远半根"的旧观感）。
-        if(sweep) {
-            target->FillRectangle(D2D1::RectF(head,trackTop,tail,trackBottom),sweep.Get());
-        } else {
-            brush_->SetColor(palette.accent);
-            target->FillRectangle(D2D1::RectF(head,trackTop,tail,trackBottom),brush_.Get());
-        }
-    }
+    // v1.24：顶部不定进度条改由独立的 BusyBar 子窗口绘制（主面板一帧 200ms，
+    // 整窗重绘做不到流畅；子窗口每帧 <1ms）。
+
     Chip(target,layout.chipHelper,view.chipHelper,hovered_(ControlId::ChipHelper),palette);
     Chip(target,layout.chip,view.chip,hovered_(ControlId::Chip),palette);
     Chip(target,layout.chipWarn,view.chipWarn,hovered_(ControlId::ChipWarn),palette);
@@ -1985,14 +1984,10 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
             const D2D1_RECT_F iconRect(start,sync->top+(sync->bottom-sync->top-iconBox)/2,start+iconBox,
                 sync->top+(sync->bottom-sync->top+iconBox)/2);
             if(view.busy) {
-                // 刷新进行中：图标绕**自己的中心**旋转（真机反馈：不要「读取 WSL 配置…」的文字，
-                // 改成图标转）。
-                const auto centre=D2D1::Point2F((iconRect.left+iconRect.right)/2.0f,
-                    (iconRect.top+iconRect.bottom)/2.0f);
-                const auto radians=view.syncSpinAngle*3.14159265f/180.0f;
-                target->SetTransform(D2D1::Matrix3x2F::Rotation(radians,centre));
-                Icon(target,iconRect,IconId::RefreshCw,palette.faint,1.7f);
-                target->SetTransform(D2D1::Matrix3x2F::Identity());
+                // 刷新进行中：这一格**留给独立的 SpinGlyph 子窗口**（它自己按时间转，单帧 <0.2ms）。
+                // 主面板整窗重绘 10–170ms，在这里画旋转只会"不转、只在抖"（真机实测）。
+                // 不画任何东西：底下的 surf 底色由主面板已经铺好，子窗口正好盖住这一格。
+                (void)iconRect;
             } else if(view.syncCheck) {
                 // 刷新成功：对勾短暂显示后恢复（绿色，与 ok 语义一致）。
                 Icon(target,iconRect,IconId::Check,palette.ok,1.7f);
@@ -2033,7 +2028,34 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
         Offline(target,layout,view,palette);
     } else if(view.activePage==0) {
         SearchRow(target,layout,view,palette,field);
-        Filters(target,layout,view,palette);
+        if(layout.syncModels.right>layout.syncModels.left) {
+        // v1.25：一键刷新同步（全部供应商，只读探测 + 同步写回）。
+        const auto skin=widgets::ButtonSkinOf(widgets::ButtonVariant::Normal,
+            hovered_(ControlId::SyncModels)?widgets::Visual::Hovered:widgets::Visual::Normal,palette);
+        widgets::DrawButtonShape(target,brush_.Get(),layout.syncModels,skin,scale_);
+        const auto glyph=Dip(12.0f,scale_);
+        const auto iconLeft=layout.syncModels.left+Dip(9,scale_);
+        const auto iconBox=D2D1::RectF(iconLeft,
+            (layout.syncModels.top+layout.syncModels.bottom)/2.0f-glyph/2.0f,iconLeft+glyph,
+            (layout.syncModels.top+layout.syncModels.bottom)/2.0f+glyph/2.0f);
+        if(view.syncBusy) {
+            // 进行中：这一格**留给独立的 SpinGlyph 子窗口**（它自己按时间转，单帧 <0.2ms）。
+            // 主面板整窗重绘 10–170ms，在这里画旋转只会"不转、只在抖"（真机实测）。
+            // 不画任何东西：按钮底色已由 DrawButtonShape 铺好，子窗口正好盖住这一格。
+            (void)iconBox;
+        } else {
+            Icon(target,iconBox,IconId::RefreshCw,palette.dim,1.7f);
+        }
+        const auto syncLabel=view.syncBusy&&view.syncTotal>0
+            ? ("\xE5\x90\x8C\xE6\xAD\xA5 "+std::to_string(view.syncDone)+"/"
+                +std::to_string(view.syncTotal))
+            : std::string("\xE5\x88\xB7\xE6\x96\xB0\xE5\x90\x8C\xE6\xAD\xA5");
+        Text(target,syncLabel,
+            D2D1::RectF(iconLeft+glyph+Dip(5,scale_),layout.syncModels.top,
+                layout.syncModels.right-Dip(6,scale_),layout.syncModels.bottom),caption_.Get(),
+            palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+    }
+    Filters(target,layout,view,palette);
         List(target,layout,view,palette);
     } else if(view.activePage==1) {
         FallbackPage(target,layout,view,palette);
@@ -2086,54 +2108,6 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
                     row.row.right,row.row.bottom),brush_.Get());
             }
         }
-    }
-    // 悬停气泡（旧版的 title）：挂在控件下方，越界翻到上方并夹进窗口；多行按行画。
-    if(view.tooltip.visible&&!view.tooltip.text.empty()) {
-        // 提示气泡淡入（120ms）：alpha<1 时整体套一层透明度，避免"啪"地出现。
-        const bool tipMotion=view.motion.tooltipAlpha<0.999f;
-        struct TipGuard {
-            ID2D1RenderTarget* target;bool open;
-            ~TipGuard() { if(open) target->PopLayer(); }
-        } tip{target,false};
-        if(tipMotion) {
-            target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,
-                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::IdentityMatrix(),
-                view.motion.tooltipAlpha),nullptr);
-            tip.open=true;
-        }
-        const auto anchorRect=D2D1::RectF(view.tooltip.left,view.tooltip.top,view.tooltip.right,
-            view.tooltip.bottom);
-        std::vector<std::string> lines;
-        std::string current;
-        for(const char character:view.tooltip.text) {
-            if(character=='\n') { lines.push_back(current);current.clear();continue; }
-            current.push_back(character);
-        }
-        lines.push_back(current);
-        float width=0.0f;
-        // Measure 返回的已经是**物理像素**（与布局同一坐标系），不能再乘 scale（乘了气泡会宽 25%，
-        // 于是"贴着窗口边界被挤出去"）。
-        for(const auto& line:lines) width=std::max(width,Measure(caption_.Get(),line).width+Dip(14,scale_));
-        const float height=Dip(10,scale_)*static_cast<float>(lines.size())+Dip(11,scale_);
-        // 指针右下 14/18（原生气泡的习惯）；右边/下边放不下就翻到指针的左上，最后夹进窗口。
-        float left=anchorRect.left+Dip(14,scale_);
-        if(left+width>layout.window.right-Dip(6,scale_)) left=anchorRect.left-Dip(14,scale_)-width;
-        left=std::max(Dip(6,scale_),std::min(left,layout.window.right-width-Dip(6,scale_)));
-        float top=anchorRect.top+Dip(18,scale_);
-        if(top+height>layout.window.bottom-Dip(6,scale_)) top=anchorRect.top-Dip(10,scale_)-height;
-        top=std::max(Dip(6,scale_),std::min(top,layout.window.bottom-height-Dip(6,scale_)));
-        const auto box=D2D1::RectF(left,top,left+width,top+height);
-        brush_->SetColor(palette.surf);
-        target->FillRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get());
-        brush_->SetColor(palette.line);
-        target->DrawRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get(),1.0f*scale_);
-        float lineY=box.top+Dip(5,scale_);
-        for(const auto& line:lines) {
-            Text(target,line,D2D1::RectF(box.left+Dip(7,scale_),lineY,box.right-Dip(7,scale_),
-                lineY+Dip(10,scale_)*1.6f),caption_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-            lineY+=Dip(10,scale_);
-        }
-        if(tip.open) { target->PopLayer();tip.open=false; }
     }
     // 展开中的下拉（回退链页 / 添加页）：列表浮在页面内容之上，最后画。
     if(!layout.selectOptions.empty()&&!layout.selectLabels.empty()) {
@@ -2192,25 +2166,119 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
     target->DrawRectangle(D2D1::RectF(0.5f*scale_,0.5f*scale_,
         static_cast<float>(layout.window.right)-0.5f*scale_,
         static_cast<float>(layout.window.bottom)-0.5f*scale_),brush_.Get(),1.0f*scale_);
+    // 悬停提示（旧版的 title）：跟着指针（右下偏 14/18，放不下就翻到指针左上；横向夹进窗口）。
+    // **最后绘制**——提示是"置顶"的浮层：底栏（模型/回退链/添加/备份/设置）是画在最上面的实心条，
+    // 悬停底栏按钮时气泡按"翻到左上"落在底栏内部，早先会被整块盖住（真机 2026-10-21 报
+    // "下边很多个按钮的提示被隐藏在界面底下"）。现在它画在底栏/模态/Toast/窗口描边之后。
+    if(view.tooltip.visible&&!view.tooltip.text.empty()) {
+        // 提示气泡淡入（120ms）：alpha<1 时整体套一层透明度，避免"啪"地出现。
+        const bool tipMotion=view.motion.tooltipAlpha<0.999f;
+        struct TipGuard {
+            ID2D1RenderTarget* target;bool open;
+            ~TipGuard() { if(open) target->PopLayer(); }
+        } tip{target,false};
+        if(tipMotion) {
+            target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::IdentityMatrix(),
+                view.motion.tooltipAlpha),nullptr);
+            tip.open=true;
+        }
+        const auto anchorRect=D2D1::RectF(view.tooltip.left,view.tooltip.top,view.tooltip.right,
+            view.tooltip.bottom);
+        std::vector<std::string> lines;
+        std::string current;
+        for(const char character:view.tooltip.text) {
+            if(character=='\n') { lines.push_back(current);current.clear();continue; }
+            current.push_back(character);
+        }
+        lines.push_back(current);
+        float width=0.0f;
+        // Measure 返回的已经是**物理像素**（与布局同一坐标系），不能再乘 scale（乘了气泡会宽 25%，
+        // 于是"贴着窗口边界被挤出去"）。
+        for(const auto& line:lines) width=std::max(width,Measure(caption_.Get(),line).width+Dip(14,scale_));
+        const float height=Dip(10,scale_)*static_cast<float>(lines.size())+Dip(11,scale_);
+        // 横向：指针右侧 14 DIP 优先，右边放不下就翻到指针左侧，最后夹进窗口（纵向规则见下方）。
+        float left=anchorRect.left+Dip(14,scale_);
+        if(left+width>layout.window.right-Dip(6,scale_)) left=anchorRect.left-Dip(14,scale_)-width;
+        left=std::max(Dip(6,scale_),std::min(left,layout.window.right-width-Dip(6,scale_)));
+        // 指针落在底栏内时，气泡夹进**内容区**（底栏之上 4 DIP）：即使提示画在最上层，
+        // 也不该压住底栏按钮本身（那是用户正在指的东西）。
+        const float safeBottom=anchorRect.top>=layout.nav.top
+            ?layout.nav.top-Dip(4,scale_):layout.window.bottom;
+        // 纵向**优先放在指针上方**：光标本体从热点往右下延伸（典型箭头），气泡放右下会被它压住
+        // 左上角（真机 2026-10-21 报"容易被指针挡住"）。上方顶到窗口才翻到指针下方。
+        float top=anchorRect.top-Dip(10,scale_)-height;
+        if(top<Dip(6,scale_)) top=anchorRect.top+Dip(18,scale_);
+        top=std::max(Dip(6,scale_),std::min(top,safeBottom-height-Dip(6,scale_)));
+        // 原生输入框是**子窗口**，永远画在 D2D 之上：气泡压到输入框上会被它盖掉半截
+        // （真机复现：悬停搜索框下沿时提示被输入框切成两半）。这里让气泡避开所有字段盒：
+        // 优先挪到框正上方，上方放不下再挪到框下方。
+        const auto avoidField=[&](const D2D1_RECT_F& obstacle) {
+            if(left>=obstacle.right||obstacle.left>=left+width||top>=obstacle.bottom
+                ||obstacle.top>=top+height) return;
+            const float above=obstacle.top-height-Dip(6,scale_);
+            if(above>=Dip(6,scale_)) { top=above;return; }
+            const float below=obstacle.bottom+Dip(6,scale_);
+            if(below+height<=safeBottom-Dip(6,scale_)) { top=below;return; }
+        };
+        for(int pass=0;pass<2;++pass) {
+            if(view.activePage==0&&layout.search.right>layout.search.left) avoidField(layout.search);
+            for(const auto& formField:layout.fields) avoidField(formField.box);
+        }
+        top=std::max(Dip(6,scale_),std::min(top,safeBottom-height-Dip(6,scale_)));
+        const auto box=D2D1::RectF(left,top,left+width,top+height);
+        // v1.32（真机反馈"气泡背景要和主题区分开、对比强一些"）：改用**反相**配色——
+        // 深色主题给亮底深字、浅色主题给深底亮字，任何主题下气泡都不会和页面糊在一起。
+        // 之前是 palette.surf + palette.line（和卡片/输入框同色），在浅色主题里几乎看不出边界。
+        const bool darkPage=!palette.light;
+        const auto tipFill=darkPage?D2D1::ColorF(0.965f,0.968f,0.976f,0.99f)
+            :D2D1::ColorF(0.115f,0.118f,0.135f,0.98f);
+        const auto tipText=darkPage?D2D1::ColorF(0.09f,0.09f,0.11f,1.0f)
+            :D2D1::ColorF(0.97f,0.975f,0.98f,1.0f);
+        const auto tipBorder=darkPage?D2D1::ColorF(0.0f,0.0f,0.0f,0.22f)
+            :D2D1::ColorF(1.0f,1.0f,1.0f,0.30f);
+        // 先落一层很淡的外扩阴影，让气泡从页面上"浮"起来（1px 描边之外的第二层对比）。
+        brush_->SetColor(Fade(D2D1::ColorF(0.0f,0.0f,0.0f),darkPage?0.18f:0.10f));
+        target->FillRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(box.left,box.top+Dip(1.5f,scale_),box.right,box.bottom+Dip(1.5f,scale_)),
+            6.0f*scale_,6.0f*scale_),brush_.Get());
+        brush_->SetColor(tipFill);
+        target->FillRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get());
+        brush_->SetColor(tipBorder);
+        target->DrawRoundedRectangle(D2D1::RoundedRect(box,6.0f*scale_,6.0f*scale_),brush_.Get(),1.0f*scale_);
+        // 文字在气泡里**垂直居中**：每行排版盒 1.6×10=16 DIP、行距 10 DIP，n 行的文字块高 = 10n+6，
+        // 气泡高 = 10n+11 → 首行起点必须落在 top+2.5 DIP 才上下对称。旧写法从 top+5 起画，
+        // 文字块底边正好贴到气泡底边（实测上留白 11px / 下留白 4px，真机 2026-10-21 报
+        // "悬浮提示里的文字不是居中高度"）。
+        float lineY=box.top+Dip(2.5f,scale_);
+        for(const auto& line:lines) {
+            Text(target,line,D2D1::RectF(box.left+Dip(7,scale_),lineY,box.right-Dip(7,scale_),
+                lineY+Dip(10,scale_)*1.6f),caption_.Get(),tipText,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+            lineY+=Dip(10,scale_);
+        }
+        if(tip.open) { target->PopLayer();tip.open=false; }
+    }
 }
 void PanelRenderer::DrawHoverCard(ID2D1RenderTarget* target,IDWriteFactory* text,
     const HoverCardView& card,D2D1_SIZE_F size,float scale,const ThemePalette& palette,
     float cardAlpha,float cardOffsetDip) {
     EnsureResources(target,text,scale);
     const auto dip=[&](float value) { return value*scale; };
-    // 入场：内容从下方 4 DIP 滑上并淡入（只作用于绘制；窗口位置不动）。移植自 balance-panel-native。
-    const bool cardMotion=cardAlpha<0.999f||std::abs(cardOffsetDip)>0.01f;
+    // 入场只做**淡入**，不再"从下方 4 DIP 滑上来"：
+    // 卡片是分层窗口（UpdateLayeredWindow），位移要求每帧对整块内容做 Translation 变换，
+    // 而 D2D 对**文本**做亚像素平移时会重新采样 —— 真机看到的就是"弹出时文字抖一下/发虚"。
+    // 淡入用一层 alpha 就够，文字位置恒定，字形始终清晰。
+    const bool cardMotion=cardAlpha<0.999f;
     struct CardGuard {
         ID2D1RenderTarget* target;bool open;
-        ~CardGuard() { if(open) { target->SetTransform(D2D1::Matrix3x2F::Identity());target->PopLayer(); } }
+        ~CardGuard() { if(open) target->PopLayer(); }
     } cardGuard{target,false};
     if(cardMotion) {
         target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::IdentityMatrix(),cardAlpha),nullptr);
-        if(std::abs(cardOffsetDip)>0.01f)
-            target->SetTransform(D2D1::Matrix3x2F::Translation(0,dip(cardOffsetDip)));
         cardGuard.open=true;
     }
+    (void)cardOffsetDip;   // 参数保留（调用方与门禁签名不变），不再参与绘制
     const auto cardRect=D2D1::RoundedRect(D2D1::RectF(0,0,size.width,size.height),dip(12),dip(12));
     // 独立窗口底下没有面板的渐变地面：先用 ink 打底，再叠 surf，避免透出桌面影响可读性。
     brush_->SetColor(palette.ink);
@@ -2226,7 +2294,7 @@ void PanelRenderer::DrawHoverCard(ID2D1RenderTarget* target,IDWriteFactory* text
     brush_->SetColor(palette.line2);
     target->FillRectangle(D2D1::RectF(dip(14),dip(32),size.width-dip(14),dip(33)),brush_.Get());
     Text(target,"当前："+card.model,D2D1::RectF(dip(14),dip(37),size.width-dip(14),dip(58)),
-        body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+        cardBody_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,false);
     const auto dotColour=[&](int state) {
         switch(state) {
         case 0: return palette.ok;

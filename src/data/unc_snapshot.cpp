@@ -3,6 +3,8 @@
 #include <json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <ctime>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -358,13 +360,27 @@ UncSnapshot TakeUncSnapshot(const std::string& distro,const std::string& homePos
             });
         }
     }
+    // mtime_text 必须是本地时间 "YYYY-MM-DD HH:MM:SS"（状态行的同步章取 HH:MM）。旧实现留空，
+    // 于是 Release（UNC 快速路径）的同步时间永远显示"—"（真机 2026-10-21 报「刷新按钮里是个横杠」）。
+    std::string mtimeText;
+    if(configMtime>0) {
+        std::time_t stamp=static_cast<std::time_t>(configMtime);
+        std::tm local{};
+        if(localtime_s(&local,&stamp)==0) {
+            char buffer[32]{};
+            std::snprintf(buffer,sizeof(buffer),"%04d-%02d-%02d %02d:%02d:%02d",
+                local.tm_year+1900,local.tm_mon+1,local.tm_mday,
+                local.tm_hour,local.tm_min,local.tm_sec);
+            mtimeText=buffer;
+        }
+    }
     Json list{
         {"model",model},
         {"providers",providers},
         {"fallbacks",fallbacks},
         {"files",Json{{"config",Json{
             {"mtime",configMtime},
-            {"mtime_text",std::string{}},
+            {"mtime_text",mtimeText},
             {"size",configSize},
             {"mode",std::string{}},
         }},{"env",Json{{"exists",envExists},{"size",envSize}}}}},

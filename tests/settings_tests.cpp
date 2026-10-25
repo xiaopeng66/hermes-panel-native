@@ -40,7 +40,10 @@ int main() {
             &&settings.favorites[1]=="c|d","only string favorites survive");
         Check(settings.recents.size()==1&&settings.recents[0]=="e|f","only string recents survive");
         Check(settings.latencyMinutes==5,"an invalid latency interval falls back to 5");
-        Check(settings.widgetStyle=="beacon","an invalid widget style falls back to beacon");
+        // 断言更新（2026-10-21）：信标/旗标两套样式按用户要求删除后，未知样式的回落目标从 beacon
+        // 改成 capsule（DESIGN v1.10 ①；src/core/settings.cpp 与 core/geometry.cpp 同一条规则）。
+        // 这条断言钉的是"未知值有确定归宿"，不是"归宿必须是 beacon"——所以要改的是期望值本身。
+        Check(settings.widgetStyle=="capsule","an invalid widget style falls back to capsule");
         Check(settings.floating.x==200&&settings.floating.y==120,
             "a wrong-typed float pair keeps the default position");
     }

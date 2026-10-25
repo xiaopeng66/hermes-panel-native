@@ -155,6 +155,10 @@ def diagnose():
         channels["weixin"].update(weixin_extra)
 
     config_mtime, config_size = mtime(CONFIG)
+    # 状态行同步章取 HH:MM：旧版只给时间戳，客户端只能显示"—"（真机 2026-10-21 报）。
+    config_mtime_text = ""
+    if config_mtime > 0:
+        config_mtime_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(config_mtime))
     now = int(time.time())
     for entry in channels.values():
         if entry.get("last_activity"):
@@ -171,7 +175,8 @@ def diagnose():
         "gateway": gateway,
         "channels": list(channels.values()),
         "logs": logs,
-        "config": {"mtime": config_mtime, "size": config_size},
+        "config": {"mtime": config_mtime, "mtime_text": config_mtime_text,
+                   "size": config_size},
     }
 
 

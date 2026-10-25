@@ -77,7 +77,7 @@ void ClickRect(h::Client& client,const Json& rect) {
     const auto x=rect["x"].get<int>()+rect["width"].get<int>()/2;
     const auto y=rect["y"].get<int>()+rect["height"].get<int>()/2;
     const auto hit=client.Request({{"command","hit"},{"x",x},{"y",y}});
-    h::Require(hit["hit"]["isPanel"].get<bool>(),"the click target ("+std::to_string(x)+","
+    h::Require((hit["hit"]["isPanel"].get<bool>()||hit["hit"].value("isPanelChild",false)),"the click target ("+std::to_string(x)+","
         +std::to_string(y)+") is covered by "+hit["hit"]["class"].get<std::string>()
         +" (pid "+std::to_string(hit["hit"]["pid"].get<unsigned long>())+"), not the panel");
     h::Require(hit["capture"].get<std::uintptr_t>()==0||hit["capture"].get<std::uintptr_t>()
@@ -201,6 +201,13 @@ int wmain(int argc,wchar_t** argv) {
         h::Require(snapshot["models"]["rows"].size()==2,"clicking the head again collapses it");
         std::cout<<"PASS group head toggles: 2 -> 5 -> 2 visible rows\n";
 
+        // v1.29：文本测量缓存必须真的命中（同一批标签每帧都要量宽度）。
+        {
+            const auto measure=client.Request({{"command","dump"}})["measure"];
+            h::Require(measure.value("hits",0ULL)>0,
+                ("the text measure cache never hit ("+measure.dump()+")").c_str());
+        }
+
         // ---- 4. searching filters into the flat view (provider column) ----
         // The `/` shortcut: it reaches the app as WM_CHAR, the same way the key really does.
         client.Request({{"command","key"},{"text","/"}});
@@ -217,6 +224,7 @@ int wmain(int argc,wchar_t** argv) {
         h::Require(snapshot["models"]["rows"][0]["group"].get<std::string>().empty(),
             "a search result is a flat list, not a group");
         std::cout<<"PASS search: query -> flat view with 3 hits and the hint\n";
+
 
         // ---- 5. ↓ + ↵ switch the cursor row through the helper ----
         // 切换前记下统计：切换会带来"写入后重读 + 立刻一次完整刷新"，两条都要能观测到。
@@ -259,7 +267,7 @@ int wmain(int argc,wchar_t** argv) {
             const auto y=rect["y"].get<int>()+rect["height"].get<int>()/2;
             client.Request({{"command","focus"}});
             const auto hit=client.Request({{"command","hit"},{"x",x},{"y",y}});
-            h::Require(hit["hit"]["isPanel"].get<bool>(),"the click target is covered by another window");
+            h::Require((hit["hit"]["isPanel"].get<bool>()||hit["hit"].value("isPanelChild",false)),"the click target is covered by another window");
             client.Request({{"command","tap"},{"x",x},{"y",y},{"screen",true}});
             Sleep(150);
         };
@@ -331,8 +339,13 @@ int wmain(int argc,wchar_t** argv) {
         auto typed=client.Request({{"command","controls"}});
         h::Require(typed.contains("searchClear"),"the ✕ shows while the query is not empty");
         ClickRect(client,typed["searchClear"]);
-        h::Require(client.Request({{"command","dump"}})["models"]["search"].get<std::string>().empty(),
-            "the ✕ emptied the query");
+        {
+            const auto after=client.Request({{"command","dump"}});
+            h::Require(after["models"]["search"].get<std::string>().empty(),
+                ("the ✕ emptied the query (search="+after["models"]["search"].dump()
+                    +" clear="+std::to_string(client.Request({{"command","controls"}}).contains("searchClear"))
+                    +" focus="+after["focus"].dump()+")").c_str());
+        }
         h::Require(!client.Request({{"command","controls"}}).contains("searchClear"),
             "the ✕ hides again once the query is empty");
         // Esc 清空（查询 + 游标）走的是同一条 ClearSearch 路径。
@@ -448,7 +461,56 @@ int wmain(int argc,wchar_t** argv) {
             DeleteFileW((home+L"\\list_slow").c_str());
             std::cout<<"PASS switch during a poll is queued behind the in-flight call\n";
         }
-        status=0;
+
+        // ---- 4b. v1.25：一键刷新同步（模型页右端按钮）----
+        {
+            const auto syncControls=client.Request({{"command","controls"}});
+            h::Require(syncControls.contains("syncModels"),"the models page exposes the sync button");
+            ClickRect(client,syncControls["syncModels"]);
+            const auto modal=WaitFor(client,[](const Json& value) {
+                return !value["modal"]["title"].get<std::string>().empty(); });
+            h::Require(modal["modal"]["title"].get<std::string>().find("\xE5\x90\x8C\xE6\xAD\xA5")
+                !=std::string::npos,"the sync button asks for confirmation");
+            h::Require(Requests(logPath,"add-models").empty(),
+                "nothing is written before the confirmation");
+            const auto addsBefore=Requests(logPath,"add-models").size();
+            // 确认：逐个供应商只读探测 + 差异写回（prune）
+            client.Request({{"command","vk"},{"vk",13}});
+            const auto deadline=GetTickCount64()+30000;
+            while(GetTickCount64()<deadline) {
+                const auto state=client.Request({{"command","dump"}})["syncAll"];
+                if(!state.value("busy",false)&&state.value("done",0)>0) break;
+                Sleep(120);
+            }
+            const auto state=client.Request({{"command","dump"}});
+            const auto sync=state["syncAll"];
+            h::Require(sync.value("total",0)>0&&sync.value("done",0)>0,
+                ("sync-all walked the providers ("+sync.dump()+")").c_str());
+            h::Require(Requests(logPath,"add-models").size()>addsBefore,
+                ("sync-all wrote the differing providers ("+sync.dump()+")").c_str());
+            {
+                std::ifstream input(logPath);
+                std::string line;
+                bool prune=false;
+                while(std::getline(input,line)) {
+                    if(line.find("\"cmd\":\"add-models\"")==std::string::npos) continue;
+                    if(line.find("\"prune\":true")!=std::string::npos) prune=true;
+                }
+                h::Require(prune,"the sync used add-models with prune=true");
+            }
+            // 写盘后必须交代网关重启（默认自动重启关）：待重启点亮 + toast 提到重启。
+            const auto after=WaitFor(client,[](const Json& value) {
+                return value["data"]["pendingGatewayRestart"].get<bool>(); });
+            h::Require(after["data"]["pendingGatewayRestart"].get<bool>(),
+                ("sync-all raises the pending-restart state ("+after["syncAll"].dump()
+                    +" stored="+after["stored"].dump()+")").c_str());
+            h::Require(after["toast"]["text"].get<std::string>().find("\xE9\x87\x8D\xE5\x90\xAF")
+                !=std::string::npos,"sync-all tells the user a restart is needed");
+            std::cout<<"PASS sync-all: confirmation, per-provider prune writes, restart prompt\n";
+
+                }
+
+status=0;
     } catch(const std::exception& error) {
         std::cerr<<"h-models: "<<error.what()<<"\n";
         status=harness::IsEnvironmentInterference(error)?77:1;

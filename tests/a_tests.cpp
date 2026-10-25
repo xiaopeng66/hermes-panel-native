@@ -224,14 +224,73 @@ void ExpandFromStrip(harness::Client& client,harness::Pointer& pointer) {
     const int edge=snapshot["edge"].get<int>();
     const int x=IsVertical(edge)?strip[0].get<int>()+strip[2].get<int>()/2:strip[0].get<int>()+strip[2].get<int>()/2;
     const int y=IsVertical(edge)?strip[1].get<int>()+strip[3].get<int>()/2:strip[1].get<int>()+strip[3].get<int>()/2;
+    // 事件水位：之后出现的 strip-press/strip-click 只可能来自我们自己的合成输入，
+    // 或外部输入（真人在用桌面）——后者判环境（SKIP），不判产品（真机/门禁 2026-10-21）。
+    unsigned long long markTick=0;
+    for(const auto& event:snapshot["events"]) markTick=std::max(markTick,event["tick"].get<unsigned long long>());
+    // 合成点击的前提是指针一直待在放的位置；桌面有人用时物理鼠标会在按下/松手之间把它带走，
+    // 那是环境属性（SKIP），不能拿它给应用判失败（与 drag 门禁的 requirePointerAt 同一规则）。
+    const auto requirePointerAt=[&](const char* where) {
+        const auto now=harness::Pointer::Position();
+        if(std::abs(now.x-x)>2||std::abs(now.y-y)>2)
+            throw std::runtime_error(std::string("cursor interference ")+where+" (at "
+                +std::to_string(now.x)+","+std::to_string(now.y)+" instead of "
+                +std::to_string(x)+","+std::to_string(y)+"); the desktop is in use");
+    };
     pointer.MoveTo(x,y);
     Sleep(260);
     // 贴条改为单击展开：先确认悬停不展开，再点一下（按下即展开）。
+    if(State(client)!=4) {
+        // 到这里我们还没发过任何按键：这段时间里若出现 strip-press/strip-click/grace-armed，
+        // 只能是外部输入（真人在用桌面点了贴条）—— 环境属性（SKIP），不是产品缺陷。
+        const auto dump=Dump(client);
+        for(const auto& event:dump["events"]) {
+            const auto name=event["name"].get<std::string>();
+            if((name=="strip-press"||name=="strip-click"||name=="grace-armed")
+                &&event["tick"].get<unsigned long long>()>markTick)
+                throw std::runtime_error("cursor interference: external input ("+name
+                    +") expanded the panel before the synthetic hover check; the desktop is in use");
+        }
+    }
     harness::Require(State(client)==4,"hover over the strip must not expand the panel");
+    requirePointerAt("before the strip click");
     pointer.Button(true);
     Sleep(80);
+    requirePointerAt("at the strip press");
     pointer.Button(false);
     Sleep(200);
+    requirePointerAt("after the strip click");
+    {
+        // 按下到松开之间，外部程序可能把 capture 抢走（物理鼠标点了别处）。应用侧会如实记录
+        // capture-lost-press 而这次点击注定丢失 —— 那是环境属性（SKIP），不是产品缺陷。
+        // 判据只看"最近一次 strip-press 之后"的事件，避免把上一轮的历史当成这一轮的失败。
+        const auto dump=Dump(client);
+        unsigned long long pressTick=0;
+        for(const auto& event:dump["events"])
+            if(event["name"].get<std::string>()=="strip-press")
+                pressTick=std::max(pressTick,event["tick"].get<unsigned long long>());
+        for(const auto& event:dump["events"]) {
+            const auto name=event["name"].get<std::string>();
+            if((name=="capture-lost-press"||name=="capture-lost-drag")
+                &&event["tick"].get<unsigned long long>()>=pressTick) {
+                const auto cursor=harness::Pointer::Position();
+                throw std::runtime_error("capture stolen during the strip press ("+name
+                    +"; pointer now at "+std::to_string(cursor.x)+","+std::to_string(cursor.y)
+                    +"); the desktop is in use");
+            }
+        }
+    }
+    if(State(client)!=3) {
+        // 诊断（不改断言）：把失败瞬间的状态、光标与应用事件环打出来。
+        const auto dump=Dump(client);
+        const auto cursor=harness::Pointer::Position();
+        std::cerr<<"diagnostic(expand): cursor=("<<cursor.x<<","<<cursor.y<<") strip=("<<x<<","<<y
+            <<") state="<<dump["state"]<<" panel="<<dump["panel"]<<" stripRect="<<dump["strip"]
+            <<" edge="<<dump["edge"]<<" stripVisible="<<dump["stripVisible"]
+            <<" graces="<<dump["graces"]<<" events:\n";
+        for(const auto& event:dump["events"]) std::cerr<<"  "<<event["tick"]<<" "<<event["name"]
+            <<" state="<<event["state"]<<" at ("<<event["x"]<<","<<event["y"]<<")\n";
+    }
     harness::Require(State(client)==3,"clicking the strip did not expand the panel");
 }
 double CpuPercent(HANDLE process,unsigned milliseconds) {
@@ -732,6 +791,21 @@ int ScenarioCrossDpi() {
         probe.J("stop");
         snapshot=Dump(client);
         const auto samples=ReadSamples(sampleFile);
+        // 与 A2/A3 同一条判定：落点必须就是合成拖拽的终点。应用记下的是**真实光标**（GetCursorPos），
+        // 光标被别人挪走时这里读到的就是别人的坐标 —— 环境属性（SKIP），不是产品缺陷。
+        // 2026-10-21 门禁实证：drag-commit cursor=(1891,1163) 而请求的终点是 (853,345)，
+        // 且该次拖拽根本没落到目标显示器，DPI 断言测的东西不存在了。
+        {
+            const auto cursor=snapshot["lastDrop"]["cursor"];
+            if(!snapshot["lastDrop"]["valid"].get<bool>()
+                ||std::abs(cursor[0].get<int>()-targetX)>2||std::abs(cursor[1].get<int>()-targetY)>2)
+                throw std::runtime_error("the recorded drop point is not the requested end point (got "
+                    +std::to_string(cursor[0].get<int>())+","+std::to_string(cursor[1].get<int>())+" expected "
+                    +std::to_string(targetX)+","+std::to_string(targetY)+" at iteration "+std::to_string(i)
+                    +", valid="+(snapshot["lastDrop"]["valid"].get<bool>()?"true":"false")
+                    +"): the pointer was moved by something else, or the system warped it during the DPI "
+                    "transition, so the DPI claim cannot be evaluated on this run; the desktop is in use");
+        }
         const int expectedDpi=toOther?otherDpi:startDpi;
         const int expectedW=DipToPixels(measuredDipW,expectedDpi),
             expectedH=DipToPixels(measuredDipH,expectedDpi);

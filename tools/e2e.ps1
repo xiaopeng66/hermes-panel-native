@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Build', 'Unit', 'Widget', 'Lifecycle', 'Shell', 'Pages', 'Regression', 'A', 'ReadHelper', 'Audit', 'Release', 'All')][string]$Gate = 'All',
+    [ValidateSet('Build', 'Unit', 'Widget', 'Lifecycle', 'Shell', 'Pages', 'Regression', 'A', 'ReadHelper', 'Audit', 'Release', 'All', 'Pointer')][string]$Gate = 'All',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug'
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -18,19 +18,29 @@ $cmake = 'C:/Program Files/CMake/bin/cmake.exe'
 $ctest = 'C:/Program Files/CMake/bin/ctest.exe'
 # Gate maps to the ctest name subset for each milestone slice. Unit tests are the fast pre-gate;
 # Regression re-runs every gate implemented so far so a new slice cannot silently break an older one.
+#
+# 真实指针套件（合成鼠标点来点去/拖窗口）单独成 -Gate Pointer，**默认跑法不含它们**：
+#   * 它们需要在空闲桌面上真点真拖，机器上只要有人/别的自动化在动鼠标就只会 SKIP，
+#     每次还要几分钟（a-hover 一项 ≈150s、hover ≈20s、drag ≈8s）；
+#   * 平时的回归只关心功能与几何（用控制面驱动，确定、快），指针交互在需要时单跑一遍即可：
+#       powershell -File tools/e2e.ps1 -Gate Pointer
+#   * h-ime 同样依赖桌面（要一个可用的 IME），一并归到 Pointer。
 $filters = @{
     Unit       = '^(geometry|state|log|settings)$'
     Widget     = '^(widget|icons)$'
     Lifecycle  = '^lifecycle$'
-    Shell      = '^(shell|tray|hover|drag|motion|dpi)$'
+    Shell      = '^(shell|tray|motion)$'
     # a-panelui was a balance scenario (activeSite/trend) and was replaced by the hermes page gates.
+    # a-c1（重启/恢复）不点不拖，留在默认集合里。
     A          = '^a-(snap|pullout|hover|edge|crossdpi|topology|c1)$'
-    # Page gates: the hermes pages against the fake helper (h-ime skips without a free desktop IME).
-    Pages      = '^(h-ime|h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls)$'
-    Regression = '^(geometry|state|log|settings|widget|icons|helper|hermes-state|lifecycle|shell|tray|hover|drag|motion|dpi|h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls)$'
+    # Page gates: the hermes pages against the fake helper.
+    Pages      = '^(h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls)$'
+    Regression = '^(geometry|state|log|settings|widget|icons|helper|hermes-state|lifecycle|shell|tray|motion|h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls)$'
     Release    = '^release$'
+    # 真实指针/键盘：点来点去、拖窗口、跨屏、悬停、IME。需要空闲桌面，单跑。
+    Pointer    = '^(hover|drag|dpi|h-ime|a-snap|a-pullout|a-hover|a-edge|a-crossdpi|a-topology)$'
 }
-$allFilter = '^(geometry|state|log|widget|icons|helper|hermes-state|lifecycle|shell|tray|hover|drag|motion|dpi|h-ime|h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls|a-snap|a-pullout|a-hover|a-edge|a-crossdpi|a-topology|a-c1)$'
+$allFilter = '^(geometry|state|log|widget|icons|helper|hermes-state|lifecycle|shell|tray|motion|h-models|h-fallback|h-add|h-backup|h-settings|h-offline|h-migrate|h-controls|a-c1)$'
 function Invoke-Checked([string]$Exe, [string[]]$Arguments) {
     Write-Host "COMMAND: $Exe $($Arguments -join ' ')"
     $savedPreference = $ErrorActionPreference

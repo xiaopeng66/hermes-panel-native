@@ -5,6 +5,10 @@
 #include "core/geometry.h"
 
 namespace hermes {
+// 收藏 / 最近使用的条数上限（旧 main.js 的 FAVORITES_MAX / RECENTS_MAX）。
+// 放在数据层：**加载时**也要按它截断 —— 被篡改或损坏的 settings.json 里可能有几十万条，
+// 只靠写入路径限长会让启动时把整份数组读进内存（实测 2MB/20 万条不会崩，但没有意义）。
+constexpr int kFavoritesMax=200,kRecentsMax=12;
 // Persisted shell state (DESIGN §6.4 mapping). Keys mirror the old Electron settings.json where the
 // meaning is unchanged, so a migration tool can translate one into the other.
 struct Settings {

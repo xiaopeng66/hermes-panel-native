@@ -87,9 +87,19 @@ int wmain() {
     Check(Signature(favoritesChanged)!=Signature(state),"a favorite change moves the signature");
     const auto groupsChanged=mutate(state,[](HermesState& value) { value.webuiGroups.rawJson="[]"; });
     Check(Signature(groupsChanged)!=Signature(state),"a webui-groups change moves the signature");
-    // untracked: reachability flags do NOT rebuild the list (only wsl and list content do)
+    // v1.31（契约变更，断言按新契约改写）：签名原本只决定"列表要不要重建"，因此可达性不计入；
+    // 现在它还决定**整窗要不要重绘**（v1.28 的跳过逻辑），可达性/网关启动时刻/mtime/错误横幅
+    // 都会改变画面（三盏灯、同步时间戳、待重启胶囊、错误横幅），必须计入——否则灯变了界面不刷新。
     const auto reachable=mutate(state,[](HermesState& value) { value.webui.reachable=false; });
-    Check(Signature(reachable)==Signature(state),"webui reachability alone does not move the signature");
+    Check(Signature(reachable)!=Signature(state),"webui reachability moves the signature (it repaints lamps)");
+    const auto gatewayDown=mutate(state,[](HermesState& value) { value.gateway.reachable=false; });
+    Check(Signature(gatewayDown)!=Signature(state),"gateway reachability moves the signature");
+    const auto gatewayRestarted=mutate(state,[](HermesState& value) { value.gateway.sinceUnix+=60; });
+    Check(Signature(gatewayRestarted)!=Signature(state),"the gateway start time moves the signature");
+    const auto mtimeChanged=mutate(state,[](HermesState& value) { value.config.mtime+=60; });
+    Check(Signature(mtimeChanged)!=Signature(state),"config mtime moves the signature (sync stamp)");
+    const auto helperBroken=mutate(state,[](HermesState& value) { value.error="helper failed"; });
+    Check(Signature(helperBroken)!=Signature(state),"the helper error banner moves the signature");
     Check(Signature(HermesState{})==Signature(HermesState{}),"the empty state has a stable signature");
     Check(ParseState("{bad json",HealthFixture("up"),WebuiFixture()).providers.empty(),
         "unparsable list input yields an empty state instead of throwing");

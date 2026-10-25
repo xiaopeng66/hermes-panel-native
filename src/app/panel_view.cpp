@@ -302,6 +302,8 @@ void AttachStatusView(PanelViewModel& view,const StatusViewInput& input) {
         view.tooltips.push_back({static_cast<int>(ControlId::TabSettings),-1,"设置、诊断与用量"});
         view.tooltips.push_back({static_cast<int>(ControlId::SearchBox),-1,"搜索模型或供应商（/ 聚焦）"});
         view.tooltips.push_back({static_cast<int>(ControlId::SearchClear),-1,"清空搜索"});
+        view.tooltips.push_back({static_cast<int>(ControlId::SyncModels),-1,
+            "刷新同步：只读探测全部供应商，差异写回（写前备份）"});
         view.tooltips.push_back({static_cast<int>(ControlId::FilterAll),-1,"显示全部模型"});
         view.tooltips.push_back({static_cast<int>(ControlId::FilterFav),-1,"只显示收藏的模型"});
         view.tooltips.push_back({static_cast<int>(ControlId::FilterRecent),-1,"只显示最近用过的模型"});
@@ -310,6 +312,7 @@ void AttachStatusView(PanelViewModel& view,const StatusViewInput& input) {
         view.tooltips.push_back({static_cast<int>(ControlId::FbFoldClose),-1,"收起追加表单"});
         view.tooltips.push_back({static_cast<int>(ControlId::FbSubmit),-1,"保存这条回退"});
         view.tooltips.push_back({static_cast<int>(ControlId::FbSelect),-1,"选择来源供应商"});
+        view.tooltips.push_back({static_cast<int>(ControlId::FbModelSelect),-1,"选择该供应商的模型（来自只读探测）"});
         view.tooltips.push_back({static_cast<int>(ControlId::FbUp),-1,"上移"});
         view.tooltips.push_back({static_cast<int>(ControlId::FbDown),-1,"下移"});
         view.tooltips.push_back({static_cast<int>(ControlId::FbRemove),-1,"移除这条回退"});
@@ -321,7 +324,6 @@ void AttachStatusView(PanelViewModel& view,const StatusViewInput& input) {
         view.tooltips.push_back({static_cast<int>(ControlId::SetUsage),-1,"查看近期 token 用量"});
         view.tooltips.push_back({static_cast<int>(ControlId::SetProfiles),-1,"保存或套用整套模型配置"});
         view.tooltips.push_back({static_cast<int>(ControlId::SubTabNew),-1,"新建供应商"});
-        view.tooltips.push_back({static_cast<int>(ControlId::SubTabModels),-1,"给已有供应商加模型"});
         view.tooltips.push_back({static_cast<int>(ControlId::SubTabDel),-1,"删除供应商"});
         view.tooltips.push_back({static_cast<int>(ControlId::ProbeButton),-1,"探测供应商的模型列表"});
         view.tooltips.push_back({static_cast<int>(ControlId::KeyReveal),-1,"显示或隐藏 API Key"});
@@ -383,10 +385,6 @@ void AttachFallbackPage(PanelViewModel& view,const FallbackPageInput& input) {
     page.busy=input.busy;
     page.error=input.error;
     page.modelValue=input.model;
-    page.providerValue=input.provider;
-    page.urlValue=input.baseUrl;
-    page.keyEnvValue=input.keyEnv;
-    page.keyValue=input.key;
     for(const auto& entry:state.fallbacks) {
         FallbackRowView row;
         row.provider=entry.provider;
@@ -396,18 +394,21 @@ void AttachFallbackPage(PanelViewModel& view,const FallbackPageInput& input) {
         row.keyWarn=!entry.keyEnv.empty()&&!entry.keySet;
         page.rows.push_back(row);
     }
-    // 下拉：首项是「手填 provider + base_url」，其余是当前 config 里的供应商（旧 providerOptions）。
+    // v1.25（用户要求）：来源供应商只能从既有供应商里选——不再有"手填 provider + base_url"这一项。
     page.sources.clear();
-    page.sources.push_back("\xE2\x80\x94 \xE6\x89\x8B\xE5\xA1\xAB provider + base_url \xE2\x80\x94");
     for(const auto& provider:state.providers) page.sources.push_back(provider.name);
-    page.source=std::clamp(input.source,0,static_cast<int>(page.sources.size())-1);
+    // v1.25：去掉"手填"首项后 sources 可能为空（配置里一个供应商都没有）。空列表时保持 0——
+    // 不能写 clamp(0,0,-1)：std::clamp 要求 lo<=hi，Debug 版直接断言中止（实测 0xc000041d）。
+    page.source=page.sources.empty()?0
+        :std::clamp(input.source,0,static_cast<int>(page.sources.size())-1);
     page.sourceScroll=std::max(0,input.sourceScroll);
+    page.modelSelectOpen=input.modelSelectOpen;
+    page.modelOptions=input.modelOptions;
 }
 // ---- H5b/H5c：添加 / 备份 / 设置三页（旧 panel-add / panel-backup / panel-settings）----
 namespace {
 // 标签与文案逐字照搬旧页。
 constexpr const char* kSubNew="\xE6\x96\xB0\xE5\xBB\xBA\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86";
-constexpr const char* kSubModels="\xE5\x8A\xA0\xE6\xA8\xA1\xE5\x9E\x8B";
 constexpr const char* kSubDel="\xE5\x88\xA0\xE9\x99\xA4\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86";
 constexpr const char* kNoProbe="\xE8\xBF\x98\xE6\xB2\xA1\xE6\x8E\xA2\xE6\xB5\x8B";
 }
@@ -425,14 +426,18 @@ void AttachAddPage(PanelViewModel& view,const AddPageInput& input) {
     auto& page=view.add;
     page=AddPageView{};
     page.title="\xE6\xB7\xBB\xE5\x8A\xA0";
-    page.subs={kSubNew,kSubModels,kSubDel};
-    page.sub=std::clamp(input.sub,0,2);
+    page.subs={kSubNew,kSubDel};
+    page.sub=std::clamp(input.sub,0,1);
     page.busy=input.busy;
     page.error=input.error;
     page.info=input.info;
     page.keyRevealed=input.keyRevealed;
     page.chips.clear();
-    for(const auto& model:input.chips) page.chips.push_back({model});
+    for(std::size_t index=0;index<input.chips.size();++index)
+        page.chips.push_back({input.chips[index],
+            index<input.chipSelected.size()?input.chipSelected[index]:true});
+    page.modelScroll=input.modelScroll;
+    page.hoverIndex=input.hoverIndex;
     page.countText=input.chips.empty()?kNoProbe:
         (std::to_string(input.chips.size())+" \xE4\xB8\xAA\xE6\xA8\xA1\xE5\x9E\x8B");
     page.summary="\xE5\x86\x99\xE5\x85\xA5\xE5\x89\x8D\xE8\x87\xAA\xE5\x8A\xA8\xE5\xA4\x87\xE4\xBB\xBD config.yaml "
@@ -447,40 +452,29 @@ void AttachAddPage(PanelViewModel& view,const AddPageInput& input) {
     page.selectOpen=input.selectOpen;
     page.selectField=input.selectField;
     if(page.sub==0) {
-        // 新建供应商（旧 sub-new）：名称/Key 变量名 一行两列，Base URL，API Key + 眼睛，
-        // 接口模式分段，模型药丸 + 手动输入，两个开关，底部探测/保存。
+        // v1.18（用户要求）：名称 / Base URL / API Key / 模型（可空）。「Key 变量名」不再让人填
+        // ——助手按供应商名推导（key_env_auto），这里只把它作为提示显示在 API Key 字段右侧。
         page.fields={
-            {"\xE5\x90\x8D\xE7\xA7\xB0",input.name,"my-relay",{},0,false,0,1},
-            {"Key \xE5\x8F\x98\xE9\x87\x8F\xE5\x90\x8D",input.keyEnv,"\xE8\x87\xAA\xE5\x8A\xA8\xE6\x8E\xA8\xE5\xAF\xBC",{},0,false,1,2},
-            {"Base URL",input.url,"https://api.example.com/v1",{},0,false,2,0},
+            {"\xE5\x90\x8D\xE7\xA7\xB0",input.name,"my-relay",{},0,false,0,0},
+            {"Base URL",input.url,"https://api.example.com/v1",{},0,false,1,0},
             {"API Key",input.key,"sk-\xE2\x80\xA6",
-                input.keyEnv.empty()?"\xE5\x8F\xAA\xE5\x86\x99 .env\xEF\xBC\x8C\xE4\xB8\x8D\xE5\x9B\x9E\xE6\x98\xBE"
+                input.keyEnv.empty()
+                    ?"\xE5\x8F\xAA\xE5\x86\x99 .env\xEF\xBC\x8C\xE4\xB8\x8D\xE5\x9B\x9E\xE6\x98\xBE"
                     :"\xE5\x86\x99\xE5\x85\xA5 .env \xE7\x9A\x84 "+input.keyEnv,
-                1,!input.keyRevealed,3,0},
-            // 审计 F-007：旧版 #np-models 的「手动输入/编辑」多行框。探测结果也写进这里，可继续编辑；
-            // 药丸只是同一份数据的快捷删除视图。
-            {"\xE6\xA8\xA1\xE5\x9E\x8B",input.modelsNew,"deepseek-v4-flash",
-                "\xE6\xAF\x8F\xE8\xA1\x8C\xE4\xB8\x80\xE4\xB8\xAA",4,false,4,0}};
-        page.keyEnvPreview=page.fields[3].note;
+                1,!input.keyRevealed,2,0},
+            };
+        // v1.24（用户要求）：新建供应商页**不再有模型输入框**——模型只来自「探测」得到的列表。
+        page.keyEnvPreview=page.fields[2].note;
         // showCount=false：接口模式是模式切换不是筛选，计数没有意义（显示成 0 像个怪符号）。
         page.modes={{"chat_completions",0,input.mode==0,false},{"codex_responses",0,input.mode==1,false}};
         page.mode=std::clamp(input.mode,0,1);
-        page.switches={{"\xE4\xBF\x9D\xE5\xAD\x98\xE5\x89\x8D\xE6\x8E\xA2\xE6\xB5\x8B\xE6\xA8\xA1\xE5\x9E\x8B"
-            "\xE5\x88\x97\xE8\xA1\xA8",input.probeBefore,0},
-            {"\xE4\xBF\x9D\xE5\xAD\x98\xE5\x90\x8E\xE8\xAE\xBE\xE4\xB8\xBA\xE5\xBD\x93\xE5\x89\x8D\xE6\xA8\xA1\xE5\x9E\x8B",
-                input.setMainAfter,1}};
+        // v1.18：删掉「保存前探测模型列表」——它从未被提交逻辑读取，是死控件。
+        page.switches={{"\xE4\xBF\x9D\xE5\xAD\x98\xE5\x90\x8E\xE8\xAE\xBE\xE4\xB8\xBA\xE5\xBD\x93\xE5\x89\x8D\xE6\xA8\xA1\xE5\x9E\x8B",
+            input.setMainAfter,0}};
         if(page.chips.empty())
             page.chipNote="\xE8\xBF\x98\xE6\xB2\xA1\xE6\x8E\xA2\xE6\xB5\x8B\xE3\x80\x82\xE7\x82\xB9\xE3\x80\x8C"
                 "\xE6\x8E\xA2\xE6\xB5\x8B\xE3\x80\x8D\xE6\x8B\x89\xE6\xA8\xA1\xE5\x9E\x8B\xE5\x88\x97\xE8\xA1\xA8"
                 "\xEF\xBC\x8C\xE6\x88\x96\xE6\x89\x8B\xE5\x8A\xA8\xE8\xBE\x93\xE5\x85\xA5\xE3\x80\x82";
-    } else if(page.sub==1) {
-        // 加模型（旧 sub-models）：供应商下拉 + 模型 id 多行 + 从供应商探测填充 / 追加
-        page.fields={
-            {"\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86",
-                page.providers.empty()?"":page.providers[static_cast<std::size_t>(page.provider)],
-                {},{},3,false,0,0},
-            {"\xE6\xA8\xA1\xE5\x9E\x8B id",input.modelsText,"deepseek-v4-flash",
-                "\xE6\xAF\x8F\xE8\xA1\x8C\xE4\xB8\x80\xE4\xB8\xAA",4,false,1,0}};
     } else {
         // 删除供应商：危险卡片 + **供应商下拉**（用户要求：不要手输名字）。旧版是「输入名称确认」，
         // 那道防误删的护栏现在由「确定删除」模态承担（选谁删谁，弹窗里再确认一次）。
@@ -513,10 +507,6 @@ void AttachBackupPage(PanelViewModel& view,const BackupPageInput& input) {
         "\xE6\x9D\xBF\xE6\xAF\x8F\xE6\xAC\xA1\xE5\x86\x99\xE5\x85\xA5\xE5\x89\x8D\xE9\x83\xBD\xE4\xBC\x9A\xE5\x90\x84"
         "\xE7\x95\x99\xE4\xB8\x80\xE4\xBB\xBD\xEF\xBC\x89";
     if(!input.error.empty()) page.emptyText=input.error;
-    page.footNote="\xE5\x9B\x9E\xE6\xBB\x9A\xE5\x89\x8D\xE4\xBC\x9A\xE6\x8A\x8A\xE5\xBD\x93\xE5\x89\x8D"
-        "\xE5\x86\x85\xE5\xAE\xB9\xE5\x86\x8D\xE5\xA4\x87\xE4\xBB\xBD\xE4\xB8\x80\xE4\xBB\xBD\xEF\xBC\x8C"
-        "\xE6\x89\x80\xE4\xBB\xA5\xE5\x8F\xAF\xE4\xBB\xA5\xE5\x86\x8D\xE5\x9B\x9E\xE6\xBB\x9A\xE5\x9B\x9E"
-        "\xE6\x9D\xA5 \xC2\xB7 \xE6\xAF\x8F\xE7\xB1\xBB\xE6\x9C\x80\xE5\xA4\x9A\xE4\xBF\x9D\xE7\x95\x99 100 \xE4\xBB\xBD";
     page.total=static_cast<int>(input.entries.size());
     page.filter=std::clamp(input.filter,0,2);
     page.filters.push_back({"\xE5\x85\xA8\xE9\x83\xA8",0,page.filter==0});
@@ -555,7 +545,14 @@ void AttachSettingsPage(PanelViewModel& view,const SettingsPageInput& input) {
     page.sections={"\xE8\xBF\x9E\xE6\x8E\xA5","\xE8\xA1\x8C\xE4\xB8\xBA",
         "\xE5\xBF\xAB\xE6\x8D\xB7\xE9\x94\xAE","\xE5\x85\xB6\xE4\xBB\x96"};
     page.fields={
-        {"WSL \xE5\x8F\x91\xE8\xA1\x8C\xE7\x89\x88",input.distro,{}, {},0,false,0,0},
+        // WSL 发行版：面板所有读写（列目录、跑助手脚本、读 config.yaml）都通过
+        // `wsl.exe -d <发行版>` 进这个发行版执行——填错会把面板和助手的连接点指到不存在的
+        // 发行版上（真机出现过：清空后整条链路报 WSL_E_DISTRO_NOT_FOUND）。
+        // 留空 = 用系统默认发行版（UNC 快路径会因此退化成每次拉起 wsl.exe）。
+        {"WSL \xE5\x8F\x91\xE8\xA1\x8C\xE7\x89\x88",input.distro,{},
+            "\xE9\x9D\xA2\xE6\x9D\xBF\xE8\xB0\x83\xE7\x94\xA8\xE5\x8A\xA9\xE6\x89\x8B"
+            "\xE5\x92\x8C\xE9\x85\x8D\xE7\xBD\xAE\xE6\x89\x80\xE5\x9C\xA8"
+            "\xE7\x9A\x84\xE5\x8F\x91\xE8\xA1\x8C\xE7\x89\x88",0,false,0,0},
         {"WebUI \xE7\xAB\xAF\xE5\x8F\xA3",std::to_string(input.webuiPort),{},
             "\xE4\xBE\x9D\xE6\xAC\xA1\xE8\xAF\x95 8787 \xE2\x86\x92 9119",2,false,1,0},
         {"\xE7\x8A\xB6\xE6\x80\x81\xE5\x88\xB7\xE6\x96\xB0\xE9\x97\xB4\xE9\x9A\x94",std::to_string(input.pollSeconds),
@@ -590,13 +587,10 @@ void AttachSettingsPage(PanelViewModel& view,const SettingsPageInput& input) {
         {"15 \xE5\x88\x86\xE9\x92\x9F",0,input.latencyMinutes==15,false},
         {"60 \xE5\x88\x86\xE9\x92\x9F",0,input.latencyMinutes==60,false}};
     page.latency=input.latencyMinutes==15?1:(input.latencyMinutes==60?2:0);
-    // G11 贴边挂件：三套窄型 + 胶囊（与几何的 WidgetStyle 顺序一致）。
-    page.widgetSegments={{"\xE4\xBF\xA1\xE6\xA0\x87",0,input.widgetStyle=="beacon",false},
-        {"\xE9\x93\xAD\xE7\x89\x8C",0,input.widgetStyle=="tag",false},
-        {"\xE6\x97\x97\xE6\xA0\x87",0,input.widgetStyle=="flag",false},
+    // G11 贴边挂件：铭牌 + 胶囊（信标/旗标已按用户要求删除）。
+    page.widgetSegments={{"\xE9\x93\xAD\xE7\x89\x8C",0,input.widgetStyle=="tag",false},
         {"\xE8\x83\xB6\xE5\x9B\x8A",0,input.widgetStyle=="capsule",false}};
-    page.widget=input.widgetStyle=="tag"?1:(input.widgetStyle=="flag"?2
-        :(input.widgetStyle=="capsule"?3:0));
+    page.widget=input.widgetStyle=="capsule"?1:0;
     // 主题分段：旧面板三档（深色/浅色/跟随系统）+ 两套拟态主题（用户要求"高级拟态"）。
     // 六套主题 + 跟随系统：深色/浅色是旧面板原样，后四套是现代化候选（用户要求"四套都要"）。
     // 顺序固定：深色 · 浅色 · 跟随系统 · 石板 · 碳黑 · 瓷白 · 沙丘。

@@ -79,7 +79,9 @@ int wmain(int argc,wchar_t** argv) {
             }
             const auto expected=std::vector<std::string>{
                 "显示 / 隐藏","当前：alpha / alpha-large","切换到","立即刷新","打开 WebUI","重启网关",
-                "重启 WebUI 服务","贴边收回","始终置顶","主题","关闭按钮","开机自启","紧致视图",
+                // 「紧致视图」已按用户要求删除（2026-10-24）：152 DIP 在原生面板上装不下
+                // 任何页面正文，留着一个"切过去什么都看不到"的档位没有意义。菜单随之少一项。
+                "重启 WebUI 服务","贴边收回","始终置顶","主题","关闭按钮","开机自启",
                 "刷新间隔","打开数据目录","关于","退出"};
             std::vector<std::string> actual;
             for(const auto& label:labels) actual.push_back(label.get<std::string>());
@@ -117,7 +119,7 @@ int wmain(int argc,wchar_t** argv) {
             harness::Require(item("始终置顶")["checked"]==true,"topmost item must reflect the default (on)");
             harness::Require(item("贴边收回")["enabled"]==true,"the snap toggle is enabled while floating");
             harness::Require(item("开机自启")["checked"]==false,"autostart starts off");
-            harness::Require(item("紧致视图")["checked"]==false,"the compact item starts unchecked");
+            // 「紧致视图」已删除（见上面的菜单标签断言），这一条随之移除。
             // 主题子菜单：三项 + **恰好一项**被勾选，且勾的就是设置里的那个（默认 system → 跟随系统）。
             const auto themes=item("主题")["children"];
             const int wanted=snapshot["settings"]["theme"].get<int>();   // 0 深 / 1 浅 / 2 跟随系统
@@ -192,43 +194,7 @@ int wmain(int argc,wchar_t** argv) {
 
         // M1 commands: compact tier, always-on-top, poll interval, active site, autostart, hotkeys.
         {
-            // 首轮刷新（探活/读配置）落地后窗口还会按内容再 fit 一次：等高度稳定再取基准，
-            // 否则会把"离线卡更高"当成档位切换没生效。
-            int fullHeight=Dump(client)["panel"][3].get<int>();
-            for(int attempt=0;attempt<40;++attempt) {
-                Sleep(100);
-                const int now=Dump(client)["panel"][3].get<int>();
-                if(now==fullHeight) break;
-                fullHeight=now;
-            }
-            const auto beforeTier=Dump(client);
-            fullHeight=beforeTier["panel"][3].get<int>();
-            const auto tierWrites=beforeTier["writes"].get<unsigned>();
-            const auto compact=client.Request({{"command","menu"},{"id",1007}});
-            harness::Require(compact["compact"]==true&&compact["tier"]==1,"compact view did not switch the tier");
-            harness::Require(compact["panel"][3].get<int>()<fullHeight,"compact tier did not shrink the panel");
-            harness::Require(compact["panel"]==compact["expectedPanel"]&&compact["writes"].get<unsigned>()-tierWrites==1,
-                "compact tier switch is not a single absolute write equal to the model");
-            const auto restored=client.Request({{"command","menu"},{"id",1007}});
-            // 回到完整档的高度 = 当前页面内容量出来的高度（旧 app:fit）：面板自己会再 fit 一次，
-            // 所以这里等它落定再比。
-            // 回完整档后应用会再按内容 fit 一次（离线卡比列表页更高）：等它落定，再看它是否
-            // 与"当前状态应得的高度"一致（= 紧凑切换后 model 报的 expectedPanel 高度）。
-            int restoredHeight=restored["panel"][3].get<int>();
-            for(int attempt=0;attempt<30;++attempt) {
-                Sleep(100);
-                const auto now=Dump(client);
-                const int height=now["panel"][3].get<int>();
-                if(height==restoredHeight&&now["panel"]==now["expectedPanel"]) break;
-                restoredHeight=height;
-            }
-            const auto settled=Dump(client);
-            harness::Require(settled["tier"]==0,"compact tier did not switch back");
-            harness::Require(settled["panel"]==settled["expectedPanel"]
-                &&settled["panel"][3].get<int>()>=fullHeight,
-                std::string("the full tier is back and fits its page; panel=")+settled["panel"].dump()
-                +" expected="+settled["expectedPanel"].dump());
-            std::cout<<"PASS compact view: one absolute write per switch, rects equal to the model\n";
+            // 紧凑视图已按用户要求删除（152 DIP 装不下任何页面正文），原档位切换用例一并移除。
 
             const auto topmostOff=client.Request({{"command","menu"},{"id",1008}});
             harness::Require(topmostOff["topmost"]==false,"topmost toggle did not clear the setting");

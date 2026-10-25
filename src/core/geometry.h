@@ -7,10 +7,9 @@
 namespace hermes {
 enum class Edge { None, Left, Right, Top, Bottom };
 enum class Tier { Full, Compact };
-// 贴边收起时的挂件样式（G11）：三套窄型 + 保留旧胶囊（用户仍在用，不能悄悄删掉）。
-// Beacon=三段灯柱；Tag=铭牌（竖排模型名 + 身份色轨 + 三灯）；Flag=旗标（色场 + 燕尾）；
-// Capsule=旧胶囊（logo + 三灯 + 竖排模型名，延迟文字已按真机反馈换掉）。
-enum class WidgetStyle { Beacon=0, Tag=1, Flag=2, Capsule=3 };
+// 贴边收起时的挂件样式（G11）：只剩两套（用户要求删掉信标/旗标）。
+// Tag=铭牌（竖排模型名 + 身份色轨 + 三灯）；Capsule=胶囊（logo + 三灯 + 竖排模型名）。
+enum class WidgetStyle { Tag=0, Capsule=1 };
 enum class State { Hidden, Floating, Dragging, Expanded, Collapsed };
 
 struct Point {
@@ -45,7 +44,7 @@ struct GeometryModel {
     // 固定窗口高度（DIP，用户可拖动底边改变并持久化）。不再按页面内容自适应——底栏因此
     // 始终贴在窗口底边，切页不跳动；正文超高由页内滚动条承担。
     int heightDip = 634;
-    WidgetStyle widget = WidgetStyle::Beacon;   // 贴边收起时的挂件样式
+    WidgetStyle widget = WidgetStyle::Capsule;   // 贴边收起时的挂件样式
 };
 // 手动拉伸的合理范围（DIP）：420 保住标题栏+寄存器+导航和一屏列表；960 在 1080p/125%
 // 的工作区里仍能整窗放下。实际运行时还会再夹到显示器工作区高度。
@@ -82,9 +81,7 @@ Size WidgetSize(WidgetStyle style, Edge edge, unsigned dpi);
 // 挂件形状参数（像素）：绘制（D2D 几何掩码）与命中（GDI 区域）共用，避免两套常量漂移。
 struct WidgetMetrics {
     int radius=0;   // 圆角
-    int gap=0;      // 段间缝/元素间距
     int spine=0;    // 贴边侧色轨宽度
-    int tail=0;     // 燕尾长度（flag）
     int accent=0;   // 强调条/微光厚度
 };
 WidgetMetrics WidgetMetricsFor(WidgetStyle style,unsigned dpi);

@@ -41,6 +41,7 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case kWake:
         try { if (app) app->Wake(); }
         catch(const std::exception& error) { if (app) app->ReportControlFailure(error); }
+        catch(...) { if (app) app->ReportControlFailure(std::runtime_error("unknown exception in wake")); }
         return 0;
     case kWakeCount:
         return app ? app->WakeCount() : 0;
@@ -48,6 +49,7 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         // 托盘点击/菜单里的动作同步执行；这里必须接住异常，否则它穿出 DispatchMessage 就是无提示退出。
         try { if (app) app->TrayMessage(lparam); }
         catch(const std::exception& error) { if (app) app->ReportControlFailure(error); }
+        catch(...) { if (app) app->ReportControlFailure(std::runtime_error("unknown exception in tray")); }
         return 0;
 #if HERMES_CONTROL_PLANE
     case kPipeRequest: {
@@ -55,6 +57,9 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (!app || !payload || !payload->request) return 0;
         try { payload->response = app->Command(hermes::Json::parse(*payload->request)).dump(); }
         catch(const std::exception& error) { payload->response = hermes::Json{{"error", error.what()}}.dump(); }
+        // v1.25：非 std 异常（以及 MSVC 的 /EHsc 漏网）也兜住——否则它穿出窗口过程就是
+        // 0xc000041d「fatal user callback exception」，界面直接消失（实测崩溃转储）。
+        catch(...) { payload->response = hermes::Json{{"error","unknown exception in control command"}}.dump(); }
         return 0;
     }
 #endif
@@ -68,6 +73,7 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             const auto request=hermes::Json::parse(static_cast<const char*>(copy->lpData),static_cast<const char*>(copy->lpData)+copy->cbData-1);
             reply=app->Command(request);
         } catch(const std::exception& error) { reply={{"error",error.what()}}; }
+        catch(...) { reply={{"error","unknown exception in control command"}}; }
         auto data=reply.dump();
         COPYDATASTRUCT response{1,static_cast<DWORD>(data.size()+1),data.data()};
         SendMessageW(reinterpret_cast<HWND>(wparam),WM_COPYDATA,reinterpret_cast<WPARAM>(window),reinterpret_cast<LPARAM>(&response));
@@ -91,6 +97,14 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         PostQuitMessage(0);
         return 0;
     default:
+        // Explorer 重启：TaskbarCreated 是 RegisterWindowMessage 出来的动态 id，只能这样接。
+        // 消息循环在这个 message-only 窗口上，面板/贴条收不到这条广播（以前托盘图标会永久消失）。
+        if (app && message == app->TaskbarCreatedMessage()) {
+            try { app->ReAddTrayAfterExplorerRestart(); }
+            catch(const std::exception& error) { app->ReportControlFailure(error); }
+            catch(...) { app->ReportControlFailure(std::runtime_error("unknown exception in tray re-add")); }
+            return 0;
+        }
         return DefWindowProcW(window, message, wparam, lparam);
     }
 }
@@ -169,6 +183,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     windowClass.lpszClassName = kControlClass;
     if (!RegisterClassExW(&windowClass)) return 7;
     Application app;
+#if HERMES_CONTROL_PLANE
+    // 同一 --instance 的旧实例会占着控制窗口：FindWindowEx 返回的是它，新实例永远收不到请求
+    // （门禁表现为"control protocol not implemented"；pid 复用时会撞上上一轮的残留进程）。
+    // 只影响带控制面的构建：启动时先让同 id 的旧实例退出。
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto stale = FindWindowExW(HWND_MESSAGE, nullptr, kControlClass, id.c_str());
+        if (!stale) break;
+        PostMessageW(stale, WM_CLOSE, 0, 0);
+        Sleep(250);
+    }
+#endif
     const auto control = CreateWindowExW(0, kControlClass, id.c_str(), 0,
         0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, &app);
     if (!control) return 8;

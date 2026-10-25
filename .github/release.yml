@@ -1,0 +1,13 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: 更新
+      labels: [feature]
+    - title: 优化
+      labels: [enhancement, performance]
+    - title: 修复
+      labels: [bug, security]
+    - title: 其他
+      labels: ["*"]

@@ -71,12 +71,29 @@ void Application::ApplyHelperState(const HermesState& state) {
         if(log_) log_->Info("data","state changed: providers="+std::to_string(state.providers.size())
             +" fallbacks="+std::to_string(state.fallbacks.size()));
     }
+    // 真机 2026-10-21「切换模型/重启网关时偶发卡一下」：状态落地的整条路径（托盘图标、
+    // 气泡通知、重绘）都在 UI 线程上执行，任何一步撞上资源管理器/合成器就会顶住消息循环。
+    // 与 busy tick gap / busy paint / tray update 三条日志一起，把"哪里卡"变成可判定的证据。
+    LARGE_INTEGER applyFreq{},applyStart{};
+    QueryPerformanceFrequency(&applyFreq);QueryPerformanceCounter(&applyStart);
     // 托盘图标/悬浮提示跟着状态走（旧 updateTrayStatus 在每次 renderStatus 后调用）。
     UpdateTrayStatus();
     CheckNotificationEdges();
-    // 信标挂件的呼吸只应该在"有故障"时跑：链路恢复后必须停掉计时器，否则会一直重绘。
-    UpdateWidgetTimer();
-    InvalidateAll();
+    // 挂件已经完全静止：信标样式的异常呼吸随样式删除一起移除，这里不再需要挂件定时器。
+    // v1.28（性能）：状态**没变**就不重绘。轮询每 20s 都会走到这里，即使内容一模一样也会整窗
+    // 重画一次（实测一帧 7-16ms，且会和输入/悬停抢消息循环）。界面里没有随时间变化的元素
+    // （同步时间戳来自 config mtime，不来自本机时钟），所以跳过是安全的；首帧仍必须画。
+    if(signature!=stateSignature_||!statePainted_) {
+        statePainted_=true;
+        InvalidateAll();
+    }
+    LARGE_INTEGER applyDone{};
+    QueryPerformanceCounter(&applyDone);
+    if(applyFreq.QuadPart>0&&log_) {
+        const auto ms=static_cast<double>(applyDone.QuadPart-applyStart.QuadPart)*1000.0
+            /static_cast<double>(applyFreq.QuadPart);
+        if(ms>=80.0) log_->Info("ui","state apply "+std::to_string(static_cast<int>(ms))+"ms");
+    }
 }
 void Application::Notify(const std::string& event,const std::string& text) {
     // 边沿已由 CheckNotificationEdges 判定；这里只做 10 分钟抑制与投递。
@@ -159,7 +176,8 @@ void Application::SwitchModel(const std::string& providerId,const std::string& m
     pendingSwitchModel_=model;
     InvalidateAll();
 }
-void Application::StartRefresh() {
+void Application::StartRefresh(bool quiet) {
+    refreshQuiet_=quiet;
     // Single-flight, like the old panel's tickRunning guard: a poll landing on top of a manual refresh
     // is dropped instead of queueing a second WSL round trip.
     if(workerBusy_.exchange(true)||stopping_.load()) return;
@@ -167,7 +185,8 @@ void Application::StartRefresh() {
     // reaped here: assigning to a still-joinable std::thread calls std::terminate.
     if(worker_.joinable()) worker_.join();
     // 刷新进行中：同步章的图标绕中心旋转（真机反馈：不要「读取 WSL 配置…」的文字，改成图标转）。
-    if(panel_) { syncSpinAngle_=0.0f;SetTimer(panel_,kSpinTimer,50,nullptr); }
+    // v1.24：忙碌条在独立子窗口里画（单帧 0.05ms），16ms 一拍 = 60fps。
+    if(panel_) { spinGlyph_.Restart();lastSpinTick_=0;SetTimer(panel_,kSpinTimer,kSpinIntervalMs,nullptr); }
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
     const auto webuiPort=stored_.webuiPort,gatewayPort=stored_.gatewayPort;
     const bool first=firstRefresh_;
@@ -179,77 +198,81 @@ void Application::StartRefresh() {
     // 里恰好有一个 .hermes，不禁止的话测试实例会经 UNC 读到真机配置，污染夹具断言。
     // 带控制面的构建（Debug/门禁）默认禁用：测试实例可能经 geometry-probe 转发启动，
     // 环境变量不一定穿透；UNC 是真机（Release）专属优化路径。
-#if HERMES_CONTROL_PLANE
-    const auto home=std::string{};
-#else
-    wchar_t uncFlag[4]{};
-    const auto uncDisabled=GetEnvironmentVariableW(L"HERMES_DISABLE_UNC",uncFlag,4)!=0
-        &&uncFlag[0]==L'1';
-    // 真机探测：helperPath 推不出 home（脚本在 /mnt/* 下，常态）时枚举发行版 /home/ 下唯一
-    // 用户目录拼 .hermes。只在产品（Release，无控制面）构建里做——门禁夹具绝不摸真配置。
-    auto home=uncDisabled
-        ?std::string{}:WslHomeFromHelperPath(stored_.helperPath);
-    if(!uncDisabled&&home.empty()) {
-        WIN32_FIND_DATAW data{};
-        std::wstring homeGlob=L"//wsl$/";
-        for(const char ch:stored_.distro) homeGlob.push_back(static_cast<wchar_t>(ch));
-        homeGlob+=L"/home/*";
-        HANDLE find=FindFirstFileW(homeGlob.c_str(),&data);
-        if(find!=INVALID_HANDLE_VALUE) {
-            std::vector<std::wstring> users;
-            do {
-                if(wcscmp(data.cFileName,L".")&&wcscmp(data.cFileName,L".."))
-                    users.push_back(data.cFileName);
-            } while(FindNextFileW(find,&data));
-            FindClose(find);
-            if(users.size()==1) {
-                home="/home/";
-                for(const wchar_t ch:users[0]) home.push_back(static_cast<char>(ch));
-                home+="/.hermes";
-            }
-        }
-    }
-#endif
-    if(!first) {
-        const auto snapshot=TakeUncSnapshot(distro,home,std::to_string(gatewayPort));
-        if(snapshot.available&&snapshot.configMtime==uncCacheMtime_&&snapshot.configSize==uncCacheSize_
-            &&!uncCacheListJson_.empty()) {
-            if(log_) log_->Info("data","refresh from UNC cache (config unchanged)");
-            auto* result=new DataResult;
-            result->helperErrorValid=true;
-            result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
-            result->state.loading=false;
-            result->state.wsl="up";   // 同快照路径：UNC 可达即 WSL 在线（health 无 status.wsl）
-            // 灯照常现探：TCP 探活是纯 Windows 侧成本（<20ms），不吃 WSL。
-            FillReachability(result->state,webuiPort,gatewayPort);
-            workerBusy_=false;
-            if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
-            return;
-        }
-        if(snapshot.available) {
-            if(log_) log_->Info("data","refresh from UNC snapshot (config mtime="+std::to_string(snapshot.configMtime)+")");
-            uncCacheMtime_=snapshot.configMtime;
-            uncCacheSize_=snapshot.configSize;
-            uncCacheListJson_=snapshot.listJson;
-            // health 的 config 部分从快照合成；gateway systemd 属性 UNC 不可得（DESIGN v1.7）。
-            uncCacheHealthJson_=UncHealthJson();
-            uncCacheValid_=true;
-            auto* result=new DataResult;
-            result->helperErrorValid=true;
-            result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
-            result->state.loading=false;
-            // 与 wsl.exe 路径同款兜底：UNC 读到 config 本身就是 WSL 活着的信号——
-            // health 里没有 status.wsl 字段，不补的话灯永远停在 unknown（灰"探测中"）。
-            result->state.wsl="up";
-            FillReachability(result->state,webuiPort,gatewayPort);
-            workerBusy_=false;
-            if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
-            return;
-        }
-        if(log_) log_->Info("data","UNC unavailable ("+snapshot.error+"), falling back to wsl.exe");
-    }
-    worker_=std::thread([this,distro,python,path,webuiPort,gatewayPort,first] {
+    // UNC 探测与读取全部放进 worker（//wsl$ 走 9P：网关重启时单次调用可能阻塞数百毫秒到数秒）。
+    // 旧实现在 UI 线程上做 FindFirstFileW/TakeUncSnapshot，忙碌条与转圈动画会跟着卡住
+    // （真机 2026-10-21 报「忙碌条偶尔卡住不动一会才开始动」）。
+    const bool spawned=SpawnWorker(worker_,&workerBusy_,nullptr,nullptr,[this,distro,python,path,webuiPort,gatewayPort,first] {
         try {
+        if(!first) {
+            // HERMES_DISABLE_UNC=1：门禁夹具强制走假助手。harness 的硬约束是夹具隔离——而真机
+            // 发行版里恰好有一个 .hermes，不禁止的话测试实例会经 UNC 读到真机配置，污染夹具断言。
+            // 带控制面的构建（Debug/门禁）默认禁用：测试实例可能经 geometry-probe 转发启动，
+            // 环境变量不一定穿透；UNC 是真机（Release）专属优化路径。
+            std::string home;
+#if !HERMES_CONTROL_PLANE
+            wchar_t uncFlag[4]{};
+            const auto uncDisabled=GetEnvironmentVariableW(L"HERMES_DISABLE_UNC",uncFlag,4)!=0
+                &&uncFlag[0]==L'1';
+            // 真机探测：helperPath 推不出 home（脚本在 /mnt/* 下，常态）时枚举发行版 /home/ 下
+            // 唯一用户目录拼 .hermes。只在产品（Release，无控制面）构建里做——门禁夹具绝不摸真配置。
+            home=uncDisabled?std::string{}:WslHomeFromHelperPath(path);
+            if(!uncDisabled&&home.empty()) {
+                WIN32_FIND_DATAW data{};
+                std::wstring homeGlob=L"//wsl$/";
+                for(const char ch:distro) homeGlob.push_back(static_cast<wchar_t>(ch));
+                homeGlob+=L"/home/*";
+                HANDLE find=FindFirstFileW(homeGlob.c_str(),&data);
+                if(find!=INVALID_HANDLE_VALUE) {
+                    std::vector<std::wstring> users;
+                    do {
+                        if(wcscmp(data.cFileName,L".")&&wcscmp(data.cFileName,L".."))
+                            users.push_back(data.cFileName);
+                    } while(FindNextFileW(find,&data));
+                    FindClose(find);
+                    if(users.size()==1) {
+                        home="/home/";
+                        for(const wchar_t ch:users[0]) home.push_back(static_cast<char>(ch));
+                        home+="/.hermes";
+                    }
+                }
+            }
+#endif
+            const auto snapshot=TakeUncSnapshot(distro,home,std::to_string(gatewayPort));
+            if(snapshot.available&&snapshot.configMtime==uncCacheMtime_&&snapshot.configSize==uncCacheSize_
+                &&!uncCacheListJson_.empty()) {
+                if(log_) log_->Info("data","refresh from UNC cache (config unchanged)");
+                auto* result=new DataResult;
+                result->helperErrorValid=true;
+                result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
+                result->state.loading=false;
+                result->state.wsl="up";   // 同快照路径：UNC 可达即 WSL 在线（health 无 status.wsl）
+                // 灯照常现探：TCP 探活是纯 Windows 侧成本（<20ms），不吃 WSL。
+                FillReachability(result->state,webuiPort,gatewayPort);
+                workerBusy_=false;
+                if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+                return;
+            }
+            if(snapshot.available) {
+                if(log_) log_->Info("data","refresh from UNC snapshot (config mtime="+std::to_string(snapshot.configMtime)+")");
+                uncCacheMtime_=snapshot.configMtime;
+                uncCacheSize_=snapshot.configSize;
+                uncCacheListJson_=snapshot.listJson;
+                // health 的 config 部分从快照合成；gateway systemd 属性 UNC 不可得（DESIGN v1.7）。
+                uncCacheHealthJson_=UncHealthJson();
+                auto* result=new DataResult;
+                result->helperErrorValid=true;
+                result->state=ParseStateSafe(uncCacheListJson_,uncCacheHealthJson_,std::string("{}"),log_);
+                result->state.loading=false;
+                // 与 wsl.exe 路径同款兜底：UNC 读到 config 本身就是 WSL 活着的信号——
+                // health 里没有 status.wsl 字段，不补的话灯永远停在 unknown（灰"探测中"）。
+                result->state.wsl="up";
+                FillReachability(result->state,webuiPort,gatewayPort);
+                workerBusy_=false;
+                if(PostMessageW(panel_,kDataMessage,0,reinterpret_cast<LPARAM>(result))==FALSE) delete result;
+                return;
+            }
+            if(log_) log_->Info("data","UNC unavailable ("+snapshot.error+"), falling back to wsl.exe");
+        }
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
         bridge.SetLogSink([this](const std::string& line) { if(log_) log_->Info("helper",line); });
@@ -321,6 +344,15 @@ void Application::StartRefresh() {
             workerBusy_=false;
         }
     });
+    if(!spawned) {
+        // 起线程失败（SpawnWorker 已回滚 workerBusy_）：定时器还等着，下一拍会把它当成
+        // "刷新成功"画一个对勾——那是假状态，这里直接停掉旋转与对勾。
+        if(panel_) {
+            KillTimer(panel_,kSpinTimer);
+            syncCheckShown_=false;
+            InvalidateRect(panel_,nullptr,FALSE);
+        }
+    }
 }
 void Application::ShowToast(const std::string& text,int kind) {
     toastText_=text;
@@ -381,7 +413,8 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
     if(worker_.joinable()) worker_.join();
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
     if(log_) log_->Info("data","action "+verb+" started");
-    worker_=std::thread([this,distro,python,path,verb,args,successToast,refreshAfter,probeFallbacks,wantsPreview] {
+    const int generation=probeFallbacks?++probeGeneration_:probeGeneration_;
+    if(!SpawnWorker(worker_,&workerBusy_,nullptr,nullptr,[this,distro,python,path,verb,args,successToast,refreshAfter,probeFallbacks,wantsPreview,generation] {
         try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
@@ -391,6 +424,7 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
 #endif
         auto* result=new DataResult;
         result->write=true;
+        result->probeGeneration=generation;
         result->verb=verb;
         result->toast=successToast;
         // 手动重启网关的动作完成后清掉寄存器行的「重启网关」胶囊（机器人已用上新模型）。
@@ -492,7 +526,7 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
             if(panel_) PostMessageW(panel_,kProbeProgressMessage,0,0);
             const auto pushRow=[&](std::size_t index,const FallbackProbe& entry) {
                 result->probes[index]=entry;
-                auto* payload=new ProbeRow{static_cast<int>(index),entry};
+                auto* payload=new ProbeRow{static_cast<int>(index),generation,entry};
                 if(panel_) {
                     if(PostMessageW(panel_,kProbeRowMessage,0,reinterpret_cast<LPARAM>(payload))==FALSE)
                         delete payload;
@@ -623,7 +657,7 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
             if(log_) log_->Error("worker","action: unknown exception");
             workerBusy_=false;
         }
-    });
+    })) return;
 }
 void Application::StartQueuedSwitch() {
     if(queuedSwitchProvider_.empty()||queuedSwitchModel_.empty()) return;
@@ -653,7 +687,7 @@ void Application::StartSwitch(const std::string& providerId,const std::string& m
     switchingKey_=providerId+"|"+model;
     switchingModel_=model;
     InvalidateAll();
-    worker_=std::thread([this,distro,python,path,providerId,model] {
+    if(!SpawnWorker(worker_,&workerBusy_,nullptr,nullptr,[this,distro,python,path,providerId,model] {
         try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
@@ -701,7 +735,7 @@ void Application::StartSwitch(const std::string& providerId,const std::string& m
             if(log_) log_->Error("worker","switch: unknown exception");
             workerBusy_=false;
         }
-    });
+    })) return;
 }
 void Application::StartReadHelper(const std::string& cmd) {
     // F2/F3：只读助手（diagnose/usage）与 apply 助手共用 HelperBridge（同一条 wsl.exe + python 通路），
@@ -711,7 +745,12 @@ void Application::StartReadHelper(const std::string& cmd) {
     if(workerBusy_.exchange(true)) {
         // 只读模态的"刷新"：模态原地显示"正在读取…"，不要为了提示而把它关掉
         // （真机反馈：点刷新弹窗消失，读完才重新出现）。
-        if(pending_==Pending::DiagnoseInfo||pending_==Pending::UsageInfo) return;
+        if(pending_==Pending::DiagnoseInfo||pending_==Pending::UsageInfo) {
+            // 后台刷新正占着 worker：**记下来**等它结束补跑。以前这里直接 return，模态就
+            // 永远停在「正在读取…」（真机点「查看」撞上轮询时的现象）。
+            pendingReadCmd_=cmd;
+            return;
+        }
         pending_=Pending::None;
         ShowToast("\xE6\xAD\xA3\xE5\x9C\xA8\xE8\xAF\xBB\xE5\x8F\x96\xEF\xBC\x8C\xE8\xAF\xB7"
             "\xE7\xA8\x8D\xE5\x80\x99\xE2\x80\xA6",1);   // 正在读取，请稍候…
@@ -722,7 +761,7 @@ void Application::StartReadHelper(const std::string& cmd) {
     readBusy_=true;
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
     if(log_) log_->Info("data","read "+cmd+" started");
-    worker_=std::thread([this,distro,python,path,cmd,token] {
+    if(!SpawnWorker(worker_,&workerBusy_,nullptr,&readBusy_,[this,distro,python,path,cmd,token] {
         try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
@@ -749,7 +788,7 @@ void Application::StartReadHelper(const std::string& cmd) {
             if(log_) log_->Error("worker","read: unknown exception");
             workerBusy_=false;
         }
-    });
+    })) return;
 }
 void Application::UpdateLatencyTimer() {
     if(!panel_) return;
@@ -759,6 +798,208 @@ void Application::UpdateLatencyTimer() {
         SetTimer(panel_,kLatencyTimer,
             static_cast<UINT>(stored_.latencyMinutes)*60u*1000u,nullptr);
 }
+std::vector<std::string> Application::FallbackModelOptions() const {
+    // v1.16：回退链「追加一条」的模型候选。顺序就是可用性顺序：
+    //   ① 一键探测缓存里该供应商的模型（最新、最全，来自 /models 的只读 GET）；
+    //   ② 供应商条目自带的 models（config.yaml 里声明过的列表）；
+    //   ③ 都没有 → 空（点击 ▾ 时给一句"先探测"的 toast，不画空列表）。
+    // v1.25：只有「选中的供应商」一种来源（手填模式已删）。
+    std::string name;
+    if(fbSource_>=0&&fbSource_<static_cast<int>(hermesState_.providers.size()))
+        name=hermesState_.providers[static_cast<std::size_t>(fbSource_)].name;
+    if(name.empty()) return {};
+    {
+        std::lock_guard<std::mutex> lock(probedMutex_);
+        const auto found=probedModels_.find(name);
+        if(found!=probedModels_.end()&&!found->second.empty()) return found->second;
+    }
+    for(const auto& provider:hermesState_.providers)
+        if(provider.name==name&&!provider.models.empty()) return provider.models;
+    return {};
+}
+void Application::HandleSyncAllDone() {
+    if(log_) log_->Info("data","sync-all done changed="+std::to_string(syncAllChanged_.load())
+        +" total="+std::to_string(syncAllTotal_.load()));
+    // 一键同步写的是 config.yaml：落地后必须重新读取，并按 v1.17 的规则交代网关重启。
+    StartRefresh();
+    const int changed=syncAllChanged_.load();
+    const int total=syncAllTotal_.load();
+    if(changed>0) {
+        if(stored_.autoReloadGateway) {
+            pendingGatewayRestart_=false;
+            StartHelperAction("reload",{{"cmd","reload"},{"targets",{"gateway"}},{"mode","auto"}},
+                Narrow(L"\u7F51\u5173\u5DF2\u91CD\u542F\uFF0C\u673A\u5668\u4EBA\u5DF2\u7528\u4E0A\u65B0\u914D\u7F6E"),true);
+            ShowToast(std::to_string(changed)+Narrow(L" \u4E2A\u4F9B\u5E94\u5546\u5DF2\u540C\u6B65\uFF1B\u7F51\u5173\u91CD\u542F\u4E2D"),1);
+        } else {
+            pendingGatewayRestart_=true;
+            ShowToast(std::to_string(changed)+Narrow(L" \u4E2A\u4F9B\u5E94\u5546\u5DF2\u540C\u6B65\uFF1B\u9700\u91CD\u542F\u7F51\u5173\u540E\u673A\u5668\u4EBA\u624D\u7528\u4E0A"),1);
+        }
+    } else {
+        ShowToast(Narrow(L"\u6A21\u578B\u5217\u8868\u5DF2\u662F\u6700\u65B0\uFF08")
+            +std::to_string(std::max(total,0))+Narrow(L" \u4E2A\u4F9B\u5E94\u5546\uFF09"),1);
+    }
+    InvalidateAll();
+}
+void Application::SyncAllModels() {
+    // v1.25（用户要求）：模型页的「刷新同步」——对每个供应商只读探测，再把它配置里的
+    // models 列表同步成探测结果（新增的写入、已下线的删除，写前备份）。整批串行，一次一条。
+    if(syncAllBusy_.exchange(true)) return;
+    if(syncAllWorker_.joinable()) syncAllWorker_.join();
+    struct Target { std::string name,providerId,baseUrl,keyEnv;std::vector<std::string> models; };
+    std::vector<Target> targets;
+    for(const auto& provider:hermesState_.providers) {
+        if(provider.baseUrl.empty()||provider.providerId.empty()) continue;
+        targets.push_back({provider.name,provider.providerId,provider.baseUrl,provider.keyEnv,
+            provider.models});
+    }
+    syncAllTotal_=static_cast<int>(targets.size());
+    syncAllDone_=0;
+    syncAllChanged_=0;
+    if(targets.empty()) {
+        syncAllBusy_=false;
+        ShowToast(Narrow(L"没有可同步的供应商（都缺 base_url）"),2);
+        return;
+    }
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    if(log_) log_->Info("data","sync-all started ("+std::to_string(targets.size())+" providers)");
+    if(!SpawnWorker(syncAllWorker_,&syncAllBusy_,nullptr,nullptr,
+        [this,distro,python,path,targets] {
+        try {
+        HelperBridge bridge;
+        bridge.Configure(Widen(distro),Widen(python),Widen(path));
+#if HERMES_CONTROL_PLANE
+        if(const auto override=EnvironmentValue(L"HERMES_WSL_EXE");!override.empty())
+            bridge.SetWslExecutable(override);
+#endif
+        int changed=0;
+        for(const auto& target:targets) {
+            if(stopping_.load()) break;
+            Json probe{{"cmd","probe"},{"base_url",target.baseUrl},{"timeout_s",6}};
+            if(!target.keyEnv.empty()) probe["key_env"]=target.keyEnv;
+            const auto reply=bridge.Call(probe.dump(),20000);
+            std::vector<std::string> probed;
+            if(reply.ok) {
+                try {
+                    const auto data=Json::parse(reply.data);
+                    if(data.contains("models")&&data["models"].is_array())
+                        for(const auto& item:data["models"])
+                            if(item.is_string()) probed.push_back(item.get<std::string>());
+                } catch(const std::exception&) {}
+            }
+            if(!probed.empty()) {
+                std::lock_guard<std::mutex> lock(probedMutex_);
+                probedModels_[target.name]=probed;
+            }
+            bool differs=probed.size()!=target.models.size();
+            if(!differs) {
+                for(const auto& model:probed)
+                    if(std::find(target.models.begin(),target.models.end(),model)==target.models.end()) {
+                        differs=true;break;
+                    }
+            }
+            bool wroteThisOne=false;
+            if(!probed.empty()&&differs) {
+                Json sync{{"cmd","add-models"},{"provider",target.providerId},
+                    {"models",probed},{"prune",true}};
+                const auto applied=bridge.Call(sync.dump(),20000);
+                const bool ok=applied.ok;
+                if(ok) ++changed;
+                wroteThisOne=ok;
+                if(log_) log_->Info("data","sync-all: "+target.name+" -> "
+                    +std::to_string(probed.size())+" model(s) "+(ok?"synced":"failed"));
+            } else if(log_) {
+                log_->Info("data","sync-all: "+target.name+" unchanged");
+            }
+            syncAllDone_=syncAllDone_.load()+1;
+            syncAllChanged_=changed;
+            // 每完成一个就通知 UI 重绘：按钮上显示「同步 n/N」（否则整批跑完才有反馈，
+            // 用户看到的就是"一直在加载"）。wparam=0 = 进度帧，1 = 结算帧（HandleSyncAllDone）。
+            if(panel_) PostMessageW(panel_,kSyncAllMessage,0,0);
+            // 间隔只为"别让网关把整批探测当成流量尖峰"：只有**这一条真的写了配置**才需要等，
+            // 全部没变化时白等 120ms×N（17 个供应商 = 2 秒纯等待，正是"刷新很慢"的来源）。
+            if(wroteThisOne) Sleep(120);
+        }
+        syncAllBusy_=false;
+        if(panel_) PostMessageW(panel_,kSyncAllMessage,1,0);
+        } catch(const std::exception& error) {
+            if(log_) log_->Warn("data","sync-all crashed: "+std::string(error.what()));
+            syncAllBusy_=false;
+            if(panel_) PostMessageW(panel_,kSyncAllMessage,1,0);
+        }
+    })) {
+        syncAllBusy_=false;
+        ShowToast(Narrow(L"工作线程无法启动，稍后自动重试"),2);
+    }
+}
+void Application::ProbeAllModels() {
+    // 一键探测：把每个供应商（按 base_url 去重，最多 24 条）的模型列表**只读**拉一遍。
+    // 只发 GET /models（助手 probe 的全部动作），不写 config.yaml、不碰 .env。
+    if(allProbeBusy_.exchange(true)) return;
+    if(allProbeWorker_.joinable()) allProbeWorker_.join();
+    struct Target { std::string name,baseUrl,keyEnv; };
+    std::vector<Target> targets;
+    for(const auto& provider:hermesState_.providers) {
+        if(provider.baseUrl.empty()) continue;
+        bool seen=false;
+        for(const auto& existing:targets) if(existing.baseUrl==provider.baseUrl) { seen=true;break; }
+        if(seen) continue;
+        if(targets.size()>=24) break;
+        targets.push_back({provider.name,provider.baseUrl,provider.keyEnv});
+    }
+    allProbeTotal_=static_cast<int>(targets.size());
+    allProbeDone_=0;
+    allProbeOk_=0;
+    if(targets.empty()) {
+        allProbeBusy_=false;
+        ShowToast(Narrow(L"\u6CA1\u6709\u53EF\u63A2\u6D4B\u7684\u4F9B\u5E94\u5546\uFF08\u90FD\u7F3A base_url\uFF09"),2);
+        return;
+    }
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    if(log_) log_->Info("data","probe-all started ("+std::to_string(targets.size())+" providers)");
+    if(!SpawnWorker(allProbeWorker_,&allProbeBusy_,nullptr,nullptr,
+        [this,distro,python,path,targets] {
+        try {
+        int ok=0;
+        for(const auto& target:targets) {
+            if(stopping_.load()) break;
+            HelperBridge bridge;
+            bridge.Configure(Widen(distro),Widen(python),Widen(path));
+#if HERMES_CONTROL_PLANE
+            if(const auto override=EnvironmentValue(L"HERMES_WSL_EXE");!override.empty())
+                bridge.SetWslExecutable(override);
+#endif
+            Json args{{"cmd","probe"},{"base_url",target.baseUrl},{"timeout_s",6}};
+            if(!target.keyEnv.empty()) args["key_env"]=target.keyEnv;
+            const auto reply=bridge.Call(args.dump(),20000);
+            std::vector<std::string> models;
+            if(reply.ok) {
+                try {
+                    const auto data=Json::parse(reply.data);
+                    if(data.contains("models")&&data["models"].is_array())
+                        for(const auto& item:data["models"])
+                            if(item.is_string()) models.push_back(item.get<std::string>());
+                } catch(const std::exception&) {}
+            }
+            {
+                std::lock_guard<std::mutex> lock(probedMutex_);
+                probedModels_[target.name]=models;
+            }
+            if(!models.empty()) ++ok;
+            allProbeDone_=allProbeDone_.load()+1;
+            allProbeOk_=ok;
+            if(log_) log_->Info("data","probe-all: "+target.name+" -> "+std::to_string(models.size())+" model(s)");
+            if(panel_) PostMessageW(panel_,kProbeAllMessage,0,0);
+            Sleep(150);      // 串行 + 间隔：不让网关把探测当成流量尖峰
+        }
+        allProbeBusy_=false;
+        if(panel_) PostMessageW(panel_,kProbeAllMessage,1,0);
+        } catch(const std::exception& error) {
+            allProbeBusy_=false;
+            if(log_) log_->Error("data",std::string("probe-all failed: ")+error.what());
+        }
+    })) return;
+}
+void Application::ApplyProbeAll() { InvalidateAll(); }
 void Application::StartLatencyProbe(bool manual) {
     if(!latency_) return;
     if(latencyBusy_.exchange(true)) return;
@@ -780,7 +1021,7 @@ void Application::StartLatencyProbe(bool manual) {
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
     if(log_) log_->Info("data","latency probe started ("+(manual?std::string("manual"):std::string("timer"))
         +", "+std::to_string(targets.size())+" model(s))");
-    latencyWorker_=std::thread([this,distro,python,path,targets] {
+    if(!SpawnWorker(latencyWorker_,&latencyBusy_,nullptr,nullptr,[this,distro,python,path,targets] {
         try {
         std::vector<LatencyResult> results;
         for(const auto& target:targets) {
@@ -819,7 +1060,7 @@ void Application::StartLatencyProbe(bool manual) {
             if(log_) log_->Error("worker","latency: unknown exception");
             latencyBusy_=false;
         }
-    });
+    })) return;
 }
 void Application::HandleLatencyResults(std::vector<LatencyResult>* results) {
     std::unique_ptr<std::vector<LatencyResult>> owned(results);
@@ -864,7 +1105,7 @@ void Application::StartProfileApply(const std::string& name) {
     const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
     const int fallbackCount=static_cast<int>(hermesState_.fallbacks.size());
     if(log_) log_->Info("data","profile apply started: "+profile.name);
-    profileWorker_=std::thread([this,distro,python,path,profile,fallbackCount] {
+    if(!SpawnWorker(profileWorker_,&profileBusy_,nullptr,nullptr,[this,distro,python,path,profile,fallbackCount] {
         try {
         HelperBridge bridge;
         bridge.Configure(Widen(distro),Widen(python),Widen(path));
@@ -907,7 +1148,7 @@ void Application::StartProfileApply(const std::string& name) {
             if(log_) log_->Error("worker","profile: unknown exception");
             profileBusy_=false;
         }
-    });
+    })) return;
 }
 void Application::HandleProfileResult(ProfileApplyResult* result) {
     std::unique_ptr<ProfileApplyResult> owned(result);
@@ -938,12 +1179,24 @@ void Application::HandleProbeRow(ProbeRow* payload) {
     // 逐条探测的单行结果：只更新那一行，不等整条链。
     std::unique_ptr<ProbeRow> owned(payload);
     if(!owned) return;
+    // 迟到的结果（属于上一轮探测）直接丢掉：否则它会把新一轮的状态覆盖回去
+    // （实测：probe_missing 切琥珀后，上一轮的绿色结果晚到，界面自己变回绿色）。
+    if(owned->generation!=probeGeneration_) return;
     const auto index=static_cast<std::size_t>(std::max(0,owned->index));
     if(fbProbes_.size()<index+1) fbProbes_.resize(index+1,FallbackProbe{});
     fbProbes_[index]=owned->probe;
     InvalidateAll();
 }
 void Application::ApplyDataResult(DataResult* result) {
+    // 补跑被后台刷新挡下的只读请求（诊断/用量）：worker 退出时已释放 workerBusy_，
+    // 此时若还停在对应的模态上就立刻发起。用户已经关掉模态的话就丢弃。
+    if(!pendingReadCmd_.empty()&&!workerBusy_.load()) {
+        const auto cmd=pendingReadCmd_;
+        pendingReadCmd_.clear();
+        const bool stillWanted=(cmd=="diagnose"&&pending_==Pending::DiagnoseInfo)
+            ||(cmd=="usage"&&pending_==Pending::UsageInfo);
+        if(stillWanted) StartReadHelper(cmd);
+    }
     // 助手错误从结果里取（轮询线程只写结果，不碰 UI 成员）；只有刷新结果带这个语义。
     if(result->helperErrorValid) {
         helperError_=result->helperError;
@@ -997,47 +1250,101 @@ void Application::ApplyDataResult(DataResult* result) {
             if(log_) log_->Info("data",owned->verb+" failed: "+owned->error);
             if(!fbFormOpen_) ShowToast(owned->error,2);
             else { fbError_=owned->error;InvalidateAll(); }
-        } else if(!owned->toast.empty()) {
-            // 预演被助手忽略（契约漂移）：覆盖成功 toast，明确告诉用户"已经写了"。
-            ShowToast(owned->previewIgnored
-                ?Narrow(L"\u8BE5\u64CD\u4F5C\u4E0D\u652F\u6301\u9884\u89C8\uFF0C\u5DF2\u76F4"
-                    L"\u63A5\u5199\u5165")
-                :owned->toast,owned->previewIgnored?2:1);
-        }
-        if(owned->probed) { fbProbes_=owned->probes;InvalidateAll(); }
-        if(owned->verb=="probe") {
-            // 审计 F-006：加模型页的"从供应商探测填充"要把结果写进「模型 id」多行框
-            // （旧版 #am-models 的行为）；新建供应商页才是药丸列表。
-            if(activePage_==2&&addSub_==1) {
-                std::wstring joined;
-                for(const auto& model:owned->models) {
-                    if(!joined.empty()) joined+=L"\n";
-                    joined+=Widen(model);
+        } else if(!owned->previewOnly) {
+            // DESIGN v1.17：**任何**改 config.yaml/.env 的动作落盘后都要交代网关是否需要重启。
+            // 热读只覆盖 API 请求；机器人的回合走 agent，实测不重启不生效——所以不能再笼统说
+            // "网关热读生效"。分两路：设了自动重启就立刻重启，否则点亮「重启网关」胶囊并说清楚。
+            std::string toast=owned->previewIgnored?Narrow(L"该操作不支持预览，已直接写入"):owned->toast;
+            if(IsConfigWrite(owned->verb)) {
+                if(stored_.autoReloadGateway) {
+                    pendingGatewayRestart_=false;
+                    toast+=Narrow(L"；网关重启中，机器人稍后生效");
+                    StartHelperAction("reload",{{"cmd","reload"},{"targets",{"gateway"}},{"mode","auto"}},
+                        Narrow(L"网关已重启，机器人已用上新配置"),true);
+                } else {
+                    pendingGatewayRestart_=true;
+                    toast+=Narrow(L"；需重启网关后机器人才用上（点网关灯后的「重启网关」）");
                 }
-                addModels_.SetText(joined);
-                addChips_.clear();
-                addInfo_=owned->models.empty()?std::string{}
-                    :std::to_string(owned->models.size())
-                        +Narrow(L" \u4E2A\u6A21\u578B\u5DF2\u586B\u5165\u4E0B\u65B9\u6587\u672C\u6846");
-            } else if(activePage_==2&&addSub_==0) {
-                // 审计 F-007：新建供应商页的探测结果写进「模型」多行框（可继续编辑）；
-                // 药丸只是同一份数据的快捷删除视图。
-                std::wstring joined;
-                for(const auto& model:owned->models) {
-                    if(!joined.empty()) joined+=L"\n";
-                    joined+=Widen(model);
-                }
-                addNewModels_.SetText(joined);
-                addChips_=owned->models;
-            } else {
-                addChips_=owned->models;
             }
-            if(owned->models.empty()&&owned->error.empty())
-                addInfo_="\xE8\xBF\x9E\xE4\xB8\x8A\xE4\xBA\x86\xEF\xBC\x8C\xE4\xBD\x86"
-                    "\xE6\xB2\xA1\xE8\xBF\x94\xE5\x9B\x9E\xE6\xA8\xA1\xE5\x9E\x8B\xE5\x88\x97"
-                    "\xE8\xA1\xA8\xEF\xBC\x88\xE5\x8F\xAF\xE4\xBB\xA5\xE6\x89\x8B\xE5\x8A\xA8"
-                    "\xE5\xA1\xAB id\xEF\xBC\x89";
+            if(!toast.empty()) ShowToast(toast,owned->previewIgnored?2:1);
+        }
+        // 整轮探测结果也带代次：旧一轮的最终结果晚到时会整块覆盖新一轮的单行状态
+        // （实测：probe_missing 切琥珀后，旧轮结果把行刷回绿色）。
+        if(owned->probed&&owned->probeGeneration==probeGeneration_) {
+            fbProbes_=owned->probes;
             InvalidateAll();
+        }
+        if(owned->verb=="probe") {
+            // v1.18（用户要求）：模型页供应商 ⋯ →「扫描并追加」。探测结果不再需要用户去「添加」
+            // 页手动保存：这里直接把**配置里没有的**模型用 add-models 写回该供应商，刷新后
+            // 模型列表就是最新的。没有新增就只提示"已是最新"，绝不空写。
+            if(!probeAppendProvider_.empty()) {
+                const auto name=probeAppendProvider_;
+                probeAppendProvider_.clear();
+                std::vector<std::string> known;
+                std::string providerId;
+                for(const auto& provider:hermesState_.providers) {
+                    if(provider.name!=name) continue;
+                    known=provider.models;
+                    providerId=provider.providerId;
+                }
+                // 只有探测**成功且有结果**才更新缓存：失败时清空缓存会让回退链的模型选择器
+                // 突然退回到"只有配置里的几个"（那个下拉的数据源就是这份缓存）。
+                if(owned->error.empty()&&!owned->models.empty()) {
+                    std::lock_guard<std::mutex> lock(probedMutex_);
+                    probedModels_[name]=owned->models;
+                }
+                std::vector<std::string> delta, stale;
+                for(const auto& model:owned->models)
+                    if(std::find(known.begin(),known.end(),model)==known.end()) delta.push_back(model);
+                // 配置里有、探测结果里没有的 = 供应商已下线的模型。v1.19 起同步会把它们删掉
+                // （助手 add-models 的 prune 模式），不再只是"追加后假装已是最新"。
+                for(const auto& model:known)
+                    if(std::find(owned->models.begin(),owned->models.end(),model)==owned->models.end())
+                        stale.push_back(model);
+                if(!owned->error.empty()) {
+                    // 探测失败：错误已由上面的 toast 给出，这里不再重复。
+                } else if(owned->models.empty()) {
+                    // 探测成功但没有任何模型：绝不能 prune（那会把配置里的列表清空）。
+                    ShowToast(Narrow(L"\u300C")+name+Narrow(L"\u300D\u63A2\u6D4B\u6CA1\u6709"
+                        L"\u8FD4\u56DE\u6A21\u578B\uFF0C\u672A\u6539\u52A8\u914D\u7F6E"),2);
+                } else if((!delta.empty()||!stale.empty())&&!providerId.empty()) {
+                    // v1.19（用户要求）：同步写回——把该供应商的 models 列表替换成探测结果
+                    // （助手 add-models 的 prune 模式；只读探测 + 写前自动备份，默认追加语义未变）。
+                    Json args{{"cmd","add-models"},{"provider",providerId},
+                        {"models",owned->models},{"prune",true}};
+                    std::string message=Narrow(L"\u300C")+name+Narrow(L"\u300D\u5DF2\u540C\u6B65\uFF1A")
+                        +std::to_string(owned->models.size())+Narrow(L" \u4E2A\u6A21\u578B");
+                    if(!delta.empty())
+                        message+=Narrow(L"\uFF08\u65B0\u589E ")+std::to_string(delta.size())
+                            +Narrow(L"\uFF09");
+                    if(!stale.empty())
+                        message+=Narrow(L"\uFF08\u5220\u9664 ")+std::to_string(stale.size())
+                            +Narrow(L"\uFF09");
+                    StartHelperAction("add-models",args,message);
+                } else {
+                    ShowToast(Narrow(L"\u300C")+name+Narrow(L"\u300D\u5DF2\u662F\u6700\u65B0\uFF08")
+                        +std::to_string(owned->models.size())+Narrow(L" \u4E2A\u6A21\u578B\uFF09"),1);
+                }
+                InvalidateAll();
+            } else {
+                // 新建供应商页的探测：结果写进「模型」多行框（可继续编辑），药丸是同一份数据的
+                // 快捷删除视图。v1.18 起没有「加模型」子页，这条分支只服务新建表单。
+                if(!owned->models.empty()) {
+                    // v1.21：探测结果直接成为**列表**（全部模型、默认全选），不再塞进文本框。
+                    addChips_=owned->models;
+                    addChipSelected_.assign(addChips_.size(),true);
+                    addModelScroll_=0;
+                    addInfo_=std::to_string(owned->models.size())
+                        +Narrow(L" \u4E2A\u6A21\u578B\u5DF2\u5217\u51FA\uFF08\u9ED8\u8BA4\u5168\u9009\uFF09");
+                }
+                if(owned->models.empty()&&owned->error.empty())
+                    addInfo_="\xE8\xBF\x9E\xE4\xB8\x8A\xE4\xBA\x86\xEF\xBC\x8C\xE4\xBD\x86"
+                        "\xE6\xB2\xA1\xE8\xBF\x94\xE5\x9B\x9E\xE6\xA8\xA1\xE5\x9E\x8B\xE5\x88\x97"
+                        "\xE8\xA1\xA8\xEF\xBC\x88\xE5\x8F\xAF\xE4\xBB\xA5\xE6\x89\x8B\xE5\x8A\xA8"
+                        "\xE5\xA1\xAB id\xEF\xBC\x89";
+                InvalidateAll();
+            }
         }
         if(owned->verb=="backup-list") {
             backups_=owned->backups;
@@ -1045,6 +1352,12 @@ void Application::ApplyDataResult(DataResult* result) {
             backupError_=owned->error;
             InvalidateAll();
         }
+        // 回滚会「恢复前再把当前内容备份一份」：列表里会多出一条，必须重读，否则界面上看不到
+        // 那份刚生成的备份（真机：回滚成功、toast 正常，但列表还是旧的 3 行）。
+        if(owned->verb=="restore"&&owned->error.empty()) LoadBackups();
+        // 说明：新建供应商保存后**有意保留**表单与模型列表（h-add 门禁的契约：可以在同一页
+        // 连续保存第二个供应商；upsert 本身是幂等写入，重复保存不会产生重复条目）。
+        // 旧 Electron 版会清空并跳回模型页，这里按本移植版的门禁用例保持不变——不是缺陷。
         if(!owned->state.providers.empty()||!owned->state.fallbacks.empty()) ApplyHelperState(owned->state);
         else InvalidateAll();
         StartQueuedSwitch();

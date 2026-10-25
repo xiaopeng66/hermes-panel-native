@@ -1,10 +1,26 @@
 #include "data/state.h"
 #include <json.hpp>
 #include <algorithm>
+#include <cstdio>
+#include <ctime>
 
 namespace hermes {
 namespace {
 using Json=nlohmann::json;
+// 同步章的时间文本兜底：助手脚本（hermes-panel-read.py）只给 config.mtime 时间戳、不给
+// mtime_text，UNC 快照早先也是空串——状态行的刷新按钮于是永远显示"—"（真机 2026-10-21 报）。
+// 这里按本地时间统一格式化 "YYYY-MM-DD HH:MM:SS"（ClockText 取 HH:MM）。
+std::string MtimeText(long long stamp) {
+    if(stamp<=0) return {};
+    std::time_t value=static_cast<std::time_t>(stamp);
+    std::tm local{};
+    if(localtime_s(&local,&value)!=0) return {};
+    char buffer[32]{};
+    std::snprintf(buffer,sizeof(buffer),"%04d-%02d-%02d %02d:%02d:%02d",
+        local.tm_year+1900,local.tm_mon+1,local.tm_mday,
+        local.tm_hour,local.tm_min,local.tm_sec);
+    return buffer;
+}
 Json ParseOrEmpty(const std::string& text) {
     try { return Json::parse(text); } catch(const std::exception&) { return Json::object(); }
 }
@@ -38,9 +54,21 @@ HermesState ParseState(const std::string& listJson,const std::string& healthJson
         const auto& config=status["config"];
         state.config.mtime=Int(config,"mtime");
         state.config.mtimeText=Str(config,"mtime_text");
+        if(state.config.mtimeText.empty()) state.config.mtimeText=MtimeText(state.config.mtime);
         state.config.size=Int(config,"size");
         state.config.mode=Str(config,"mode");
         state.config.parses=Bool(config,"parses",true);
+    }
+    // UNC 快速路径合成的 health 里 config 只有 mtime=0（systemd/文件事实由快照提供）：
+    // 此时回退到 list 的 files.config，否则每次 UNC 刷新都把同步章清成"—"（真机 2026-10-21）。
+    if(state.config.mtime==0&&list.contains("files")&&list["files"].is_object()
+        &&list["files"].contains("config")&&list["files"]["config"].is_object()) {
+        const auto& config=list["files"]["config"];
+        state.config.mtime=Int(config,"mtime");
+        state.config.mtimeText=Str(config,"mtime_text");
+        if(state.config.mtimeText.empty()) state.config.mtimeText=MtimeText(state.config.mtime);
+        if(state.config.size==0) state.config.size=Int(config,"size");
+        if(state.config.mode.empty()) state.config.mode=Str(config,"mode");
     }
     if(status.contains("webui")&&status["webui"].is_object()) {
         const auto& webui=status["webui"];
@@ -150,8 +178,16 @@ bool ModelListHasModel(const std::string& model,const std::vector<std::string>& 
     return false;
 }
 std::string Signature(const HermesState& state) {
+    // v1.31：签名必须覆盖**所有会影响画面**的字段。之前漏了三盏灯（webui/gateway 可达性）、
+    // 网关启动时刻与 config mtime（同步时间戳 + 待重启判定）以及助手错误横幅——这些变化时
+    // "签名未变 → 跳过重绘"会把界面留在旧状态（v1.28 引入的跳过逻辑会踩到）。
     std::string signature=state.model.provider+"|"+state.model.model+"|"+state.model.apiMode
-        +"|wsl="+state.wsl;
+        +"|wsl="+state.wsl
+        +"|webui="+std::to_string(state.webui.port)+":"+(state.webui.reachable?"1":"0")
+        +"|gw="+std::to_string(state.gateway.port)+":"+(state.gateway.reachable?"1":"0")
+        +":"+std::to_string(state.gateway.sinceUnix)
+        +"|mt="+std::to_string(state.config.mtime)+":"+(state.config.parses?"1":"0")
+        +"|err="+state.error;
     for(const auto& provider:state.providers) {
         signature+="|p:"+provider.providerId+":"+provider.defaultModel+":"
             +(provider.isActive?"a":"-")+":"+std::to_string(provider.models.size());

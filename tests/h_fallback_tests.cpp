@@ -2,6 +2,7 @@
 // rendering, the up/down/remove buttons, the fold form (select + manual fields), the per-row probe and
 // the danger modal, all through the app's own message path (see h_models_tests.cpp for why the desktop's
 // real input is not used) and asserted through the debug control plane.
+#include <filesystem>
 #include <windows.h>
 #include <fstream>
 #include <iostream>
@@ -57,13 +58,27 @@ Json Requests(const std::string& path,const std::string& cmd) {
     return list;
 }
 void ClickPoint(h::Client& client,const Json& rect) {
+    h::Require(rect.is_object()&&rect.contains("x"),"missing control rect");
     const auto x=rect["x"].get<int>()+rect["width"].get<int>()/2;
     const auto y=rect["y"].get<int>()+rect["height"].get<int>()/2;
     client.Request({{"command","focus"}});
     const auto hit=client.Request({{"command","hit"},{"x",x},{"y",y}});
-    h::Require(hit["hit"]["isPanel"].get<bool>(),"the click target is covered by another window");
+    h::Require((hit["hit"]["isPanel"].get<bool>()||hit["hit"].value("isPanelChild",false)),"the click target is covered by another window");
     client.Request({{"command","tap"},{"x",x},{"y",y},{"screen",true}});
     Sleep(150);
+}
+// v1.25：部分用例会在选完供应商后自动展开模型列表；没开时才点，点完等它开。
+void OpenModelList(h::Client& client) {
+    auto dump=client.Request({{"command","dump"}});
+    if(dump["fallback"]["modelSelectOpen"].get<bool>()) return;
+    const auto controls=client.Request({{"command","controls"}});
+    ClickPoint(client,controls.value("fbModelSelect",Json::object()));
+    const auto deadline=GetTickCount64()+3000;
+    while(GetTickCount64()<deadline) {
+        dump=client.Request({{"command","dump"}});
+        if(dump["fallback"]["modelSelectOpen"].get<bool>()) return;
+        Sleep(60);
+    }
 }
 void KeyDown(h::Client& client,unsigned vk) { client.Request({{"command","vk"},{"vk",vk}});Sleep(80); }
 void TypeText(h::Client& client,const std::string& ascii) {
@@ -97,6 +112,9 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=3) return 2;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const std::wstring id=L"fallback-"+std::to_wstring(GetCurrentProcessId());
+    // 设置目录按实例名（含 pid）隔离，但 pid 会被系统复用：先把上一轮可能留下的
+    // previewDiff / autoReloadGateway 清掉，否则同一个用例会时绿时红。
+    std::filesystem::remove_all(h::IsolatedDataDir(id));
     const auto home=std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id+L"/fake";
     CreateDirectoryW(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata",nullptr);
     CreateDirectoryW((std::wstring(L"E:/AI/Zcode/tmp/hermes-panel-native/testdata/")+id).c_str(),nullptr);
@@ -190,26 +208,48 @@ int wmain(int argc,wchar_t** argv) {
             "the panel must not use the all-rows fallback-probe call any more");
         std::cout<<"PASS 逐条探测 produced one result per row (●7 / ○)\n";
         // 探测结果的悬停说明：绿=含该模型、红=连不上；夹具切到 probe_missing 后变琥珀=不含该模型。
+        // 每次悬停都重新取面板矩形与点位：逐条探测会让页面重排/窗口高度变化，用一开始的快照
+        // 换算出来的客户区坐标会偏到别的控件上（全量跑时表现为"提示文案是追加一条"）。
         {
-            const auto bounds=client.Request({{"command","dump"}})["panel"];
-            const auto hoverDot=[&](const Json& rect) {
-                const int x=rect["x"].get<int>()-bounds[0].get<int>()+rect["width"].get<int>()/2;
-                const int y=rect["y"].get<int>()-bounds[1].get<int>()+rect["height"].get<int>()/2;
+            // 真实指针若正好停在测试窗口上（本机操作过面板就会这样），系统会在窗口出现/重绘时
+            // 补发 WM_MOUSEMOVE，把悬停目标改回"追加一条"，合成 hover 的结果就被它盖掉
+            // （BLOCKER-005 的同一类干扰）。先把指针挪到虚拟桌面角落，跑完再放回去。
+            POINT savedCursor{};
+            const bool hadCursor=GetCursorPos(&savedCursor)!=FALSE;
+            SetCursorPos(GetSystemMetrics(SM_XVIRTUALSCREEN)+4,GetSystemMetrics(SM_YVIRTUALSCREEN)+4);
+            Sleep(150);
+            std::string hoverDiagnostic;
+            const auto hoverDot=[&](int index) {
                 std::string text;
-                for(int attempt=0;attempt<3&&text.empty();++attempt) {
-                    client.Request({{"command","hover"},{"x",x},{"y",y}});
-                    Sleep(1200);
-                    text=client.Request({{"command","dump"}})["tooltip"]["text"].get<std::string>();
+                for(int attempt=0;attempt<5&&text.empty();++attempt) {
+                    const auto dump=client.Request({{"command","dump"}});
+                    const auto panelRect=dump["panel"];
+                    const auto dots=client.Request({{"command","controls"}})["_probeDots"];
+                    if(index>=static_cast<int>(dots.size())) break;
+                    const auto& rect=dots[index];
+                    const int x=rect["x"].get<int>()-panelRect[0].get<int>()
+                        +rect["width"].get<int>()/2;
+                    const int y=rect["y"].get<int>()-panelRect[1].get<int>()
+                        +rect["height"].get<int>()/2;
+                    const auto hovered=client.Request({{"command","hover"},{"x",x},{"y",y}});
+                    Sleep(1600);
+                    const auto after=client.Request({{"command","dump"}});
+                    text=after["tooltip"]["text"].get<std::string>();
+                    hoverDiagnostic=" rect="+rect.dump()+" panel="+panelRect.dump()
+                        +" hovered="+hovered.dump()+" text="+text
+                        +" row0="+after["fallback"]["rows"][0].dump()
+                        +" probes="+std::to_string(Requests(logPath,"probe").size())
+                        +" pageScroll="+after["pageScroll"].dump();
                 }
                 return text;
             };
             auto dotControls=client.Request({{"command","controls"}});
             const auto dots=dotControls["_probeDots"];
             h::Require(dots.size()==2,"the layout exposes both probe dots");
-            const auto green=hoverDot(dots[0]);
+            const auto green=hoverDot(0);
             h::Require(green.find("\xE5\x90\xAB\xE8\xAF\xA5\xE6\xA8\xA1\xE5\x9E\x8B")!=std::string::npos,
-                "the green dot says the model is listed");
-            const auto red=hoverDot(dots[1]);
+                ("the green dot says the model is listed ("+green+hoverDiagnostic+")").c_str());
+            const auto red=hoverDot(1);
             h::Require(red.find("\xE8\xBF\x9E\xE4\xB8\x8D\xE4\xB8\x8A")!=std::string::npos,
                 "the red dot says the provider is unreachable");
             // 连接层抖动（供应商偶发 reset）：重试一次后必须还是●（真机 s3ai 4 次里 1 次）。
@@ -225,6 +265,11 @@ int wmain(int argc,wchar_t** argv) {
                     return rows.size()==2&&rows[0]["probeOk"].get<bool>()
                         &&rows[0]["probeHasModel"].get<bool>();
                 });
+                {
+                    const auto deadline=GetTickCount64()+10000;
+                    while(GetTickCount64()<deadline
+                        &&Requests(logPath,"probe").size()<before+2) Sleep(50);
+                }
                 h::Require(Requests(logPath,"probe").size()-before>=2,
                     "a transport-level probe failure was not retried");
                 DeleteFileW((home+L"/probe_flaky").c_str());
@@ -235,6 +280,11 @@ int wmain(int argc,wchar_t** argv) {
                 std::ofstream missing(Narrow(home)+"/probe_missing",std::ios::trunc);
                 missing<<"1\n";
             }
+            // 上一轮（probe_flaky）可能还在收尾：面板对"进行中"的重复点击是忽略的，
+            // 不等它结束，这一次点击会被吞掉、行状态仍是绿的。只等就绪，断言不变。
+            WaitFor(client,[](const Json& value) {
+                return !value["fallback"]["probeRunning"].get<bool>();
+            });
             dotControls=client.Request({{"command","controls"}});
             ClickPoint(client,dotControls["fbProbe"]);
             WaitFor(client,[](const Json& value) {
@@ -243,10 +293,12 @@ int wmain(int argc,wchar_t** argv) {
                     &&!rows[0]["probeHasModel"].get<bool>();
             });
             dotControls=client.Request({{"command","controls"}});
-            const auto amber=hoverDot(dotControls["_probeDots"][0]);
+            const auto amber=hoverDot(0);
             h::Require(amber.find("\xE4\xB8\x8D\xE5\x90\xAB\xE8\xAF\xA5\xE6\xA8\xA1\xE5\x9E\x8B")!=std::string::npos,
-                "the amber dot says the model is missing");
+                ("the amber dot says the model is missing (tooltip=\""+amber+"\"; dot="
+                    +dotControls["_probeDots"][0].dump()+hoverDiagnostic+")").c_str());
             DeleteFileW((home+L"\\probe_missing").c_str());
+            if(hadCursor) SetCursorPos(savedCursor.x,savedCursor.y);
             std::cout<<"PASS probe tooltip: green / amber / red each explain themselves\n";
         }
         // ---- 3. 下移第一条：顺序交换并把 fallback-move 交给助手 ----
@@ -305,9 +357,10 @@ int wmain(int argc,wchar_t** argv) {
         ClickPoint(client,controls["fbFoldToggle"]);
         snapshot=WaitFor(client,[](const Json& value) { return value["fallback"]["formOpen"].get<bool>(); });
         h::Require(snapshot["fallback"]["formOpen"].get<bool>(),"追加一条 opened the fold form");
-        h::Require(snapshot["fallback"]["sources"][0].get<std::string>()
-            =="\xE2\x80\x94 \xE6\x89\x8B\xE5\xA1\xAB provider + base_url \xE2\x80\x94","the select leads with the manual entry");
-        h::Require(snapshot["fallback"]["sources"].size()==3,"the select lists both providers");
+        // v1.25（用户要求）：来源只能选既有供应商，不再有"手填 provider + base_url"。
+        h::Require(snapshot["fallback"]["sources"].size()==2,"the select lists both providers");
+        h::Require(snapshot["fallback"]["sources"][0].get<std::string>()=="Alpha",
+            "the select lists real providers only");
         // 先点「追加到链尾」不填模型：错误行亮起，不写
         controls=client.Request({{"command","controls"}});
         ClickPoint(client,controls["fbSubmit"]);
@@ -315,21 +368,42 @@ int wmain(int argc,wchar_t** argv) {
         h::Require(!snapshot["fallback"]["error"].get<std::string>().empty(),"an empty model id is refused");
         h::Require(Requests(logPath,"fallback-add").empty(),"the refusal wrote nothing");
         std::cout<<"PASS the fold form refuses an empty model id\n";
-        // 选来源供货商（Alpha）→ 手填字段收起 → 填模型 → 追加
+        // 选来源供货商（Alpha）→ 模型下拉自动打开 → 选一个模型 → 追加
+        controls=client.Request({{"command","controls"}});
         ClickPoint(client,controls["fbSelect"]);
         snapshot=WaitFor(client,[](const Json& value) { return value["fallback"]["selectOpen"].get<bool>(); });
         h::Require(snapshot["fallback"]["selectOpen"].get<bool>(),"the select opened");
         controls=client.Request({{"command","controls"}});
-        ClickPoint(client,controls["_select"][1]);                    // 第 0 项是手填，第 1 项是 Alpha
+        {
+            const auto options=controls.value("_select",Json::array());
+            h::Require(options.size()>=1,
+                ("the source list is empty: "+controls.dump().substr(0,400)).c_str());
+            ClickPoint(client,options[0]);                            // v1.25：第 0 项就是第一个供应商
+        }
         snapshot=WaitFor(client,[](const Json& value) {
-            return value["fallback"]["source"].get<int>()==1&&!value["fallback"]["selectOpen"].get<bool>();
+            return value["fallback"]["source"].get<int>()==0
+                &&value["fallback"]["modelOptions"].size()>0;
         });
-        h::Require(snapshot["fallback"]["source"].get<int>()==1,"picking a provider set the source");
-        h::Require(snapshot["fallback"]["manual"].get<bool>()==false,"the manual fields collapse");
-        TypeText(client,"alpha-2");
+        h::Require(snapshot["fallback"]["source"].get<int>()==0,"picking a provider set the source");
+        h::Require(snapshot["fallback"]["modelOptions"][0].get<std::string>()=="alpha-1",
+            "the model list offers the provider's models");
+        // 模型只能从列表里选：选完供应商时列表已经自动展开（点 ▾ 是切换）。
+        h::Require(client.Request({{"command","dump"}})["fallback"]["modelSelectOpen"].get<bool>(),
+            "selecting a provider opens the model list");
         controls=client.Request({{"command","controls"}});
-        ClickPoint(client,controls["_fields"][1]);                    // 模型 id 字段
-        TypeText(client,"alpha-2");
+        {
+            const auto options=controls.value("_select",Json::array());
+            h::Require(options.size()>=2,
+                ("the model list has no second row: opts="+options.dump()
+                    +" view="+client.Request({{"command","dump"}})["fallback"].dump()).c_str());
+            ClickPoint(client,options[1]);                            // alpha-2
+        }
+        snapshot=WaitFor(client,[](const Json& value) {
+            return value["fallback"]["modelValue"].get<std::string>()=="alpha-2";
+        });
+        h::Require(snapshot["fallback"]["modelValue"].get<std::string>()=="alpha-2",
+            "the model came from the dropdown");
+        controls=client.Request({{"command","controls"}});
         ClickPoint(client,controls["fbSubmit"]);
         snapshot=WaitFor(client,[](const Json& value) { return value["fallback"]["rows"].size()==2; });
         h::Require(snapshot["fallback"]["rows"].size()==2,"the entry was appended");
@@ -340,7 +414,66 @@ int wmain(int argc,wchar_t** argv) {
             &&adds[0]["model"].get<std::string>()=="alpha-2","fallback-add carried from_custom + model");
         h::Require(snapshot["fallback"]["modelValue"].get<std::string>().empty(),
             "the model field is cleared after a successful add");
+        // v1.17：写入落盘后必须交代网关状态（默认「自动重启网关」是关的 → 点亮待重启并说清楚）。
+        h::Require(snapshot["data"]["pendingGatewayRestart"].get<bool>(),
+            "a config write with auto-reload off raises the pending-restart state");
+        h::Require(snapshot["toast"]["text"].get<std::string>().find("\xE9\x87\x8D\xE5\x90\xAF")
+            !=std::string::npos,"the write toast tells the user a gateway restart is needed");
         std::cout<<"PASS the fold form appended via the provider select and cleared itself\n";
+        // ---- 7b. v1.16：模型 ▾ —— 候选来自供应商 models，选中只读填框，两个下拉互斥 ----
+        {
+            controls=client.Request({{"command","controls"}});
+            h::Require(controls.contains("fbModelSelect"),"the model field exposes its picker");
+            auto dump=client.Request({{"command","dump"}});
+            h::Require(dump["fallback"]["modelOptions"]==Json::array({"alpha-1","alpha-2"}),
+                "before any probe the picker offers the provider's configured models");
+            // 一键探测（托盘菜单 1015，只读）之后：缓存优先于配置里的 models
+            client.Request({{"command","menu"},{"id",1015}});
+            {
+                const auto deadline=GetTickCount64()+15000;
+                while(GetTickCount64()<deadline) {
+                    dump=client.Request({{"command","dump"}});
+                    if(!dump["probeAll"]["busy"].get<bool>()&&dump["probeAll"]["done"].get<int>()>0) break;
+                    Sleep(120);
+                }
+            }
+            h::Require(dump["probeAll"]["ok"].get<int>()>0,"probe-all returned at least one model list");
+            dump=client.Request({{"command","dump"}});
+            h::Require(dump["fallback"]["modelOptions"]==Json::array({"probe-a","probe-b","probe-c"}),
+                "the probe cache wins over the configured model list");
+            const auto probesBefore=Requests(logPath,"probe").size();
+            // 列表可能已经开着：没开才点（点前重取控件表，上一步写入后布局变了）。
+            if(!client.Request({{"command","dump"}})["fallback"]["modelSelectOpen"].get<bool>()) {
+                OpenModelList(client);
+            }
+            h::Require(client.Request({{"command","dump"}})["fallback"]["modelSelectOpen"].get<bool>(),
+                ("the model picker opened ("+client.Request({{"command","dump"}})["fallback"].dump()+")").c_str());
+            controls=client.Request({{"command","controls"}});
+            h::Require(controls["_select"].size()==3,"the picker lists the probed models");
+            ClickPoint(client,controls["_select"][1]);
+            dump=WaitFor(client,[](const Json& value) {
+                return value["fallback"]["modelValue"].get<std::string>()=="probe-b"; });
+            h::Require(dump["fallback"]["modelValue"].get<std::string>()=="probe-b",
+                "picking a model filled the id field");
+            h::Require(!dump["fallback"]["modelSelectOpen"].get<bool>(),"the picker closed after the pick");
+            h::Require(Requests(logPath,"probe").size()==probesBefore,
+                "picking a model is read-only: no helper call");
+            // 互斥：模型列表开着时点来源供应商下拉 → 模型列表收起
+            controls=client.Request({{"command","controls"}});
+            ClickPoint(client,controls["fbModelSelect"]);
+            WaitFor(client,[](const Json& value) {
+                return value["fallback"]["modelSelectOpen"].get<bool>(); });
+            controls=client.Request({{"command","controls"}});
+            ClickPoint(client,controls["fbSelect"]);
+            dump=WaitFor(client,[](const Json& value) { return value["fallback"]["selectOpen"].get<bool>(); });
+            h::Require(dump["fallback"]["selectOpen"].get<bool>(),"the source select opened");
+            h::Require(!dump["fallback"]["modelSelectOpen"].get<bool>(),
+                "the two dropdowns never stay open together");
+            // 收起来源下拉，后面的用例还要用这张表单
+            ClickPoint(client,controls["fbSelect"]);
+            WaitFor(client,[](const Json& value) { return !value["fallback"]["selectOpen"].get<bool>(); });
+            std::cout<<"PASS the model picker fills the field from the provider list without any write\n";
+        }
         // ---- N. 写入前先看 diff（previewDiff）：开启后写操作先 dry_run 出预演卡，确认才真写 ----
         {
             controls=client.Request({{"command","controls"}});
@@ -367,9 +500,15 @@ int wmain(int argc,wchar_t** argv) {
             }
             const auto addsBefore=Requests(logPath,"fallback-add");
             const auto rowsBefore=client.Request({{"command","dump"}})["fallback"]["rows"].size();
-            controls=client.Request({{"command","controls"}});
-            ClickPoint(client,controls["_fields"][1]);
-            TypeText(client,"alpha-3");
+            // v1.25：模型只能从下拉里选（缓存里有 probe-a/b/c）。
+            OpenModelList(client);
+            {
+                const auto options=client.Request({{"command","controls"}}).value("_select",Json::array());
+                h::Require(!options.empty(),"the model list is empty before the preview write");
+                ClickPoint(client,options[0]);
+            }
+            WaitFor(client,[](const Json& value) {
+                return !value["fallback"]["modelValue"].get<std::string>().empty(); });
             controls=client.Request({{"command","controls"}});
             ClickPoint(client,controls["fbSubmit"]);
             const auto preview=WaitFor(client,[](const Json& value) {
@@ -411,6 +550,61 @@ int wmain(int argc,wchar_t** argv) {
                 &&!removesAfter.back().contains("dry_run"),
                 "previewDiff never injects dry_run into commands the helper cannot preview");
             std::cout<<"PASS previewDiff: unsupported writes are not falsely previewed\n";
+            // ---- v1.17：打开「自动重启网关」后再写一次 → 应自动发 reload 且待重启态收起 ----
+            {
+                controls=client.Request({{"command","controls"}});
+                ClickPoint(client,controls["tabSettings"]);
+                WaitFor(client,[](const Json& value) { return value["activePage"].get<int>()==4; });
+                Settle(client);
+                controls=client.Request({{"command","controls"}});
+                const auto autoSwitches=controls["_switches"];
+                h::Require(autoSwitches.size()>=2,"the settings page exposes the auto-reload switch");
+                // 上一条用例把「写入前先看 diff」打开了：先关掉，否则这次写只出预演卡、不落盘。
+                ClickPoint(client,autoSwitches[0]);
+                WaitFor(client,[](const Json& value) {
+                    return !value["stored"]["previewDiff"].get<bool>(); });
+                controls=client.Request({{"command","controls"}});
+                ClickPoint(client,controls["_switches"][1]);       // 开关行 1 = 自动重启网关
+                auto autoSettings=WaitFor(client,[](const Json& value) {
+                    return value["stored"]["autoReloadGateway"].get<bool>(); });
+                h::Require(autoSettings["stored"]["autoReloadGateway"].get<bool>(),
+                    "the auto-reload switch toggled on");
+                controls=client.Request({{"command","controls"}});
+                ClickPoint(client,controls["tabFallback"]);
+                WaitFor(client,[](const Json& value) { return value["activePage"].get<int>()==1; });
+                Settle(client);
+                if(!client.Request({{"command","dump"}})["fallback"]["formOpen"].get<bool>()) {
+                    controls=client.Request({{"command","controls"}});
+                    ClickPoint(client,controls["fbFoldToggle"]);
+                    WaitFor(client,[](const Json& value) { return value["fallback"]["formOpen"].get<bool>(); });
+                }
+                const auto reloadsBefore=Requests(logPath,"reload").size();
+                // v1.25：模型从下拉里选（不再手填 id）。
+                OpenModelList(client);
+                {
+                    const auto options=client.Request({{"command","controls"}})
+                        .value("_select",Json::array());
+                    h::Require(!options.empty(),"the model list is empty before the auto-reload write");
+                    ClickPoint(client,options[0]);
+                }
+                WaitFor(client,[](const Json& value) {
+                    return !value["fallback"]["modelValue"].get<std::string>().empty(); });
+                controls=client.Request({{"command","controls"}});
+                ClickPoint(client,controls["fbSubmit"]);
+                // 写 → reload 是两次串行调用：等 reload 真的到助手。
+                {
+                    const auto deadline=GetTickCount64()+20000;
+                    while(GetTickCount64()<deadline
+                        &&Requests(logPath,"reload").size()<=reloadsBefore) Sleep(100);
+                }
+                h::Require(Requests(logPath,"reload").size()>reloadsBefore,
+                    "auto-reload issues a gateway reload after the write");
+                auto after=WaitFor(client,[](const Json& value) {
+                    return !value["data"]["pendingGatewayRestart"].get<bool>(); });
+                h::Require(!after["data"]["pendingGatewayRestart"].get<bool>(),
+                    "the pending-restart pill clears once the gateway was restarted");
+                std::cout<<"PASS auto-reload: a config write restarts the gateway and clears the pill\n";
+            }
         }
         status=0;
     } catch(const std::exception& error) {

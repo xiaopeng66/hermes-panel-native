@@ -1,6 +1,7 @@
 #include "app/application.h"
 #include "app/application_internal.h"
 #include "control_plane.h"
+#include <cctype>
 #include <cmath>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -18,14 +19,49 @@
 #include <vector>
 
 namespace hermes {
+namespace {
+// 整数解析：整串必须都是数字（允许前后空白），否则返回 false。
+// 与 atoi 的区别是"abc"/"12x"/"" 都算无效——设置页的数字输入必须能分辨"没填对"与"填了 0"。
+bool ParseWholeInt(const std::string& text,int* out) {
+    std::size_t first=0,last=text.size();
+    while(first<last&&std::isspace(static_cast<unsigned char>(text[first]))) ++first;
+    while(last>first&&std::isspace(static_cast<unsigned char>(text[last-1]))) --last;
+    if(first==last) return false;
+    long long value=0;
+    for(std::size_t index=first;index<last;++index) {
+        const char character=text[index];
+        if(character<'0'||character>'9') return false;
+        value=value*10+(character-'0');
+        if(value>100000000LL) return false;   // 明显越界：交给调用方的 clamp
+    }
+    if(out) *out=static_cast<int>(value);
+    return true;
+}
+}
+PanelLayout Application::LayoutForInput(PanelViewModel& view) const {
+    RECT client{};
+    if(!panel_||!GetClientRect(panel_,&client)) return {};
+    auto* self=const_cast<Application*>(this);
+    const auto layout=ComputeLayout(view,static_cast<float>(client.right),
+        static_cast<float>(client.bottom),static_cast<float>(self->WindowDpi())/96.0f);
+    if(view.tooltip.visible) {
+        view.tooltip.left=self->pointerX_;view.tooltip.top=self->pointerY_;
+        view.tooltip.right=self->pointerX_;view.tooltip.bottom=self->pointerY_;
+    }
+    self->tooltipView_=view.tooltip;
+    return layout;
+}
+
 PanelLayout Application::LayoutForInput() const {
     RECT client{};
     if(!panel_||!GetClientRect(panel_,&client)) return {};
     auto* self=const_cast<Application*>(this);
 {
     auto view=self->CurrentView();
+    // 布局倍率与绘制同源（Surface::Paint 用 GetDpiForWindow）：拖动跨屏时 monitor_ 还是旧显示器，
+    // 用它算布局会把原生输入框按旧倍率摆到框外（占位文字"跑出输入框"）。
     const auto layout=ComputeLayout(view,static_cast<float>(client.right),
-        static_cast<float>(client.bottom),static_cast<float>(monitor_.geometry.dpi)/96.0f);
+        static_cast<float>(client.bottom),static_cast<float>(self->WindowDpi())/96.0f);
     if(view.tooltip.visible) {
         // 气泡**跟着指针**（旧版是浏览器原生 title 的行为）：锚点取指针位置而不是控件矩形，
         // 否则它会盖住控件旁边的东西 —— 真机反馈"悬浮时图标看不见了"（顶栏按钮的气泡压住了
@@ -36,6 +72,51 @@ PanelLayout Application::LayoutForInput() const {
     self->tooltipView_=view.tooltip;
     return layout;
 }
+}
+unsigned long long Application::HoverLayoutKey() const {
+    // 只装**影响布局**的输入。指针位置、悬停控件、tooltip 文案都不进来（它们只影响命中/绘制）。
+    unsigned long long key=0xCBF29CE484222325ull;
+    const auto mix=[&key](unsigned long long value) {
+        key^=value;key*=0x100000001B3ull;
+    };
+    const auto mixText=[&mix](const std::string& text) {
+        unsigned long long hash=1469598103934665603ull;
+        for(const char character:text) { hash^=static_cast<unsigned char>(character);hash*=1099511628211ull; }
+        mix(hash);mix(text.size());
+    };
+    RECT client{};
+    if(panel_) GetClientRect(panel_,&client);
+    mix(static_cast<unsigned long long>(client.right));mix(static_cast<unsigned long long>(client.bottom));
+    mix(static_cast<unsigned long long>(WindowDpi()));
+    mix(static_cast<unsigned long long>(activePage_));
+    mix(static_cast<unsigned long long>(addSub_));
+    mix(static_cast<unsigned long long>(filterKind_));
+    mix(static_cast<unsigned long long>(listScroll_*4.0f));
+    mix(static_cast<unsigned long long>(pageScroll_*4.0f));
+    mix(static_cast<unsigned long long>(fallbackScroll_*4.0f));
+    mix(static_cast<unsigned long long>(cursor_));
+    mix(fbFormOpen_?1u:0u);mix(fbSelectOpen_?2u:0u);mix(fbModelSelectOpen_?4u:0u);
+    mix(addSelectOpen_?8u:0u);mix(statusCenterOpen_?16u:0u);
+    mix(static_cast<unsigned long long>(pending_));
+    mix(stateSignature_.size());
+    for(const char character:stateSignature_) {
+        key^=static_cast<unsigned char>(character);key*=1099511628211ull;
+    }
+    mixText(search_.TextUtf8());
+    for(const auto& name:expanded_) mixText(name);
+    mix(fbProbes_.size());
+    mix(static_cast<unsigned long long>(hermesState_.providers.size()));
+    mix(static_cast<unsigned long long>(hermesState_.fallbacks.size()));
+    return key;
+}
+const PanelLayout& Application::HoverLayout() {
+    const auto key=HoverLayoutKey();
+    if(hoverLayoutValid_&&hoverLayoutKey_==key) { ++hoverLayoutHits_;return hoverLayout_; }
+    ++hoverLayoutMisses_;
+    hoverLayout_=LayoutForInput();        // 顺带刷新 tooltipView_（气泡锚点）
+    hoverLayoutKey_=key;
+    hoverLayoutValid_=true;
+    return hoverLayout_;
 }
 void Application::ListMoveCursor(int delta) {
     const auto view=CurrentView();
@@ -66,6 +147,8 @@ void Application::ListSelectCursor() {
 }
 void Application::ClearSearch() {
     search_.SetText(L"");
+    // v1.23：搜索框现在是原生 EDIT，清空必须同时清控件。
+    if(auto* native=NativeFor(&search_)) native->SetText(L"");
     cursor_=-1;
     listScroll_=0;
     InvalidateAll();
@@ -114,13 +197,11 @@ void Application::ScrollModalFrom(float x) {
 }
 int Application::FormFieldIndexOf(const TextField* field) const {
     if(!field) return -1;
+    // v1.18：新建页字段 名称/Base URL/API Key/模型（0..3）；删除页只有供应商下拉（0）。
     if(field==&addName_) return 0;
-    if(field==&addKeyEnv_) return 1;
-    if(field==&addUrl_) return 2;
-    if(field==&addKey_) return 3;
-    if(field==&addModels_) return 1;      // 加模型页的模型 textarea
-    if(field==&addNewModels_) return 4;   // 新建供应商页的「模型（每行一个）」
-    if(field==&addDanger_) return 0;      // 删除页的确认名
+    if(field==&addUrl_) return 1;
+    if(field==&addKey_) return 2;
+    if(field==&addDanger_) return 0;      // 删除页的供应商下拉
     if(field==&setDistro_) return 0;
     if(field==&setWebuiPort_) return 1;
     if(field==&setPollSec_) return 2;
@@ -128,18 +209,15 @@ int Application::FormFieldIndexOf(const TextField* field) const {
     return -1;
 }
 TextField* Application::AddFieldAt(int index) {
-    // 字段序号按子页解释（旧面板的三套表单各有一组 id）。
+    // 字段序号按子页解释（v1.18 只剩新建 / 删除两套表单）。
     if(addSub_==0) {
         switch(index) {
         case 0: return &addName_;
-        case 1: return &addKeyEnv_;
-        case 2: return &addUrl_;
-        case 3: return &addKey_;
-        case 4: return &addNewModels_;
-        default: return nullptr;
+        case 1: return &addUrl_;
+        case 2: return &addKey_;
+        default: return nullptr;   // v1.24：新建页只有 名称/Base URL/API Key 三个输入框
         }
     }
-    if(addSub_==1) return index==1?&addModels_:nullptr;   // 0 是供应商下拉
     return index==0?&addDanger_:nullptr;
 }
 void Application::HideTooltip() {
@@ -194,6 +272,7 @@ bool Application::HandleModalClick(float x,float y) {
 void Application::RunPendingAction() {
     // 每个 pending 各自的"确定"动作（旧版 modal 的 btn-modal-ok）。这里的文案用 Narrow(L"...")
     // 加 Unicode 转义写：源码全 ASCII，避免中文在这一处被二次编码（这个函数已经踩过两次）。
+    if(pending_==Pending::SyncAll) { SyncAllModels();return; }
     if(pending_==Pending::DeleteProvider) { SubmitAdd();return; }
     if(pending_==Pending::RestoreBackup&&!pendingBackupFile_.empty()) {
         Json args;
@@ -208,7 +287,7 @@ void Application::RunPendingAction() {
         args["cmd"]="fallback-remove";
         args["index"]=pendingIndex_;
         StartHelperAction("fallback-remove",args,
-            Narrow(L"\u5DF2\u79FB\u9664\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
+            Narrow(L"\u5DF2\u79FB\u9664"));
         return;
     }
     if(pending_==Pending::SwitchModel) {
@@ -246,11 +325,14 @@ void Application::RunPendingAction() {
         const auto found=std::find_if(hermesState_.providers.begin(),hermesState_.providers.end(),
             [&](const ProviderView& provider) { return provider.name==pendingProvider_; });
         if(found!=hermesState_.providers.end()) {
+            // v1.18（用户要求）：菜单主操作 = 「扫描并追加」——先只读探测，拿到结果后只把**新增**
+            // 的模型写回该供应商（add-models）。结果落地点在 ApplyDataResult 的 probe 分支。
+            probeAppendProvider_=found->name;
             Json args;
             args["cmd"]="probe";
             args["base_url"]=found->baseUrl;
             if(!found->keyEnv.empty()) args["key_env"]=found->keyEnv;
-            StartHelperAction("probe",args,Narrow(L"\u5DF2\u63A2\u5230\uFF0C\u5728\u300C\u6DFB\u52A0\u300D\u9875\u62C9\u6A21\u578B\u5217\u8868"));
+            StartHelperAction("probe",args,std::string{},false,false);
         }
         return;
     }
@@ -268,16 +350,14 @@ void Application::AddPageClick(float x,float y) {
         InvalidateAll();
         return;
     }
-    // 子页分段
-    // 添加页的供应商下拉（加模型 / 删除）：展开时先吃点击（点空白即收起，与旧 select 一致）。
+    // 添加页的供应商下拉（v1.18 只剩删除子页用）：展开时先吃点击（点空白即收起，与旧 select 一致）。
     if(view.activePage==2&&addSelectOpen_) {
         const auto option=SelectOptionAt(laid,x,y);
         if(option>=0) {
-            addProvider_=option;
             addSelectOpen_=false;
             selectScroll_=0;
             // 删除页：选中的供应商名进 addDanger_（提交/确认都用它）。
-            if(addSub_==2&&option<static_cast<int>(hermesState_.providers.size()))
+            if(option<static_cast<int>(hermesState_.providers.size()))
                 addDanger_.SetTextUtf8(hermesState_.providers[static_cast<std::size_t>(option)].name);
             InvalidateAll();
             return;
@@ -294,34 +374,29 @@ void Application::AddPageClick(float x,float y) {
         if(!inRect) continue;
         // 眼睛按钮在 API Key 字段矩形内部：必须先于 FormField 命中（审计 F-012）。
         if(id==ControlId::KeyReveal) { addKeyRevealed_=!addKeyRevealed_;InvalidateAll();return; }
-        if(id==ControlId::SubTabNew||id==ControlId::SubTabModels||id==ControlId::SubTabDel) {
-            addSub_=id==ControlId::SubTabNew?0:(id==ControlId::SubTabModels?1:2);
+        if(id==ControlId::SubTabNew||id==ControlId::SubTabDel) {
+            addSub_=id==ControlId::SubTabNew?0:1;
+            addKeyRevealed_=false;   // 切子页同样回到掩码
             addError_.clear();
             BlurField();
             InvalidateAll();
             return;
         }
         if(id==ControlId::ModeSeg) { addMode_=std::max(0,control.index);InvalidateAll();return; }
-        if(id==ControlId::ModelChip) {
-            // 点掉一个探测回来的模型药丸（旧 renderChips 的 data-drop）——同时从「模型」多行框删掉该行。
-            if(control.index>=0&&control.index<static_cast<int>(addChips_.size())) {
-                const auto removed=addChips_[control.index];
-                addChips_.erase(addChips_.begin()+control.index);
-                std::wstring kept;
-                std::size_t start=0;
-                const auto text=addNewModels_.Text();
-                while(start<=text.size()) {
-                    const auto end=text.find(L'\n',start);
-                    const auto line=text.substr(start,end==std::wstring::npos?std::wstring::npos:end-start);
-                    if(Widen(removed)!=line) {
-                        if(!kept.empty()||start>0) kept+=L"\n";
-                        kept+=line;
-                    }
-                    if(end==std::wstring::npos) break;
-                    start=end+1;
-                }
-                addNewModels_.SetText(kept);
-            }
+        if(id==ControlId::ModelRowAll) {
+            // v1.21：表头 = 全选 / 全不选（按当前是否全选切换）。
+            bool all=true;
+            for(const auto selected:addChipSelected_) if(!selected) { all=false;break; }
+            if(addChipSelected_.size()!=addChips_.size()) all=false;
+            addChipSelected_.assign(addChips_.size(),!all);
+            InvalidateAll();
+            return;
+        }
+        if(id==ControlId::ModelRow) {
+            // 点一行切换"会不会写入配置"。
+            if(control.index>=0&&control.index<static_cast<int>(addChipSelected_.size()))
+                addChipSelected_[static_cast<std::size_t>(control.index)]
+                    =!addChipSelected_[static_cast<std::size_t>(control.index)];
             InvalidateAll();
             return;
         }
@@ -346,14 +421,14 @@ void Application::AddPageClick(float x,float y) {
             return;
         }
         if(id==ControlId::SwitchRowControl) {
+            // v1.18：新建页只剩「保存后设为当前模型」（index 0）；删除页仍是两个开关。
             switch(control.index) {
             case 0:
-                if(addSub_==0) addProbeBefore_=!addProbeBefore_;
-                else if(addSub_==2) addPurgeEnv_=!addPurgeEnv_;
+                if(addSub_==0) addSetMainAfter_=!addSetMainAfter_;
+                else addPurgeEnv_=!addPurgeEnv_;
                 break;
             case 1:
-                if(addSub_==0) addSetMainAfter_=!addSetMainAfter_;
-                else if(addSub_==2) addDropFallbacks_=!addDropFallbacks_;
+                if(addSub_==1) addDropFallbacks_=!addDropFallbacks_;
                 break;
             default: break;
             }
@@ -362,7 +437,7 @@ void Application::AddPageClick(float x,float y) {
         }
         if(id==ControlId::ProbeButton) { ProbeForAdd();return; }
         if(id==ControlId::PrimaryButton) {
-            if(addSub_==2) {
+            if(addSub_==1) {
                 // 删除：下拉里选中的供应商才可删（按钮的禁用态由视图给，这里再兜一层），
                 // 并且必须过「确定删除」模态（替代旧版手输名字那道护栏）。
                 const auto selected=addDanger_.TextUtf8();
@@ -396,51 +471,29 @@ void Application::SubmitAdd() {
         args["name"]=name;
         args["base_url"]=url;
         args["api_mode"]=addMode_==0?"chat_completions":"codex_responses";
-        const auto keyEnv=addKeyEnv_.TextUtf8();
-        if(!keyEnv.empty()) args["key_env"]=keyEnv;
+        // v1.18（用户要求）：Key 变量名不再由用户填——助手按供应商名推导（key_env_auto）。
         const auto key=addKey_.TextUtf8();
         if(!key.empty()) args["key"]=key;
         // 审计 F-007：手动输入/编辑的模型（每行一个）优先；药丸只是同一份数据的快捷视图。
         // （探测会同时填文本框和药丸，用户在文本框里编辑后保存的必须是编辑后的内容。）
+        // v1.21：模型来自**列表里勾选的行**（探测结果默认全选）。手动输入框里还没按回车的
+        // 文本也一起带上，避免"打了字但没回车 → 保存后丢失"。
         Json modelList=Json::array();
-        {
-            std::string line;
-            std::istringstream stream(addNewModels_.TextUtf8());
-            while(std::getline(stream,line)) {
-                if(!line.empty()&&line.back()=='\r') line.pop_back();
-                if(!line.empty()) modelList.push_back(line);
-            }
+        for(std::size_t index=0;index<addChips_.size();++index) {
+            const bool selected=index<addChipSelected_.size()?addChipSelected_[index]:true;
+            if(selected) modelList.push_back(addChips_[index]);
         }
         if(!modelList.empty()) args["models"]=modelList;
-        else if(!addChips_.empty()) args["models"]=addChips_;
-        if(addSetMainAfter_) args["set_main"]=true;
-        StartHelperAction("upsert-provider",args,
-            Narrow(L"\u5DF2\u5199\u5165 config.yaml\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
-        return;
-    }
-    if(addSub_==1) {
-        const auto models=addModels_.TextUtf8();
-        if(models.empty()) { addError_="\xE5\xA1\xAB\xE4\xB8\xAA\xE6\xA8\xA1\xE5\x9E\x8B id";InvalidateAll();return; }
-        if(addProvider_<0||addProvider_>=static_cast<int>(hermesState_.providers.size())) {
-            addError_="\xE5\x85\x88\xE9\x80\x89\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86";
+        // v1.18：模型可以留空（写进配置后由 hermes 侧自行发现）。但「保存后设为当前模型」
+        // 必须有一个模型可用，否则助手会拒绝——先在界面里说清楚，别让它变成一条报错。
+        if(addSetMainAfter_&&modelList.empty()) {
+            addError_=Narrow(L"要设为当前模型，先填至少一个模型（或点「探测」拉取）");
             InvalidateAll();
             return;
         }
-        Json list=Json::array();
-        std::string line;
-        std::istringstream stream(models);
-        while(std::getline(stream,line)) {
-            if(!line.empty()&&line.back()=='\r') line.pop_back();
-            if(!line.empty()) list.push_back(line);
-        }
-        if(list.empty()) { addError_="\xE5\xA1\xAB\xE4\xB8\xAA\xE6\xA8\xA1\xE5\x9E\x8B id";InvalidateAll();return; }
-        Json args;
-        args["cmd"]="add-models";
-        args["provider"]=hermesState_.providers[static_cast<std::size_t>(addProvider_)].providerId;
-        args["models"]=list;
-        StartHelperAction("add-models",args,
-            Narrow(L"\u5DF2\u8FFD\u52A0\u6A21\u578B\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
-        addModels_.SetText(L"");
+        if(addSetMainAfter_) args["set_main"]=true;
+        StartHelperAction("upsert-provider",args,
+            Narrow(L"\u5DF2\u5199\u5165 config.yaml"));
         return;
     }
     // 删除：名字必须来自下拉（即已存在的供应商），并且按**和视图同一份规则**判断能不能删
@@ -463,36 +516,14 @@ void Application::SubmitAdd() {
         args["purge_key"]=addPurgeEnv_;
         args["remove_fallbacks"]=addDropFallbacks_;
         StartHelperAction("delete-provider",args,
-            Narrow(L"\u5DF2\u5220\u9664\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
+            Narrow(L"\u5DF2\u5220\u9664"));
         addDanger_.SetText(L"");
         return;
     }
 }
 void Application::ProbeForAdd() {
     addError_.clear();
-    if(addSub_==1) {
-        // 从供应商探测填充（旧 btn-am-probe）：拿该供应商的 base_url 探测模型列表
-        if(addProvider_<0||addProvider_>=static_cast<int>(hermesState_.providers.size())) {
-            addError_="\xE5\x85\x88\xE9\x80\x89\xE4\xBE\x9B\xE5\xBA\x94\xE5\x95\x86";
-            InvalidateAll();
-            return;
-        }
-        const auto& provider=hermesState_.providers[static_cast<std::size_t>(addProvider_)];
-        if(provider.baseUrl.empty()) {
-            // 真机反馈"点了没有用"：这一条根本没有 base_url，助手的 probe 只会报"需要 base_url"。
-            // 直接说清楚缺什么，别让按钮看起来没反应。
-            addError_=Narrow(L"「")+provider.name+Narrow(L"」没有 base_url，先在 config.yaml 里补上");
-            InvalidateAll();
-            return;
-        }
-        Json args;
-        args["cmd"]="probe";
-        args["base_url"]=provider.baseUrl;
-        if(!provider.keyEnv.empty()) args["key_env"]=provider.keyEnv;
-        StartHelperAction("probe",args,std::string{},false,false);
-        return;
-    }
-    // 新建供应商页：拿表单里的 Base URL 探测（旧 doProbe）
+    // v1.18：只剩「新建供应商」页有探测按钮（拿表单里的 Base URL 探测，结果填进模型多行框）。
     const auto url=addUrl_.TextUtf8();
     if(url.empty()) { addError_="\xE5\x85\x88\xE5\xA1\xAB Base URL";InvalidateAll();return; }
     Json args;
@@ -501,7 +532,8 @@ void Application::ProbeForAdd() {
     const auto key=addKey_.TextUtf8();
     if(!key.empty()) args["key"]=key;
     else {
-        const auto keyEnv=addKeyEnv_.TextUtf8();
+        // 还没填 Key 时用推导出来的变量名（.env 里可能已经有）。
+        const auto keyEnv=DeriveKeyEnv(addName_.TextUtf8());
         if(!keyEnv.empty()) args["key_env"]=keyEnv;
     }
     StartHelperAction("probe",args,std::string{},false,false);
@@ -597,8 +629,8 @@ void Application::SettingsPageClick(float x,float y) {
             return;
         }
         if(control.id==ControlId::WidgetSeg&&control.index>=0) {
-            static const char* kWidgetIds[4]={"beacon","tag","flag","capsule"};
-            SetSetting("widgetStyle",kWidgetIds[std::clamp(control.index,0,3)]);
+            static const char* kWidgetIds[2]={"tag","capsule"};
+            SetSetting("widgetStyle",kWidgetIds[std::clamp(control.index,0,1)]);
             return;
         }
         if(control.id==ControlId::LatencySeg&&control.index>=0) {
@@ -652,10 +684,19 @@ void Application::SetSetting(const std::string& key,const std::string& value) {
         StartThemeMotion(ResolveTheme(stored_.theme));
     }
     else if(key=="distro") stored_.distro=value;
-    else if(key=="webuiPort") { stored_.webuiPort=std::clamp(atoi(value.c_str()),1,65535); }
+    // 数字输入：**整串必须是数字**才接受，否则保持原值（以前 atoi("abc")=0 → 夹到下限，
+    // 于是"随便敲几个字母再点别处"会把 WebUI 端口静默改成 1、刷新间隔改成 5 秒，
+    // 探活与轮询全跟着错——真机实测可复现）。
+    else if(key=="webuiPort") {
+        int port=0;
+        if(ParseWholeInt(value,&port)) stored_.webuiPort=std::clamp(port,1,65535);
+    }
     else if(key=="pollSeconds") {
-        stored_.pollSeconds=std::clamp(atoi(value.c_str()),5,3600);
-        UpdatePollTimer();
+        int seconds=0;
+        if(ParseWholeInt(value,&seconds)) {
+            stored_.pollSeconds=std::clamp(seconds,5,3600);
+            UpdatePollTimer();
+        }
     } else if(key=="previewDiff") stored_.previewDiff=value=="1";
     else if(key=="autoReloadGateway") stored_.autoReloadGateway=value=="1";
     else if(key=="latencyProbe") { stored_.latencyProbe=value=="1";UpdateLatencyTimer(); }
@@ -665,13 +706,15 @@ void Application::SetSetting(const std::string& key,const std::string& value) {
         UpdateLatencyTimer();
     }
     else if(key=="widgetStyle") {
-        stored_.widgetStyle=value;
+        // 与 SettingsStore::Load 走同一条回落规则，并落**规范名**：旧值/未知值在这里就归位，
+        // 否则 stored_ 会留着已删除的样式名（设置页分段按名字选档，会显示成另一套样式），
+        // 而且会被原样写回设置文件。审计工具新增的 legacy-style 检查就是钉这条（2026-10-21）。
         model_.widget=WidgetStyleFromName(value);
+        stored_.widgetStyle=WidgetStyleName(model_.widget);
         // 换样式会改挂件尺寸：只要不是隐藏/拖动中就把两个窗口都按新尺寸落一次（贴边收回时
         // 挂件窗口才是新形状）。浮动态只重绘挂件窗口，不动面板。
         if(state_!=State::Hidden&&state_!=State::Dragging)
             geometry_.Place(model_,monitor_.geometry,state_,"widget-style");
-        UpdateWidgetTimer();
         if(state_==State::Collapsed) RenderStrip();
         else if(strip_) InvalidateRect(strip_,nullptr,FALSE);
     }
@@ -740,20 +783,40 @@ void Application::FallbackPageClick(float x,float y) {
     // 模态优先：它盖在整页上（Enter/Esc 也在键盘路径里处理）。
     if(HandleModalClick(x,y)) return;
     // 展开中的下拉：先吃掉它的点击（点空白即收起，与旧 select 一致）。
-    if(fbFormOpen_&&fbSelectOpen_) {
+    if(fbFormOpen_&&(fbSelectOpen_||fbModelSelectOpen_)) {
         const auto option=SelectOptionAt(laid,x,y);
         if(option>=0) {
-            fbSource_=option;
-            fbSelectOpen_=false;
+            if(fbModelSelectOpen_) {
+                // v1.16：模型 ▾ —— 选中只填文本框（只读，不写配置）。
+                const auto options=FallbackModelOptions();
+                if(option<static_cast<int>(options.size()))
+                    fbModel_.SetTextUtf8(options[static_cast<std::size_t>(option)]);
+                fbModelSelectOpen_=false;
+            } else {
+                // v1.25：sources 里只有既有供应商，option 直接是 provider 下标。
+                fbSource_=option;
+                fbSelectOpen_=false;
+                fbModel_.SetText(L"");
+                // 选了供应商就把它的模型列表打开：模型只能从列表里选。
+                fbModelSelectOpen_=!FallbackModelOptions().empty();
+            }
             selectScroll_=0;
-            // 选到具体供应商时把它的名字放进「provider 名」（手填模式才用得到）。
-            if(option>0&&option-1<static_cast<int>(hermesState_.providers.size()))
-                fbProvider_.SetTextUtf8(hermesState_.providers[static_cast<std::size_t>(option-1)].name);
             InvalidateAll();
             return;
         }
         fbSelectOpen_=false;
+        fbModelSelectOpen_=false;
         selectScroll_=0;
+        // 点到另一个下拉的框上：这一次点击就完成「关旧的、开新的」，别让用户点两下。
+        const auto hitId=ControlAt(laid,x,y);
+        if(hitId==ControlId::FbModelSelect) {
+            fbModelSelectOpen_=true;
+        } else if(hitId==ControlId::FbSelect) {
+            fbSelectOpen_=true;
+        } else if(hitId==ControlId::FormField) {
+            const auto* entry=ControlEntryAt(laid,ControlId::FormField,x,y);
+            if(entry&&entry->index==0) fbSelectOpen_=true;
+        }
         InvalidateAll();
         return;
     }
@@ -777,8 +840,21 @@ void Application::FallbackPageClick(float x,float y) {
         return;
     case ControlId::FbFoldClose: CloseForm();return;
     case ControlId::FbSubmit: SubmitFallback();return;
+    case ControlId::FbModelSelect:
+        // v1.16：模型 ▾。没有候选就不画空列表，给一句"先探测"的提示；与来源下拉互斥。
+        fbSelectOpen_=false;
+        selectScroll_=0;
+        if(FallbackModelOptions().empty()) {
+            fbModelSelectOpen_=false;
+            ShowToast(Narrow(L"\u5148\u70B9\u300C\u9010\u6761\u63A2\u6D4B\u300D\u6216\u6258\u76D8\u7684\u4E00\u952E\u63A2\u6D4B\uFF0C\u518D\u9009\u6A21\u578B"),2);
+        } else {
+            fbModelSelectOpen_=!fbModelSelectOpen_;
+        }
+        InvalidateAll();
+        return;
     case ControlId::FbSelect:
         fbSelectOpen_=!fbSelectOpen_;
+        fbModelSelectOpen_=false;
         selectScroll_=0;
         InvalidateAll();
         return;
@@ -788,6 +864,8 @@ void Application::FallbackPageClick(float x,float y) {
         if(entry->index==0) {
             // 字段 0 就是「来源供应商」下拉：点它展开/收起（旧 select）。
             fbSelectOpen_=!fbSelectOpen_;
+            fbModelSelectOpen_=false;
+            selectScroll_=0;
             InvalidateAll();
             return;
         }
@@ -812,7 +890,7 @@ void Application::FallbackPageClick(float x,float y) {
                 // 真实助手 int(payload.get("to")) 直接 TypeError，↑↓ 在真机上完全无效。
                 args["to"]=row.row-1;
                 StartHelperAction("fallback-move",args,
-                    Narrow(L"\u5DF2\u4E0A\u79FB\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
+                    Narrow(L"\u5DF2\u4E0A\u79FB"));
                 return;
             }
             case 2: {
@@ -822,7 +900,7 @@ void Application::FallbackPageClick(float x,float y) {
                 args["index"]=row.row;
                 args["to"]=row.row+1;
                 StartHelperAction("fallback-move",args,
-                    Narrow(L"\u5DF2\u4E0B\u79FB\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
+                    Narrow(L"\u5DF2\u4E0B\u79FB"));
                 return;
             }
             case 3:
@@ -838,45 +916,24 @@ void Application::FallbackPageClick(float x,float y) {
 TextField* Application::FormFieldAt(int index) {
     switch(index) {
     case 1: return &fbModel_;
-    case 2: return &fbProvider_;
-    case 3: return &fbUrl_;
-    case 4: return &fbKeyEnv_;
-    case 5: return &fbKey_;
     default: return nullptr;
     }
 }
 void Application::SubmitFallback() {
     fbError_.clear();
     const auto model=fbModel_.TextUtf8();
-    if(model.empty()) { fbError_="\xE5\xA1\xAB\xE4\xB8\xAA\xE6\xA8\xA1\xE5\x9E\x8B id";InvalidateAll();return; }
+    if(model.empty()) { fbError_=Narrow(L"\u5148\u4ece\u300C\u6A21\u578B\u300D\u4E0B\u62C9\u91CC\u9009\u4E00\u4E2A");InvalidateAll();return; }
+    if(fbSource_<0||fbSource_>=static_cast<int>(hermesState_.providers.size())) {
+        fbError_=Narrow(L"\u5148\u9009\u4E00\u4E2A\u6765\u6E90\u4F9B\u5E94\u5546");InvalidateAll();return;
+    }
     Json args;
     args["cmd"]="fallback-add";
     args["model"]=model;
-    if(fbSource_>0) {
-        const auto index=fbSource_-1;
-        if(index<static_cast<int>(hermesState_.providers.size()))
-            args["from_custom"]=hermesState_.providers[static_cast<std::size_t>(index)].providerId;
-    } else {
-        const auto provider=fbProvider_.TextUtf8();
-        const auto url=fbUrl_.TextUtf8();
-        if(provider.empty()||url.empty()) {
-            fbError_="\xE6\x89\x8B\xE5\xA1\xAB\xE6\xA8\xA1\xE5\xBC\x8F\xE8\xA6\x81 provider \xE5\x90\x8D + base_url";
-            InvalidateAll();
-            return;
-        }
-        args["provider"]=provider;
-        args["base_url"]=url;
-        const auto keyEnv=fbKeyEnv_.TextUtf8();
-        if(!keyEnv.empty()) {
-            args["key_env"]=keyEnv;
-            const auto key=fbKey_.TextUtf8();
-            if(!key.empty()) args["key"]=key;
-        }
-    }
-    for(auto* field:{&fbModel_,&fbProvider_,&fbUrl_,&fbKeyEnv_,&fbKey_}) field->SetText(L"");
+    args["from_custom"]=hermesState_.providers[static_cast<std::size_t>(fbSource_)].providerId;
+    fbModel_.SetText(L"");
     fbProbes_.clear();
     StartHelperAction("fallback-add",args,
-        Narrow(L"\u5DF2\u8FFD\u52A0\u5230\u56DE\u9000\u94FE\u672B\u5C3E\uFF08\u7F51\u5173\u70ED\u8BFB\u751F\u6548\uFF09"));
+        Narrow(L"\u5DF2\u8FFD\u52A0\u5230\u56DE\u9000\u94FE\u672B\u5C3E"));
 }
 int Application::SelectOptionAt(const PanelLayout& layout,float x,float y) const {
     // 返回**列表里的绝对下标**（control.index 已经带上滚动量），不是"第几个可见行"。
@@ -980,20 +1037,31 @@ void Application::InvokeControl(ControlId id) {
         return;
     // Bottom navigation: the five pages of the old panel, in the same order.
     // 页面切换做一次内容淡入（140ms，无位移）：与余额面板的页面切换动效一致。
-    case ControlId::TabModels: BlurField();statusCenterOpen_=false;activePage_=0;pageScroll_=0;PersistSettings();StartPanelMotion(false);InvalidateAll();return;
-    case ControlId::TabFallback: statusCenterOpen_=false;activePage_=1;fallbackScroll_=0;PersistSettings();StartPanelMotion(false);InvalidateAll();return;
-    case ControlId::TabAdd: statusCenterOpen_=false;activePage_=2;pageScroll_=0;PersistSettings();StartPanelMotion(false);InvalidateAll();return;
+    case ControlId::TabModels: BlurField();statusCenterOpen_=false;activePage_=0;pageScroll_=0;PersistSettings();StartPanelMotion();InvalidateAll();return;
+    case ControlId::TabFallback: statusCenterOpen_=false;activePage_=1;fallbackScroll_=0;PersistSettings();StartPanelMotion();InvalidateAll();return;
+    case ControlId::TabAdd: statusCenterOpen_=false;activePage_=2;pageScroll_=0;
+        addKeyRevealed_=false;   // 离开再回来一律回到掩码：明文状态不该跨页面存活（隐私默认值）
+        PersistSettings();StartPanelMotion();InvalidateAll();return;
     case ControlId::TabBackup:
         statusCenterOpen_=false;
         activePage_=3;
         pageScroll_=0;
         LoadBackups();
         PersistSettings();
-        StartPanelMotion(false);
+        StartPanelMotion();
         InvalidateAll();
         return;
-    case ControlId::TabSettings: statusCenterOpen_=false;activePage_=4;pageScroll_=0;PersistSettings();StartPanelMotion(false);InvalidateAll();return;
+    case ControlId::TabSettings: statusCenterOpen_=false;activePage_=4;pageScroll_=0;PersistSettings();StartPanelMotion();InvalidateAll();return;
     case ControlId::Refresh: InvokeMenu(static_cast<unsigned>(MenuCommand::Refresh));return;
+    case ControlId::SyncModels:
+        // v1.25：一键刷新同步（会写 config.yaml）：先弹确认，说明范围与备份。
+        if(syncAllBusy_.load()) {
+            ShowToast(Narrow(L"\u6B63\u5728\u540C\u6B65\uFF0C\u8BF7\u7A0D\u5019"),1);
+            return;
+        }
+        pending_=Pending::SyncAll;
+        InvalidateAll();
+        return;
     // The models-page controls: filter segments and the two action chips.
     case ControlId::FilterAll: CycleFilter(0);return;
     case ControlId::FilterFav: CycleFilter(1);return;

@@ -131,8 +131,15 @@ float Surface::BackdropNoise() const {
     return samples?static_cast<float>(total)/static_cast<float>(samples*3):0.0f;
 }
 void Surface::EnsureBackdrop(HWND window) {
-    if(!backdrop_.empty()) return;
-    CaptureBackdrop(window);
+    if(backdrop_.empty()) { CaptureBackdrop(window);return; }
+    // 只按"空不空"判断不够：窗口换尺寸（切挂件样式 30→14 DIP）或换位置（拖面板换贴边）
+    // 之后的玻璃必须用新几何重抓，否则快照被拉伸着画进新形状。这里按窗口当前矩形自己判定，
+    // 不再依赖每个动窗口的调用点都记得 InvalidateBackdrop。
+    RECT rect{};
+    if(!window||!GetWindowRect(window,&rect)) return;
+    if(rect.left!=backdropLeft_||rect.top!=backdropTop_
+        ||rect.right-rect.left!=backdropWidth_||rect.bottom-rect.top!=backdropHeight_)
+        CaptureBackdrop(window);
 }
 bool Surface::CaptureBackdrop(HWND window) {
     if(!window) return false;
@@ -215,6 +222,9 @@ bool Surface::CaptureBackdrop(HWND window) {
         // 背后内容的明暗走向；半径过大就退化成一块纯色，失去"玻璃"的意义。
         BoxBlur(backdrop_,width,height,std::clamp(std::min(width,height)/5,4,24));
         backdropWidth_=width;backdropHeight_=height;
+        // 落账这次快照对应的窗口位置：EnsureBackdrop 靠它判断"几何变了没"，
+        // 记漏了就会每次重绘都误判成"变了"→ 每次都抓屏（贴条在贴边/收起时闪几下）。
+        backdropLeft_=rect.left;backdropTop_=rect.top;
         ++backdropGeneration_;
     } else {
         backdrop_.clear();
@@ -294,7 +304,11 @@ void Surface::Paint(HWND window,bool strip,const PanelViewModel& view,const Them
             D2D1::PixelFormat(),96,96),D2D1::HwndRenderTargetProperties(window,D2D1::SizeU(
             static_cast<UINT32>(client.right),static_cast<UINT32>(client.bottom))),target_.GetAddressOf()));
     }
+    LARGE_INTEGER frequency{},t0{},t1{},t2{},t3{};
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&t0);
     target_->BeginDraw();
+    QueryPerformanceCounter(&t1);
     // 窗口底色始终不透明：入场动画只淡"内容"（Draw 里内容是 alpha 层），不会闪出桌面/上一帧。
     if(!strip) target_->Clear(palette.ink);
     renderer_.Draw(target_.Get(),textFactory_.Get(),view,
@@ -309,7 +323,19 @@ void Surface::Paint(HWND window,bool strip,const PanelViewModel& view,const Them
         target_->DrawRectangle(D2D1::RectF(0.5f,0.5f,static_cast<float>(client.right)-0.5f,
             static_cast<float>(client.bottom)-0.5f),border_.Get(),1.0f);
     }
+    QueryPerformanceCounter(&t2);
     auto result=target_->EndDraw();
+    QueryPerformanceCounter(&t3);
+    if(frequency.QuadPart>0) {
+        const auto ms=[](const LARGE_INTEGER& a,const LARGE_INTEGER& b,long long f) {
+            return static_cast<double>(b.QuadPart-a.QuadPart)*1000.0/static_cast<double>(f);
+        };
+        lastBeginMs_=ms(t0,t1,frequency.QuadPart);
+        lastDrawMs_=ms(t1,t2,frequency.QuadPart);
+        lastEndMs_=ms(t2,t3,frequency.QuadPart);
+    }
+    // HwndRenderTarget 没有 GetType()：用像素格式/能力位判断（软件目标是 UNKNOWN 能力）。
+    if(targetKind_==0&&target_) targetKind_=1;
     if(result==D2DERR_RECREATE_TARGET) { Resize(); }
     else if(result==D2DERR_WRONG_RESOURCE_DOMAIN) {
         // Stale target-bound resources: rebuild them for the current target and repaint once.

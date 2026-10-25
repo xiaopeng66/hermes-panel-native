@@ -32,7 +32,7 @@ constexpr float kHeroLamp=8.0f,kHeroLampRing=3.0f,kHeroLampGlow=13.0f,kDefaultHu
 // --- list row and global radius (--row / --r), hairline stops (--hx-hair)
 constexpr float kRowHeight=31.0f,kRadius=9.0f,kHairFadeStart=0.14f,kHairFadeEnd=0.86f;
 // --- 列表：.group-head 30 / .mrow --row 31 / .sect / .empty；行内 .star 22、.pill 15、.pcol 86
-constexpr float kGroupHeadHeight=30.0f,kGroupHeadPadX=11.0f,kGroupHeadGap=7.0f,kCaretBox=14.0f,
+constexpr float kGroupHeadPadX=11.0f,kGroupHeadGap=7.0f,kCaretBox=14.0f,
     kGroupDot=6.0f,kGroupDotRadius=2.0f,kMenuButtonSize=20.0f,kMenuIcon=12.0f,kMenuIdleOpacity=0.45f;
 constexpr float kRowPadLeft=31.0f,kRowPadRight=9.0f,kRowGap=8.0f,kPcolWidth=86.0f,kPcolFont=10.5f,
     kRowModelFont=11.5f,kStarBox=22.0f,kStarGlyph=12.0f,kStarIdleOpacity=0.0f,kStarHoverOpacity=0.6f;
@@ -40,7 +40,6 @@ constexpr float kPillHeight=15.0f,kPillRadius=999.0f,kPillPadX=6.0f,kPillFont=9.
 constexpr float kCountPillHeight=15.0f,kCountPillRadius=4.0f,kCountPillPadX=4.5f;
 constexpr float kGroupNameFont=12.0f,kGroupCountFont=9.5f,kSectFont=10.5f,kEmptyFont=11.5f;
 constexpr float kScrollBarWidth=6.0f,kScrollBarHoverWidth=8.0f,kListFade=16.0f;
-constexpr float kBannerHeight=2.0f;              // body.busy .app::before sweep bar
 
 // Interaction states (PLAN §4). The stylesheet only styles :hover and [disabled]; a pressed button
 // keeps its normal look (no scale-down) - the old panel had no :active rule either.

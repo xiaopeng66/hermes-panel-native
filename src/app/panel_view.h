@@ -52,21 +52,24 @@ struct FallbackPageInput {
     const HermesState* state=nullptr;
     bool formOpen=false;                           // 追加表单（页内浮层卡片）
     bool selectOpen=false;                         // 来源供应商下拉是否展开
-    std::string model,provider,baseUrl,keyEnv,key; // 表单字段（未展开的字段留空）
-    int source=0;                                  // 下拉选中：0 = 手填，>0 = providers[source-1]
+    std::string model;                             // 模型下拉的值
+    int source=0;                                  // 下拉选中：直接是 providers 的下标（v1.25 起无手填项）
     int sourceScroll=0;                            // 下拉列表滚动量（选项多于可视行数时）
-    int cursorField=-1;                            // 表单里获得焦点的字段（0 模型 / 1 provider / 2 url / 3 keyenv / 4 key）
+    bool modelSelectOpen=false;                    // v1.16：模型 ▾ 展开
+    std::vector<std::string> modelOptions;         // v1.16：模型 ▾ 候选（一键探测缓存 → 供应商 models）
     std::string error;                             // 表单错误行（旧 #fb-err）
     bool busy=false;                               // 追加/探测进行中
 };
 struct FallbackPageView {
     std::vector<FallbackRowView> rows;
     std::string title,subtitle,probeLabel,addLabel,emptyText,note,buttonLabel,error;
-    std::string modelValue,providerValue,urlValue,keyEnvValue,keyValue;   // 表单里已经打进去的字
+    std::string modelValue;   // 模型下拉的选中项
     bool formOpen=false,selectOpen=false,busy=false;
     bool probeRunning=false;                       // 逐条探测进行中：按钮文案显示进度并禁用重复触发
     int source=0,sourceScroll=0;
     std::vector<std::string> sources;              // 下拉选项，首项是「— 手填 provider + base_url —」
+    bool modelSelectOpen=false;                    // v1.16：模型 ▾ 展开态
+    std::vector<std::string> modelOptions;         // v1.16：模型 ▾ 选项（空 = 还没探测）
 };
 // 一个可编辑的表单字段（新建供应商 / 加模型 / 删除 / 设置共用）：标签 + 值 + 提示 + 右侧小字。
 struct FormFieldView {
@@ -85,8 +88,10 @@ struct AddPageView {
     std::vector<FormFieldView> fields;
     std::vector<std::string> providers;            // 下拉里的供应商名（加模型用）
     int provider=0,providerScroll=0;
-    struct ChipRef { std::string model; };         // 探测回来的模型药丸（点一下移除）
+    struct ChipRef { std::string model;bool selected=true; };   // 模型列表的一行（点一下切换选中）
     std::vector<ChipRef> chips;
+    int modelScroll=0;                             // 列表滚动量（首行下标）
+    int hoverIndex=-1;                             // 悬停的列表行号
     struct SwitchRow { std::string label;bool on=false;int index=-1; };
     std::vector<SwitchRow> switches;
     std::vector<FilterSeg> modes;                  // api_mode 分段（chat_completions / codex_responses）
@@ -135,7 +140,6 @@ struct ModalView {
     // F5 配置档案管理：每个档案一行（名称 + 摘要），行尾是可点的「应用 / 删除」。
     struct ProfileRow { std::string name,detail; };
     std::vector<ProfileRow> profiles;
-    bool scrimCloses=false;            // 只有少数弹层允许点遮罩关闭
 };
 // Toast（DESIGN §4.8 #34）：显示 2.6s，条内文案 + ok/err 边框色。
 struct ToastView { int kind=0;std::string text; };   // 0 普通 / 1 ok / 2 err
@@ -206,10 +210,9 @@ struct PanelViewModel {
     float busySweep=0.0f;               // 顶部不定进度条的流动相位（度，0..720 循环）
     bool syncCheck=false;
     // G1 贴边挂件：样式、贴边方向与动画相位（收起态绘制用）。
-    std::string widgetStyle="beacon";
+    std::string widgetStyle="capsule";   // 只剩铭牌/胶囊两套（设置层会给出真实值）
     int widgetEdge=0;                  // 0 none / 1 left / 2 right / 3 top / 4 bottom
     bool widgetVertical=true;
-    float widgetPhase=0.0f;
     // 键盘焦点环（审计 F-010）：focusControl 为 ControlId 的整数值，0 = 无焦点。
     int focusControl=0;
     int focusIndex=-1;
@@ -257,6 +260,9 @@ struct PanelViewModel {
     std::string listEmpty;             // the old .empty texts
     int matches=0;
     bool searchHasText=false;          // the search box has text: the clear button shows, the / kbd hides
+    // 「刷新同步」进行中的反馈：以前点了只有顶部忙碌条在动、按钮毫无变化，用户以为"卡住了"。
+    bool syncBusy=false;
+    int syncDone=0,syncTotal=0;        // 进度 n/N（同步是逐供应商串行/并行的）
     std::string helperError;           // 助手最近一次错误（列表空态优先显示它）
     // The visible rows in draw order: the ↑↓ cursor and ↵ walk this list, so a collapsed group's rows
     // are not reachable (the old panel only ever put rendered .mrow elements in its cursor sequence).
@@ -272,7 +278,10 @@ struct PanelViewModel {
     float pageScroll=0;                // 添加/备份/设置页的正文滚动偏移（旧 clamp 后整页滚动）
     float modalScrollX=0;              // F2/F3 模态事实行的横向滚动偏移（长行不再被省略号吃掉）
     float fallbackScroll=0;            // 回退链阶梯的内部滚动偏移（条目多时）
-    int focusedFormField=-1;           // 当前获得焦点的表单字段序号（只影响输入框的光晕）
+    int focusedFormField=-1;           // 当前获得焦点的表单字段序号（光晕 + 插入符）
+    int focusedFormCaret=-1;           // 插入符在字段文本里的位置（UTF-16）；-1 = 不画
+    bool focusedFormMultiline=false;   // 多行字段：插入符按行/列定位
+    bool focusedFormNative=false;      // v1.23：该字段由原生 EDIT 承载（不画自绘插入符）
     // ---- 模态与 Toast：两者都是"整块浮层"，任何页面都能有 ----
     ModalView modal;
     ToastView toast;
@@ -282,6 +291,7 @@ struct PanelViewModel {
     BackupPageView backup;
     SettingsPageView settings;
     int hoverControl=0;
+    int hoverIndex=-1;      // 悬停控件的行号（模型列表这类重复控件）
     bool pinned=true;
     // Pointer position in DIP inside the panel window (for list hover: rows, group heads, stars). The
     // renderer and the click handler share one hit test, so hover and click can never disagree.
@@ -293,6 +303,7 @@ struct PanelViewInput {
     bool lightTheme=false;
     int activePage=0;
     int hoverControl=0;
+    int hoverIndex=-1;
     bool pinned=true;
     MotionView motion;                 // 动效状态（外壳按计时器算好传进来，纯视图层不碰时钟）
 };
@@ -329,23 +340,25 @@ void AttachFallbackPage(PanelViewModel& view,const FallbackPageInput& input);
 void AttachAddPage(PanelViewModel& view,const AddPageView& page);
 void AttachBackupPage(PanelViewModel& view,const BackupPageView& page);
 void AttachSettingsPage(PanelViewModel& view,const SettingsPageView& page);
-// 添加页的输入（三子表单的字段值、开关、模型药丸、错误行）。
+// 添加页的输入（两子表单的字段值、开关、模型药丸、错误行；v1.18 起「加模型」子页删除）。
 struct AddPageInput {
     const HermesState* state=nullptr;
-    int sub=0;
+    int sub=0;                                      // 0 新建供应商 / 1 删除供应商
     int mode=0;
-    std::string name,keyEnv,url,key,modelsText;     // 新建供应商的字段
-    std::string modelsNew;                          // 新建供应商页的「模型（每行一个）」多行框
+    std::string name,keyEnv,url,key;                // 新建供应商的字段（keyEnv 只是推导结果的提示）
     bool keyRevealed=false;
-    bool probeBefore=true,setMainAfter=false;       // 两个开关
+    bool setMainAfter=false;                        // 「保存后设为当前模型」
     std::string dangerName;                         // 删除页选中的供应商名（下拉选中项）
-    int provider=0;                                 // 加模型页 / 删除页的供应商下拉
+    int provider=0;                                 // 删除页的供应商下拉
     int providerScroll=0;                           // 下拉列表滚动量（18 个供应商放不进 8 行）
-    bool selectOpen=false;                          // 下拉是否展开（加模型 / 删除两个子页）
+    bool selectOpen=false;                          // 下拉是否展开
     int selectField=0;                              // 展开的是第几个字段（0 = 供应商）
     bool purgeEnv=true,dropFallbacks=false;
     std::string error,info;
-    std::vector<std::string> chips;                 // 探测回来的模型（药丸）
+    std::vector<std::string> chips;                 // 模型列表（探测结果 + 手动添加）
+    std::vector<bool> chipSelected;                 // 与 chips 平行：这一行会不会写入配置
+    int modelScroll=0;                              // 模型列表滚动量（首行下标）
+    int hoverIndex=-1;                              // 悬停的列表行号（视图用来高亮）
     bool busy=false;
 };
 void AttachAddPage(PanelViewModel& view,const AddPageInput& input);
@@ -368,7 +381,7 @@ struct SettingsPageInput {
     bool previewDiff=false,autoReloadGateway=false,alwaysOnTop=false;
     bool latencyProbe=false;                        // F4：延迟探测开关
     int latencyMinutes=5;                           // F4：5/15/60
-    std::string widgetStyle="beacon";               // G11：贴边挂件样式
+    std::string widgetStyle="capsule";   // 只剩铭牌/胶囊两套（设置层会给出真实值）               // G11：贴边挂件样式
     bool hotkeyCapturing=false;                     // 热键输入框在"按组合键"状态
     bool hotkeyRegistered=true;                     // 注册是否成功（失败时设置页给出原因）
     int hotkeyError=0;                              // Win32 错误码（1409 = 已被占用）

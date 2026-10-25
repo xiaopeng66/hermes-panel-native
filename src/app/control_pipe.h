@@ -22,8 +22,6 @@ public:
     unsigned Requests() const { return requests_; }
 private:
     void Serve();
-    HWND owner_=nullptr;
-    UINT message_=0;
     HANDLE stopEvent_=nullptr;
     std::wstring name_;
     Handler handler_;

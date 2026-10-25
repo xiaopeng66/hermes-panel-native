@@ -21,6 +21,13 @@ void WaitMotionDone(harness::Client& client,const char* key,const char* name) {
     }
     throw std::runtime_error(std::string(name)+" motion did not finish");
 }
+Json Controls(harness::Client& client) { return client.Request({{"command","controls"}}); }
+void TapScreen(harness::Client& client,const Json& rect) {
+    // 合成点击（窗口消息）走真实窗口过程与命中测试，和 h-controls 同一手法。
+    client.Request({{"command","tap"},
+        {"x",rect["x"].get<int>()+rect["width"].get<int>()/2},
+        {"y",rect["y"].get<int>()+rect["height"].get<int>()/2},{"screen",true}});
+}
 void WaitTimerIdle(harness::Client& client,const char* name) {
     // 同一个 16ms 计时器服务所有动画：一个动画刚结束的那一帧，另一个可能还在跑
     // （真实光标停在面板上会带出 hover 过渡）。断言"最终会停"，而不是"此刻已停"。
@@ -45,12 +52,18 @@ int wmain(int argc,wchar_t** argv) {
     try {
         harness::Require(WaitForInputIdle(child.hProcess,4000)==0,"app not ready");
         harness::Client client(id);
-        auto snapshot=Dump(client);
+        // 就绪等待：原生输入框让启动变快，第一帧 dump 可能早于状态初始化（批量跑时偶发）。
+        Json snapshot=Dump(client);
+        for(int attempt=0;attempt<40&&snapshot.value("state",0)==0;++attempt) {
+            Sleep(50);
+            snapshot=Dump(client);
+        }
         harness::Require(snapshot["state"]==1,"expected floating start");
         harness::Require(snapshot["motion"]["enabled"].get<bool>()==false,
             "the harness must start in deterministic (no-animation) mode");
 
-        // 1) 隐藏 → 显示：面板从 Hidden 出现时走入场动效（alpha 0→1 + 8 DIP 上滑）。
+        // 1) 隐藏 → 显示：确定性模式下不许有任何动效残留（展开入场已按用户要求移除，见 DESIGN v1.11；
+        //    这条断言在新契约下同样成立：没有动画就没有 start、也没有计时器）。
         client.Request({{"command","hide"}});
         harness::Require(Dump(client)["state"]==0,"hide did not reach Hidden");
         snapshot=client.Request({{"command","show"}});
@@ -63,17 +76,40 @@ int wmain(int argc,wchar_t** argv) {
         harness::Require(snapshot["motion"]["timer"].get<bool>()==false,
             "animations=false still armed the motion timer");
 
-        // 2) 打开动效后，show 必须启动入场，并在 140ms 后由 MotionTick 收尾。
+        // 2) 打开动效后：show/展开**不再启动任何面板动效**（用户要求"展开不要动画和效果了"，
+        //    DESIGN v1.11）——没有 motion start、也没有 16ms 运动定时器被武装。
+        //    断言按新契约重写（旧断言"show 必须启动入场"编码的是已被删除的契约），理由即本条。
         client.Request({{"command","configure"},{"animations",true}});
         client.Request({{"command","hide"}});
         snapshot=client.Request({{"command","show"}});
         harness::Require(snapshot["motion"]["enabled"].get<bool>()==true,"animations were not enabled");
-        harness::Require(snapshot["motion"]["panelStart"].get<unsigned long long>()!=0,
-            "panel entrance did not start on show");
-        harness::Require(snapshot["motion"]["timer"].get<bool>()==true,
-            "panel entrance did not arm the 16ms motion timer");
-        WaitMotionDone(client,"panelStart","panel entrance");
-        WaitTimerIdle(client,"panel entrance");
+        harness::Require(snapshot["motion"]["panelStart"].get<unsigned long long>()==0,
+            "showing the panel started a panel motion (the expand entrance was removed on request)");
+        harness::Require(snapshot["motion"]["timer"].get<bool>()==false,
+            "showing the panel armed the motion timer (nothing should animate)");
+        // 仍然保留的动效：**切页的内容淡入**（同一个 140ms 通道）。点一个 tab 必须启动它并由 MotionTick 收尾。
+        TapScreen(client,Controls(client)["tabFallback"]);
+        harness::Require(Dump(client)["activePage"].get<int>()==1,"tapping the fallback tab did not switch page");
+        harness::Require(Motion(client,"panelStart")!=0,
+            "switching pages no longer starts the content fade-in");
+        WaitMotionDone(client,"panelStart","content fade-in");
+        WaitTimerIdle(client,"content fade-in");
+        TapScreen(client,Controls(client)["tabModels"]);
+        Sleep(200);
+
+        // v1.28：状态没变时不再整窗重绘。夹具状态固定，等一轮刷新（interval 已设 1s）后
+        // 帧数不应继续增长——这是"空闲不烧 CPU/不抢消息循环"的可测代理。
+        {
+            client.Request({{"command","configure"},{"interval",1}});
+            Sleep(300);
+            const auto before=client.Request({{"command","dump"}})["paintFrames"].get<unsigned long long>();
+            Sleep(1600);   // 至少一次轮询
+            const auto after=client.Request({{"command","dump"}})["paintFrames"].get<unsigned long long>();
+            harness::Require(after<=before+2,
+                ("an unchanged poll must not repaint the whole panel ("+std::to_string(before)
+                    +" -> "+std::to_string(after)+")").c_str());
+            client.Request({{"command","configure"},{"interval",0}});
+        }
 
         // 3) 贴边收起：贴条淡入（110ms）。
         client.Request({{"command","menu"},{"id",1002}});   // MenuCommand::Dock
@@ -134,17 +170,19 @@ int wmain(int argc,wchar_t** argv) {
         harness::Require(lit["ink"].get<int>()!=back["ink"].get<int>(),
             "light and dark palettes are indistinguishable");
 
-        // 6) 贴条点击展开：面板入场从收起方向也必须启动。
+        // 6) 贴条点击展开：展开方向同样**没有任何面板动效**（DESIGN v1.11）——
+        //    这正是用户看到"内容位移/抖动"的那条路径，现在应当一步到位。
         client.Request({{"command","place"},{"state",4},{"edge",1},{"anchor",400}});
         Sleep(250);
         snapshot=client.Request({{"command","strip-tap"}});
         harness::Require(snapshot["state"]==3,"strip-tap did not expand the panel");
-        harness::Require(snapshot["motion"]["panelStart"].get<unsigned long long>()!=0,
-            "panel entrance did not start when expanding from the strip");
-        WaitMotionDone(client,"panelStart","panel entrance from strip");
+        harness::Require(snapshot["motion"]["panelStart"].get<unsigned long long>()==0,
+            "expanding from the strip started a panel motion (the expand entrance was removed on request)");
+        harness::Require(snapshot["motion"]["timer"].get<bool>()==false,
+            "expanding from the strip armed the motion timer (nothing should animate)");
 
-        std::cout<<"PASS motion: show/expand entrance, strip fade, card enter/exit, theme crossfade, "
-            "timer stops, animations=false is deterministic\n";
+        std::cout<<"PASS motion: no entrance on show/expand (removed on request), page-switch fade, "
+            "strip fade, card enter/exit, theme crossfade, timer stops, animations=false is deterministic\n";
         status=0;
     } catch(const std::exception& error) {
         if(harness::IsEnvironmentInterference(error)) {

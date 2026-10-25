@@ -31,6 +31,7 @@ public:
         auto data = value.dump();
         COPYDATASTRUCT copy{1,static_cast<DWORD>(data.size()+1),data.data()};
         reply_ = nullptr;
+        raw_.clear();
         DWORD_PTR result=0;
         if (!SendMessageTimeoutW(control_,WM_COPYDATA,reinterpret_cast<WPARAM>(receiver_),
             reinterpret_cast<LPARAM>(&copy),SMTO_ABORTIFHUNG,5000,&result)) {
@@ -41,7 +42,7 @@ public:
             throw std::runtime_error("control request failed: error "+std::to_string(error)
                 +", targetHung "+std::to_string(hung)+", pid "+std::to_string(pid));
         }
-        if (reply_.is_null()) throw std::runtime_error("control protocol not implemented");
+        if (reply_.is_null()) throw std::runtime_error("control protocol not implemented (control="+std::to_string(reinterpret_cast<std::uintptr_t>(control_))+" receiver="+std::to_string(reinterpret_cast<std::uintptr_t>(receiver_))+" raw=\""+raw_+"\")");
         if (reply_.contains("error")) throw std::runtime_error(reply_["error"].get<std::string>());
         return reply_;
     }
@@ -54,7 +55,11 @@ private:
         }
         if(message==WM_COPYDATA && self) {
             const auto* copy=reinterpret_cast<COPYDATASTRUCT*>(lparam);
-            self->reply_=Json::parse(static_cast<const char*>(copy->lpData),static_cast<const char*>(copy->lpData)+copy->cbData-1);
+            self->raw_.assign(copy->lpData?static_cast<const char*>(copy->lpData):"",
+                copy->cbData>1?copy->cbData-1:0);
+            try {
+                self->reply_=Json::parse(self->raw_);
+            } catch(...) { self->reply_=nullptr; }
             return 1;
         }
         return DefWindowProcW(window,message,wparam,lparam);
@@ -62,6 +67,7 @@ private:
     HWND control_=nullptr;
     HWND receiver_=nullptr;
     Json reply_;
+    std::string raw_;
 };
 // Every test runs the application against its own data directory: the shell persists its state, so a
 // shared directory would leak one scenario's docking into the next (and would touch real user data).
@@ -72,11 +78,15 @@ inline std::wstring NoLegacyDirectory(const std::wstring& instance) {
     return IsolatedDataDir(instance)+L"/no-legacy";
 }
 inline std::wstring AppCommandLine(const std::wstring& app,const std::wstring& instance,
-    const std::wstring& legacyDirectory=std::wstring{}) {
+    const std::wstring& legacyDirectory=std::wstring{},
+    const std::wstring& dataDirectory=std::wstring{}) {
     // Paths are normalised here once: CreateProcessW wants backslashes, and CMake hands us forward
     // slashes when the project was configured from a POSIX-style path.
+    // 设置目录按「进程 id + 启动时刻」唯一：实例名里的 pid 会被系统复用，上一轮用例改过的设置
+    // （previewDiff / autoReloadGateway 等）会漏进下一轮，表现为"同一个用例时绿时红"。
+    const auto runDir=dataDirectory.empty()?IsolatedDataDir(instance):dataDirectory;
     std::wstring command=L"\"" + NativePath(app) + L"\" --instance " + instance + L" --data-dir \"" +
-        NativePath(IsolatedDataDir(instance)) + L"\"";
+        NativePath(runDir) + L"\"";
     // 旧设置目录：**默认指到隔离目录里的一个不存在的路径**，这样门禁永远不会读到用户真实的
     // %APPDATA%\HermesModelPanel（读取只读，但会让断言依赖用户数据）。只有 h-migrate 才显式传夹具目录。
     const auto& legacy=legacyDirectory.empty()?NoLegacyDirectory(instance):legacyDirectory;

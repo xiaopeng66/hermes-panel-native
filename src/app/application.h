@@ -1,4 +1,7 @@
 #pragma once
+#include "ui/busy_bar.h"
+#include "ui/spin_glyph.h"
+#include "ui/native_field.h"
 #include <windows.h>
 #include <json.hpp>
 #include <atomic>
@@ -6,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <map>
+#include <mutex>
 #include <vector>
 #include "core/geometry_controller.h"
 #include "core/state.h"
@@ -32,9 +37,9 @@ const std::vector<MenuEntry>& MenuEntries();
 
 enum class MenuCommand : unsigned {
     ToggleVisibility=1001,Dock=1002,Undock=1003,
-    Refresh=1004,OpenWebUI=1005,RestartGateway=1006,CompactView=1007,AlwaysOnTop=1008,
+    Refresh=1004,OpenWebUI=1005,RestartGateway=1006,AlwaysOnTop=1008,
     Poll30=1009,Poll60=1010,Poll120=1011,Poll300=1012,
-    AutoStart=1013,OpenDataDir=1014,Quit=1099,
+    AutoStart=1013,OpenDataDir=1014,ProbeAllModels=1015,Quit=1099,
     CurrentInfo=1031,About=1032,RestartWebUi=1033,
     SwitchHeader=1030,SwitchBase=1100,      // 托盘「切换到」子菜单：1100 + 条目下标
     ThemeDark=1020,ThemeLight=1021,ThemeSystem=1022,ThemeSlate=1025,ThemeCarbon=1026,
@@ -72,6 +77,11 @@ public:
     // 控制窗口（托盘/热键）里的动作不在面板 WindowProc 的 catch 范围内：这里统一收尾，
     // 记日志后正常关闭，绝不让异常穿出 DispatchMessage 变成无提示崩溃。
     void ReportControlFailure(const std::exception& error);
+    // ---- Explorer 重启（TaskbarCreated）----
+    // 系统把这条广播发给所有顶层窗口；消息循环宿主是 message-only 的 control 窗口，
+    // 所以必须由 ControlProc 转进来（面板/贴条的 WindowMessage 收不到）。
+    UINT TaskbarCreatedMessage() const { return taskbarCreated_; }
+    void ReAddTrayAfterExplorerRestart();
 private:
     struct WindowContext { Application* owner;bool strip;bool card;Surface surface; };
     static LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam);
@@ -83,7 +93,6 @@ private:
     HMENU BuildMenu() const;
     void InvokeMenu(unsigned id);
     bool RegisterHotkeys();
-    void SetTier(Tier tier);
     void SetTopmost(bool topmost);
     void InvokeControl(ControlId id);
     void TrackHover(HWND window,float x,float y);
@@ -119,7 +128,7 @@ private:
     // 跟随系统「显示动画」开关（SPI_GETCLIENTAREAANIMATION，1 秒缓存）。
     bool AnimationsEnabled() const;
     void KeepMotionTimer();
-    void StartPanelMotion(bool enter);
+    void StartPanelMotion();
     void StartCardMotion();
     void StartStripMotion();
     void StartTooltipMotion();
@@ -136,7 +145,6 @@ private:
     unsigned long long stripDragRenderTick_=0; // 拖动重绘节流（位置逐条跟手，重绘 ~20Hz）
     float lastDragDocked_=-2.0f;
     int lastDragEdge_=-1;
-    bool panelMotionEnter_=true;
     int hoverPrevious_=0;
     bool motionTimer_=false;
     mutable bool animCacheValid_=false;
@@ -159,7 +167,6 @@ private:
     LRESULT HitTest(POINT screen);
     void ApplyState(const char* reason,State previous);
     Json Dump() const;
-    HINSTANCE instance_=nullptr;
     HWND control_=nullptr;
     HWND panel_=nullptr;
     HWND strip_=nullptr;
@@ -241,7 +248,6 @@ private:
     bool caretOn_=false;
     // ---- H4 the models page: the helper state, its poll, and the switch path.
     HermesState hermesState_;      // helper state (distinct from state_, the shell state machine)
-    HelperBridge helper_;
     std::string stateSignature_;
     int filterKind_=0;                     // 0 all / 1 fav / 2 recent
     std::string switchingKey_,switchingModel_;
@@ -255,7 +261,6 @@ private:
     // 页内滚动条（设置/添加/备份）：拖动拇指或点轨道，与列表滚动条同语义。
     bool pageScrollDrag_=false;
     float pageScrollGrabOffset_=0;
-    long long hotLoadedMtime_=0;           // settings.hotLoadedMtime leave-behind for gatewayHint
     // The helper is slow (WSL start-up + python) so reads and writes run on a worker thread; the result
     // comes back through a posted message and is applied on the UI thread. One job at a time, exactly
     // like the old panel's single-flight refresh.
@@ -267,7 +272,10 @@ private:
     };
     struct BackupRow { std::string file,kind,stamp;int sizeKb=0; };
     // 逐条探测的单行结果：每测完一条就投递一次（真机反馈：不能等整条链测完才显示）。
-    struct ProbeRow { int index=0;FallbackProbe probe; };
+    // generation：这一行结果属于第几轮逐条探测。上一轮的迟到结果绝不能覆盖新一轮（真机/门禁
+    // 都出现过"探测完是琥珀，过一会儿自己变回绿色"）。
+    struct ProbeRow { int index=0;int generation=0;FallbackProbe probe; };
+    int probeGeneration_=0;
     struct DataResult {
         HermesState state;
         bool switched=false;
@@ -275,6 +283,7 @@ private:
         // H5: a page write (fallback-add / fallback-remove / …) carries the toast it wants shown; a probe
         // run carries one entry per fallback row.
         bool write=false;
+        int probeGeneration=0;   // 逐条探测的整轮结果属于哪一轮（防止旧轮覆盖新轮）
         std::string verb,toast,error;
         // 助手报错的原因随结果携带（此前轮询线程直写 Application::helperError_，UI 线程读，
         // 是跨线程竞态）。helperErrorValid 只由刷新路径置位：切换/写入结果不带这个语义，
@@ -300,12 +309,34 @@ private:
     std::string helperError_;        // 助手最近一次报错的原因（显示在 chip 与空态里）
     // DESIGN v1.7：UNC 读路径的 mtime/size 缓存（未变化直接复用上次解析，零文件读取）。
     long long uncCacheMtime_=0,uncCacheSize_=0;
-    bool uncCacheValid_=false;
     std::string uncCacheListJson_,uncCacheHealthJson_;
     int pollOverrideSeconds_=0;    // debug control plane `configure`: poll cadence for a measurement run
     int syntheticMods_=0;          // debug `vk mods`: synthetic Ctrl/Alt/Shift state for one keydown
     std::thread worker_;
     std::atomic<bool> workerBusy_{false},stopping_{false};
+    // 起 worker 线程：机器被压满时 CreateThread 会失败，std::thread 于是抛 system_error——
+    // 真机 2026-10-21 的日志就是它在消息循环里冒出来，被 HandleWindowFailure 当成致命错误，
+    // 面板直接退出（"resource unavailable try again" → fatal, closing）。这里只记日志、
+    // 回滚忙碌标志，本轮跳过、下一拍再试，绝不把异常抛给消息循环。
+    template <typename Body>
+    bool SpawnWorker(std::thread& slot,std::atomic<bool>* busy,std::atomic<bool>* extra,bool* flag,
+        Body&& body) {
+        try {
+            slot=std::thread(std::forward<Body>(body));
+            return true;
+        } catch(const std::exception& error) {
+            if(busy) busy->store(false);
+            if(extra) extra->store(false);
+            if(flag) *flag=false;
+            if(log_) log_->Error("data","worker thread could not start: "+std::string(error.what()));
+            // 瞬时资源失败（机器被压满）不静默：告诉用户"没开始、会重试"，下一拍/下次点击再来。
+            // 文案写成纯 ASCII 的 \x 转义（本仓库的约定：源码里不放原生 CJK 字节）。
+            ShowToast(std::string("\xE5\xB7\xA5\xE4\xBD\x9C\xE7\xBA\xBF\xE7\xA8\x8B\xE6\x97\xA0"
+                "\xE6\xB3\x95\xE5\x90\xAF\xE5\x8A\xA8\xEF\xBC\x8C\xE7\xA8\x8D\xE5\x90\x8E\xE8\x87\xAA"
+                "\xE5\x8A\xA8\xE9\x87\x8D\xE8\xAF\x95"),2);
+            return false;
+        }
+    }
     // 逐条探测进度：worker 每完成一条就 PostMessage，UI 线程只读这些原子量，
     // 按钮显示「检测中 n/N」，当前行显示省略号（真机反馈：点了没反应，不知道跑到哪了）。
     std::atomic<bool> probeRunning_{false};
@@ -328,7 +359,8 @@ private:
     void ShowToast(const std::string& text,int kind);
     void UpdateToastTimer();
     void CloseForm();
-    void StartRefresh();
+    // quiet=true：轮询触发（不显示“对勾”，也就不会为了勾而重绘整窗）。
+    void StartRefresh(bool quiet=false);
     void StartSwitch(const std::string& providerId,const std::string& model);
     void StartQueuedSwitch();      // 忙时点下的模型：当前调用落地后再切（审计 F-011）
     void ApplyDataResult(DataResult* result);
@@ -336,6 +368,16 @@ private:
     void UpdatePollTimer();
     // Models-page input: one hit test serves the click handler and the renderer's hover states.
     PanelLayout LayoutForInput() const;
+    // 同一帧已经构建过视图时复用（否则绘制路径一帧要重建两次：一次给绘制、一次在这里）。
+    PanelLayout LayoutForInput(PanelViewModel& view) const;
+    // v1.30：悬停路径专用。鼠标每动一次都重建一次视图（含 60 多条 tooltip 文案）+ 布局，
+    // 但布局只依赖"状态/页/滚动/尺寸/展开态"，指针位置只影响命中结果。缓存后命中即复用。
+    const PanelLayout& HoverLayout();
+    unsigned long long HoverLayoutKey() const;
+    PanelLayout hoverLayout_;
+    unsigned long long hoverLayoutKey_=0;
+    bool hoverLayoutValid_=false;
+    unsigned long long hoverLayoutHits_=0,hoverLayoutMisses_=0;
     void ModelsPageClick(float x,float y);
     void ModelsPageWheel(int delta);
     void ScrollFromThumb(float y);
@@ -349,6 +391,9 @@ private:
     void SwitchModel(const std::string& providerId,const std::string& model);
     void FocusField(TextField* field);
     void BlurField();
+    // 把聚焦字段的控件文本同步回镜像并提交（设置页三个字段的"失焦即写回"）。
+    // 与 BlurField 分开：点击另一个字段时要提交旧的、但不能抢新控件的焦点。
+    void CommitFocusedField();
     bool HandleFieldKey(UINT message,WPARAM wparam,LPARAM lparam);
     void HandleFieldIme(HWND window,UINT message,WPARAM wparam,LPARAM lparam);
     void UpdateCaretTimer();
@@ -359,19 +404,45 @@ private:
     void ActivateFocus();
     void ClearFocus();
     // ---- H5b/H5c 三页：表单字段、开关、备份列表、热键捕获 ----
-    TextField addName_,addKeyEnv_,addUrl_,addKey_,addModels_,addDanger_,addNewModels_;
-    int addSub_=0,addMode_=0,addProvider_=0;
+    TextField addName_,addUrl_,addKey_,addDanger_;
+    // ---- v1.23：原生输入框（用户要求「我要原生输入框」）----
+    // 每个自绘字段对应一个真实 EDIT 子控件：光标定位/拖选/双击/I 形指针/右键菜单/IME/横向滚动
+    // 全部交给系统；自绘层只保留字段外框与标签。TextField 仍作为文本镜像供既有逻辑读取。
+    struct NativeBinding { TextField* field=nullptr;NativeField* edit=nullptr; };
+    std::vector<NativeBinding> nativeBindings_;
+    NativeField* NativeFor(const TextField* field) const;
+    void CreateNativeFields();
+    void SyncNativeFields(const PanelLayout& layout);
+    void HandleNativeFieldEvent(int id,int event);
+    void FocusNativeField(TextField* field);
+    // v1.24：忙碌条是独立子窗口（主面板一帧 200ms，整窗重绘做不到流畅）。
+    // v1.26：跨 DPI 时重建原生输入框的字体（否则换屏后字号不对）。
+    void RefreshNativeFieldMetrics();
+    // 面板当前的绘制倍率所用 DPI（= GetDpiForWindow(panel_)）。布局、命中、原生输入框、
+    // 忙碌条都必须用它，不能读 monitor_.geometry.dpi：拖动跨屏期间后者还是上一个显示器的。
+    UINT WindowDpi() const;
+    void SyncBusyBar(const PanelLayout& layout);
+    BusyBar busyBar_;
+    SpinGlyph spinGlyph_;        // 同步章的旋转图标：独立子窗口，脱离主面板重绘
+    bool spinGlyphShown_=false;
+    int spinPanelTick_=0;        // 同步「n/N」文字的主面板重绘节流计数（2 拍一次）
+    bool busyBarTimerArmed_=false;
+    int addSub_=0,addMode_=0;
     bool addSelectOpen_=false;      // 添加页的供应商下拉（加模型 / 删除）是否展开
     int addSelectField_=0;          // 展开的是第几个字段
     bool settingsSelectOpen_=false; // 设置页「关闭按钮」下拉的展开列表
-    bool addKeyRevealed_=false,addProbeBefore_=true,addSetMainAfter_=false;
+    bool addKeyRevealed_=false,addSetMainAfter_=false;
     bool addPurgeEnv_=true,addDropFallbacks_=false;
     std::string addError_,addInfo_;
-    std::vector<std::string> addChips_;
+    std::vector<std::string> addChips_;         // 模型列表（探测结果 + 手动添加），行顺序即列表顺序
+    std::vector<bool> addChipSelected_;         // 与 addChips_ 平行：这一行是否会被写入配置
+    int addModelScroll_=0;                      // 模型列表的滚动量（首行下标）
+    // v1.18：模型页供应商 ⋯ →「扫描并追加」正在处理哪个供应商（探测结果回来时据此求差并写回）。
+    std::string probeAppendProvider_;
     TextField setDistro_,setWebuiPort_,setPollSec_,setHotkey_;
     bool setHotkeyCapturing_=false;
     int backupFilter_=0;
-    bool backupBusy_=false,backupLoaded_=false;
+    bool backupBusy_=false;
     std::string backupError_;
     std::vector<BackupRow> backups_;
     std::string pendingBackupFile_,pendingBackupKind_;   // 待确认的回滚目标
@@ -383,8 +454,6 @@ private:
     float modalScrollGrab_=0;
     void ScrollModalFrom(float x);
     // G1 贴边挂件动画（声波/光环）：收起态下 120ms 一帧。
-    float widgetPhase_=0.0f;
-    void UpdateWidgetTimer();
     // 拖动中的预览边（0=无）：让胶囊在松手前就按最近边的方向排版/受光。
     int previewEdge_=0;
     // 拖动帧复用上一次的视图：逐帧重建整个 PanelViewModel（含模型列表布局）是纯浪费。
@@ -392,6 +461,10 @@ private:
     // 面板拖动期间复用上一帧视图（拖动中内容不变，重建视图只会拖慢跟手）。
     PanelViewModel panelDragView_;
     bool panelDragViewValid_=false;
+    // 拖动快速路径只在"客户区或窗口 DPI 变了"时重算布局：跨显示器拖动会换 DPI，
+    // 原生输入框/忙碌条必须跟着换倍率（否则占位文字会留在旧位置）。
+    unsigned dragLayoutDpi_=0;
+    LONG dragLayoutWidth_=0,dragLayoutHeight_=0;
     bool stripFlowViewValid_=false;
     bool HitStripShape(POINT client) const;
     // 分层窗口不靠 InvalidateRect/WM_PAINT 出画面：状态/动画变化时直接合成并 UpdateLayeredWindow。
@@ -408,13 +481,15 @@ private:
     TextField* AddFieldAt(int index);
     int FormFieldIndexOf(const TextField* field) const;
     // ---- H5 回退链页：折叠表单的字段、逐条探测的结果、待确认的动作与 Toast ----
-    TextField fbModel_,fbProvider_,fbUrl_,fbKeyEnv_,fbKey_;
+    TextField fbModel_;   // v1.25：回退链只保留「来源 + 模型」两个下拉，模型不再手填
     bool fbFormOpen_=false,fbSelectOpen_=false;
+    bool fbModelSelectOpen_=false;   // v1.16：回退链表单的模型 ▾（与来源供应商下拉互斥）
     int fbSource_=0;
     std::string fbError_;
     std::vector<FallbackProbe> fbProbes_;      // 按回退链条目下标
     enum class Pending { None,RemoveFallback,RestoreBackup,DeleteProvider,ProviderMenu,SwitchModel,
-        DiagnoseInfo,UsageInfo,ProfileMenu,ProfileApplyConfirm,ProfileDeleteConfirm,PreviewWrite };
+        DiagnoseInfo,UsageInfo,ProfileMenu,ProfileApplyConfirm,ProfileDeleteConfirm,PreviewWrite,
+        SyncAll };
     Pending pending_=Pending::None;
     int pendingIndex_=-1;
     std::string pendingProvider_;    // 供应商「…」菜单开着时指向谁（旧 openProviderMenu(name)）
@@ -430,8 +505,22 @@ private:
     std::string previewVerb_,previewToast_;
     Json previewArgs_;
     bool previewRefreshAfter_=false,previewProbe_=false;
-    float syncSpinAngle_=0.0f;          // 刷新进行中同步章图标的旋转角（度）
-    float busySweep_=0.0f;              // 顶部不定进度条的流动相位（度，0..720 循环）
+    // 刷新进行中同步章图标的旋转：**按时间算角度**（不再按定时器拍数累加）。
+    // 每秒 1.2 圈 —— 以前 16ms 一拍 +30° 靠着 1875°/s 的纸面值，实际被主面板重绘挤晚，
+    // 真机看到的就是"转得很慢、像卡住了"。
+    // 顶部不定进度条：相位按时间算（0..1 单向循环），不再靠定时器累加——定时器被重绘挤晚时
+    // 累加式相位会"停住再跳"（真机 2026-10-21 报忙碌条偶尔卡顿）。
+    bool busySweepRunning_=false;
+    unsigned long long busySweepStart_=0;   // 这一轮忙碌开始的时刻（GetTickCount64）
+    unsigned long long lastSpinTick_=0;     // 相邻两拍时间，用于 UI 停顿探针
+    unsigned long long lastPaintLog_=0;     // busy paint 日志限流（每 500ms 最多一行）
+    double lastSyncNativeMs_=0.0,lastSyncBusyMs_=0.0,lastEndPaintMs_=0.0;
+    // v1.29：原生字段摆放的布局签名（页/子页/滚动/尺寸/DPI/浮层态）
+    unsigned long long lastNativeLayoutSignature_=0;
+    bool refreshQuiet_=false;   // v1.28：本次刷新是否由轮询发起
+    bool statePainted_=false;   // v1.28：首帧必须画，之后靠签名判定
+    unsigned long long paintFrames_=0;   // 门禁用：数一共画了多少帧            // 最近一帧忙碌期面板重绘耗时（ms）
+    double paintSubMs_[3]={0,0,0};          // 该帧的 CurrentView / LayoutForInput / 绘制 分解
     bool syncCheckShown_=false;         // 刷新成功后的对勾（800ms 后恢复刷新图标）
     // 悬停提示（旧版的 title 属性）：悬停 450ms 后弹一个气泡，移开/点击即收。
     int tooltipHover_=0;             // 鼠标停住的控件（0 = ControlId::None，与 hoverControl_ 同一套）
@@ -448,6 +537,12 @@ private:
     void StartReadHelper(const std::string& cmd);
     void ShowReadResult(const std::string& kind,const std::string& json,const std::string& error,
         unsigned token);
+    // v1.33：撞上后台刷新时被挡下的只读请求（diagnose/usage），等 worker 空闲后补跑。
+    std::string pendingReadCmd_;
+    // v1.34：控制面 hover 是**合成**悬停：此时真实指针常在面板外，系统会补一个 WM_MOUSELEAVE，
+    // 把刚点起来的提示清掉（门禁偶发 "hover shows no tooltip" 的根因）。合成期间忽略一次离开。
+    bool syntheticHover_=false;
+    unsigned long long syntheticHoverUntil_=0;   // 该时刻前的真实鼠标移动不覆盖合成悬停
     bool readBusy_=false;         // 只读助手的读取在飞：模态原地显示"正在读取…"，不再消失
     unsigned readToken_=0;        // 每次读取 +1；过期结果直接丢弃（用户已关掉模态）
     std::string readTitle_;
@@ -460,6 +555,23 @@ private:
     std::unique_ptr<LatencyStore> latency_;
     std::thread latencyWorker_;
     std::atomic<bool> latencyBusy_{false};
+    // 一键探测全部供应商模型（只读 GET /models，绝不写配置）。
+    // 结果按供应商名缓存，供添加页/回退链的模型选择直接取用，不必逐个供应商去探测。
+    std::atomic<bool> allProbeBusy_{false};
+    std::atomic<int> allProbeDone_{0},allProbeTotal_{0},allProbeOk_{0};
+    mutable std::mutex probedMutex_;   // dump/只读路径也要锁
+    std::map<std::string,std::vector<std::string>> probedModels_;
+    std::thread allProbeWorker_;
+    void ProbeAllModels();
+    // v1.25：模型页「刷新同步」——全部供应商只读探测 + 差异写回（逐条串行）。
+    void SyncAllModels();
+    void HandleSyncAllDone();
+    std::thread syncAllWorker_;
+    std::atomic<bool> syncAllBusy_{false};
+    std::atomic<int> syncAllDone_{0},syncAllTotal_{0},syncAllChanged_{0};
+    void ApplyProbeAll();
+    // v1.16：回退链表单的模型候选（探测缓存优先，其次供应商条目自带的 models）。
+    std::vector<std::string> FallbackModelOptions() const;
     // ---- F5 配置档案：profiles.json（只存 provider/model/favorites），应用 = 串行写 + 失败即停 ----
     struct ProfileApplyResult { std::string name;bool ok=false;std::string failedStep,error; };
     void StartProfileApply(const std::string& name);

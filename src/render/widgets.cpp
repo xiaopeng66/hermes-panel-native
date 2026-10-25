@@ -29,7 +29,17 @@ ChipSkin ChipSkinOf(ChipKind kind,Visual visual,const ThemePalette& palette) {
     ChipSkin skin;
     skin.fill=kind==ChipKind::Ok?palette.raise2:Transparent();
     skin.border=Transparent();
-    skin.text=kind==ChipKind::Ok?palette.dim:palette.LampColour(static_cast<int>(kind));
+    // 注意：**不能**把 ChipKind 强转成 int 再喂 LampColour —— 两个枚举的序号不一样
+    // （ChipKind: Ok=0/Warn=1/Err=2；ThemePalette::LampColour: 0=idle/1=ok/2=warn/3=err）。
+    // 错位的后果是真机上「WebUI 不可达」（err）画成琥珀、「网关待重启」（warn）画成绿色。
+    const auto chipColour=[&] {
+        switch(kind) {
+        case ChipKind::Ok: return palette.ok;
+        case ChipKind::Warn: return palette.warn;
+        default: return palette.err;
+        }
+    }();
+    skin.text=kind==ChipKind::Ok?palette.dim:chipColour;
     if(kind!=ChipKind::Ok) skin.border=Fade(skin.text,kChipBorderOpacity);
     if(visual==Visual::Hovered) {
         if(kind==ChipKind::Ok) skin.fill=palette.line;
@@ -49,7 +59,12 @@ ButtonSkin ButtonSkinOf(ButtonVariant variant,Visual visual,const ThemePalette& 
         skin.text=palette.onAccent;
         break;
     case ButtonVariant::Ghost:
+        // 悬停底 + 描边：以前只用 raise2 当填充，而浅色主题（porcelain/sand/light）的
+        // raise2 与页面底色 ink 差值只有 0–9（实测 porcelain 差 (0,1,3)）——悬停几乎不可见，
+        // 真机看到的就是"闪过一个虚影/点了没反应"。改成 raise2 底 + accentLine 描边 + text 色：
+        // 描边是实色（accent 55%），在白底/浅灰底上都能看出边界，六套主题一致。
         skin.fill=visual==Visual::Hovered?palette.raise2:Transparent();
+        skin.border=visual==Visual::Hovered?palette.accentLine:Transparent();
         skin.text=visual==Visual::Hovered?palette.text:palette.dim;
         break;
     case ButtonVariant::Danger:

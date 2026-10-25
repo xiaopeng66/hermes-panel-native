@@ -14,6 +14,7 @@ enum class ControlId {
     FilterAll,FilterFav,FilterRecent,
     // ---- H5 其余四页 ----
     FbProbe,FbFoldToggle,FbFoldClose,FbSubmit,FbSelect,   // 回退链页
+    FbModelSelect,                                        // 回退链表单「模型 id」右侧的 ▾（v1.16）
     FbUp,FbDown,FbRemove,                                 // 阶梯行的三个按钮（配合 ListHitTest 的 row）
     FbProbeDot,                                           // 阶梯行的探测结果（悬停说明用，index = 行）
     SetRestartGateway,                                    // 设置页「手动重启网关」
@@ -25,7 +26,8 @@ enum class ControlId {
     FormField,SelectOption,                               // 表单字段 / 下拉选项（用 ControlRect::index 区分）
     ModalConfirm,ModalCancel,                             // 模态的两个按钮
     // ---- H5b/H5c：添加 / 备份 / 设置 ----
-    SubTabNew,SubTabModels,SubTabDel,                     // 添加页的子页分段
+    SubTabNew,SubTabDel,                                  // 添加页的子页分段（v1.18 只剩两档）
+    ModelRow,ModelRowAll,                                 // 添加页模型列表的一行 / 表头（全选）
     ModelChip,ProbeButton,PrimaryButton,                  // 添加页的模型药丸 / 探测 / 保存
     SwitchRowControl,                                     // 开关行（用 ControlRect::index）
     ModeSeg,ThemeSeg,                                     // 接口模式 / 主题分段
@@ -33,6 +35,7 @@ enum class ControlId {
     ChipHelper,                                           // 「助手出错」chip（点一下重试）
     RegisterRestartGateway,                               // 寄存器行的「重启网关」胶囊（换模型后）
     StatusPill,                                           // 多状态合并胶囊（点开状态中心）
+    SyncModels,                                           // v1.25：模型页的「刷新同步模型列表」
     LampWsl,LampWebui,LampGateway,                        // 三盏状态灯（点击 = 重试探活，审计 F-016）
     KeyReveal,                                            // 新建供应商页 API Key 的显隐按钮（审计 F-012）
     OfflineStart                                          // 离线卡上的「启动 WSL」
@@ -89,6 +92,7 @@ struct PanelLayout {
     bool scrollVisible=false;
     // ---- H5 其余四页：页头 / 表单 / 阶梯 / 卡片 / 模态 / Toast ----
     D2D1_RECT_F pageHead{},pageHeadTitle{},pageHeadSub{},pageHeadAction{};
+    D2D1_RECT_F syncModels{};       // v1.25：模型页的一键刷新同步按钮
     D2D1_RECT_F ladder{};                     // 阶梯列表的外框
     std::vector<ListItem> ladderRows;         // 每行一个（kind=Row，row=序号）
     D2D1_RECT_F addLine{},fold{},foldClose{}; // 「追加一条」虚线 + 页内浮层表单卡片
@@ -131,6 +135,9 @@ struct PanelLayout {
     bool pageScrollVisible=false;
     std::vector<ListItem> rows;         // 备份页的行（kind=Row，row=行号）
     D2D1_RECT_F subTabs{},footBar{},dangerCard{},chipRow{},noteLine{};
+    // v1.21：添加页的模型列表（可滚动；行由 layout.controls 里的 ModelRow 承载）
+    D2D1_RECT_F modelList{},modelListBar{},modelListThumb{};
+    std::vector<ControlRect> modelRows;
     // 说明行 / 小节标题：kind 0 = 普通说明，>0 = 设置页第 N 个小节标题（1..4）
     struct NoteLine { D2D1_RECT_F rect{};int kind=0;std::string text; };
     std::vector<NoteLine> notes;

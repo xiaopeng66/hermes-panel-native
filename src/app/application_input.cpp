@@ -24,19 +24,33 @@ void Application::FocusField(TextField* field) {
     // 带 Shift 的字母甚至会静默改写热键）。
     if(field!=&setHotkey_) setHotkeyCapturing_=false;
     focusedField_=field;
-    if(field) field->Focus();
+    if(field) {
+        field->Focus();
+        FocusNativeField(field);      // v1.23：原生控件拿焦点（光标/选区由系统管）
+    }
     caretOn_=true;
     UpdateCaretTimer();
     InvalidateRect(panel_,nullptr,FALSE);
+}
+void Application::CommitFocusedField() {
+    // 设置页的文本框在失焦时提交（旧面板的 input 也是这样写回去的）。
+    // 先把控件里的文本同步回镜像再提交：EN_CHANGE 正常情况下已经同步过，但"点击别的字段"这条
+    // 路径可能早于最后一次 EN_CHANGE 到达（控件是真相，镜像只是缓存）。
+    if(!focusedField_) return;
+    if(auto* native=NativeFor(focusedField_)) {
+        const auto text=Narrow(native->Text());
+        native->RefreshCache();
+        if(focusedField_->TextUtf8()!=text) focusedField_->SetTextUtf8(text);
+    }
+    if(focusedField_==&setDistro_) SetSetting("distro",setDistro_.TextUtf8());
+    else if(focusedField_==&setWebuiPort_) SetSetting("webuiPort",setWebuiPort_.TextUtf8());
+    else if(focusedField_==&setPollSec_) SetSetting("pollSeconds",setPollSec_.TextUtf8());
 }
 void Application::BlurField() {
     // 失焦一律结束热键捕获：点输入框外/点别的控件/切页 = 取消这次编辑，显示还原为已保存的组合。
     setHotkeyCapturing_=false;
     if(!focusedField_) return;
-    // 设置页的文本框在失焦时提交（旧面板的 input 也是这样写回去的）。
-    if(focusedField_==&setDistro_) SetSetting("distro",setDistro_.TextUtf8());
-    else if(focusedField_==&setWebuiPort_) SetSetting("webuiPort",setWebuiPort_.TextUtf8());
-    else if(focusedField_==&setPollSec_) SetSetting("pollSeconds",setPollSec_.TextUtf8());
+    CommitFocusedField();
     focusedField_->Blur();
     focusedField_=nullptr;
     caretOn_=false;
@@ -199,7 +213,7 @@ void Application::HandleFieldIme(HWND window,UINT message,WPARAM wparam,LPARAM l
         RECT client{};
         GetClientRect(panel_,&client);
         const auto layout=ComputeLayout(CurrentView(),static_cast<float>(client.right),
-            static_cast<float>(client.bottom),static_cast<float>(monitor_.geometry.dpi)/96.0f);
+            static_cast<float>(client.bottom),static_cast<float>(WindowDpi())/96.0f);
         POINT origin{0,0};
         ClientToScreen(panel_,&origin);
         const auto box=layout.search;
@@ -214,11 +228,8 @@ void Application::HandleFieldIme(HWND window,UINT message,WPARAM wparam,LPARAM l
 void Application::TrackHover(HWND window,float x,float y) {
     // Buttons light up on hover. This only ever invalidates: no geometry is touched, so the hover path
     // keeps its zero-write property (DESIGN §8 A1/A7).
-    RECT client{};
-    GetClientRect(window,&client);
-    const auto view=CurrentView();
-    const auto layout=ComputeLayout(view,static_cast<float>(client.right),static_cast<float>(client.bottom),
-        static_cast<float>(monitor_.geometry.dpi)/96.0f);
+    // v1.30：布局复用缓存（只算一次），指针移动不再重建视图。
+    const auto& layout=HoverLayout();
     const auto id=static_cast<int>(ControlAt(layout,x,y));
     // 重复控件（分段/行）的序号：TooltipView.index 用它区分逐项说明（例如回退链每一行）。
     int hitIndex=-1;
@@ -235,7 +246,12 @@ void Application::TrackHover(HWND window,float x,float y) {
     const bool listMoved=previous.kind!=current.kind||previous.group!=current.group
         ||previous.row!=current.row||previous.menu!=current.menu||previous.star!=current.star;
     pointerX_=x;pointerY_=y;pointerInside_=true;
-    if(id!=hoverControl_||listMoved||hitIndex!=tooltipHoverIndex_) {
+    // 注意：早先只有"命中控件变了"才重排提示定时器。于是**同一控件上 hover 两次**时，
+    // 第一次已把 hoverControl_ 设成它、定时器却没走完（被 WM_MOUSELEAVE 或重绘挤掉），
+    // 第二次进来 id==hoverControl_ → 不重启定时器 → 提示永远不弹（门禁偶发
+    // "hovering lampWsl shows no tooltip"、hover=null 的根因）。
+    if(id!=hoverControl_||listMoved||hitIndex!=tooltipHoverIndex_||
+        (id!=0&&!tooltipVisible_&&panel_)) {
         // 悬停过渡（移植自余额面板）：记录上一个控件，90ms 内交叉淡出/淡入。
         if(id!=hoverControl_&&AnimationsEnabled()) {
             hoverPrevious_=hoverControl_;

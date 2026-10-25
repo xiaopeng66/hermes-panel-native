@@ -95,7 +95,7 @@ void Tap(h::Client& client,const Json& rect) {
     const auto x=rect["x"].get<int>()+rect["width"].get<int>()/2;
     const auto y=rect["y"].get<int>()+rect["height"].get<int>()/2;
     const auto hit=client.Request({{"command","hit"},{"x",x},{"y",y}});
-    h::Require(hit["hit"]["isPanel"].get<bool>(),
+    h::Require((hit["hit"]["isPanel"].get<bool>()||hit["hit"].value("isPanelChild",false)),
         ("the click target is covered by another window: "+hit.dump()).c_str());
     client.Request({{"command","tap"},{"x",x},{"y",y},{"screen",true}});
     Sleep(150);
@@ -132,8 +132,9 @@ Json FieldRect(h::Client& client,int index) {
     h::Require(index<static_cast<int>(controls["_fields"].size()),"the field is not in the layout");
     return controls["_fields"][index];
 }
-void StartApp(const std::wstring& app,const std::wstring& instance,PROCESS_INFORMATION* child) {
-    auto command=h::AppCommandLine(app,instance,h::NoLegacyDirectory(instance));
+void StartApp(const std::wstring& app,const std::wstring& instance,PROCESS_INFORMATION* child,
+    const std::wstring& dataDirectory=std::wstring{}) {
+    auto command=h::AppCommandLine(app,instance,h::NoLegacyDirectory(instance),dataDirectory);
     STARTUPINFOW startup{sizeof(startup)};
     if(!CreateProcessW(nullptr,command.data(),nullptr,nullptr,0,0,nullptr,nullptr,&startup,child))
         throw std::runtime_error("CreateProcess failed");
@@ -161,6 +162,7 @@ int wmain(int argc,wchar_t** argv) {
     const auto logPath=Narrow(home)+"/requests.log";
     // F6 网关边沿门禁：settings 场景先把 gatewayPort 指到本进程的监听器（隔离设置目录），
     // 之后关掉监听器就能制造一次真实的 ok→err 翻转。
+    std::wstring seededDir;
     WSADATA winsock{};
     WSAStartup(MAKEWORD(2,2),&winsock);
     SOCKET gatewayListener=INVALID_SOCKET;
@@ -176,15 +178,15 @@ int wmain(int argc,wchar_t** argv) {
             int length=sizeof(address);
             getsockname(gatewayListener,reinterpret_cast<sockaddr*>(&address),&length);
             const auto port=ntohs(address.sin_port);
-            const auto directory=h::IsolatedDataDir(id);
-            CreateDirectoryW(directory.c_str(),nullptr);
-            std::ofstream settings(Narrow(directory)+"/settings.json",std::ios::trunc);
+            seededDir=h::IsolatedDataDir(id);
+            CreateDirectoryW(seededDir.c_str(),nullptr);
+            std::ofstream settings(Narrow(seededDir)+"/settings.json",std::ios::trunc);
             settings<<"{\"gatewayPort\":"<<port<<"}\n";
         }
     }
 
     PROCESS_INFORMATION child{};
-    StartApp(argv[1],id,&child);
+    StartApp(argv[1],id,&child,seededDir);
     auto status=1;
     try {
         h::Require(WaitForInputIdle(child.hProcess,4000)==0,"app not ready");
@@ -195,9 +197,46 @@ int wmain(int argc,wchar_t** argv) {
             auto snapshot=WaitFor(client,[](const Json& value) { return value["activePage"].get<int>()==2; });
             h::Require(snapshot["activePage"].get<int>()==2,"the 添加 tab switched the page");
             h::Require(snapshot["add"]["sub"].get<int>()==0,"the 新建供应商 sub-tab is first");
-            h::Require(snapshot["add"]["subs"].size()==3,"three sub-tabs");
-            // 审计 F-007：新建页新增「模型（每行一个）」多行框 → 5 个字段。
-            h::Require(snapshot["add"]["fields"].size()==5,"the new-provider form has five fields");
+            // 一键探测全部供应商（只读 GET）：托盘菜单 1015 -> 等完成 -> 至少一个供应商拿到模型。
+            // 这一条盯的是"不用逐个供应商去探测"（真机 2026-10-21 要求）：结果按供应商缓存，
+            // 添加页选供应商即可直接拿到列表（见 application_pages.cpp 的 select 提交处）。
+            // v1.24：忙碌条改由独立子窗口绘制（主面板一帧 200ms 无法流畅）。这里断言
+            // 忙碌期间它确实持续重绘、单帧很便宜——"不卡顿"的可测代理。
+            {
+                const auto before=client.Request({{"command","dump"}})["busyBar"];
+                client.Request({{"command","menu"},{"id",1015}});
+                Sleep(400);
+                const auto during=client.Request({{"command","dump"}});
+                const auto paints=during["busyBar"].value("paints",0LL);
+                const auto busyFlag=during["data"].value("busy",false)
+                    ||during["probeAll"].value("busy",false);
+                h::Require(busyFlag,
+                    ("the fixture should still be probing here ("+during["data"].dump()+")").c_str());
+                h::Require(paints>before.value("paints",0LL)+3,
+                    ("the busy bar keeps repainting while a probe runs ("+during["busyBar"].dump()+")").c_str());
+                h::Require(during["busyBar"].value("lastPaintMs",999.0)<8.0,
+                    ("one busy-bar frame must stay cheap ("+during["busyBar"].dump()+")").c_str());
+                std::cout<<"PASS busy bar: repaints while busy and each frame is cheap\n";
+            }
+            {
+                client.Request({{"command","menu"},{"id",1015}});
+                const auto probeDeadline=GetTickCount64()+30000;
+                Json probeState;
+                while(GetTickCount64()<probeDeadline) {
+                    probeState=client.Request({{"command","dump"}});
+                    if(!probeState["probeAll"]["busy"].get<bool>()) break;
+                    Sleep(200);
+                }
+                const auto all=probeState["probeAll"];
+                h::Require(all["total"].get<int>()>0,"probe-all probed no provider");
+                h::Require(all["ok"].get<int>()>0,"probe-all: no provider returned models");
+                std::cout<<"PASS probe-all: "<<all["ok"]<<" of "<<all["total"]
+                    <<" providers returned a model list (read-only)";
+                std::cout<<std::endl;
+            }
+            h::Require(snapshot["add"]["subs"].size()==2,"two sub-tabs (v1.18 dropped the 加模型 page)");
+            // v1.18（用户要求）：字段收敛为 名称 / Base URL / API Key / 模型（可空），Key 变量名不再出现。
+            h::Require(snapshot["add"]["fields"].size()==3,"the new-provider form has three fields (v1.24)");
             // 空表单保存 → 拒
             auto controls=client.Request({{"command","controls"}});
             Tap(client,controls["primaryButton"]);
@@ -208,24 +247,33 @@ int wmain(int argc,wchar_t** argv) {
             h::Require(Requests(logPath,"upsert-provider").empty(),"the refusal wrote nothing");
             std::cout<<"PASS h-add: the new-provider form refuses an empty name/base_url\n";
             // 探测：Base URL + 探测按钮 → 三个模型药丸
-            Tap(client,FieldRect(client,2));                 // Base URL
+            Tap(client,FieldRect(client,1));                 // Base URL
             TypeText(client,"https://probe.example/v1");
             controls=client.Request({{"command","controls"}});
+            // 断言改成**增量**：本场景开头跑过"一键探测全部供应商"，helper 日志里已经有一批 probe。
+            // 意图不变——点一次探测必须恰好多出一次 helper 调用。
+            const auto probesBefore=Requests(logPath,"probe").size();
             Tap(client,controls["probeButton"]);
             snapshot=WaitFor(client,[](const Json& value) { return value["add"]["chips"].size()==3; });
-            h::Require(snapshot["add"]["chips"].size()==3,"the probe filled three model chips");
-            h::Require(Requests(logPath,"probe").size()==1,"probe reached the helper");
-            std::cout<<"PASS h-add: 探测 filled the model chips\n";
-            // 名 + Key 变量名 + Key（掩码）+ 保存 → upsert-provider
+            h::Require(snapshot["add"]["chips"].size()==3,"the probe listed all three models");
+            // v1.21（用户要求）：探测结果是一个**列表**，默认全选（"追加的话所有模型都要进列表"）。
+            h::Require(snapshot["add"]["chipsSelected"]==Json::array({true,true,true}),
+                "every probed model is selected by default");
+            {
+                const auto rows=client.Request({{"command","controls"}})["_modelRows"];
+                h::Require(rows.size()==3,"the model list exposes one clickable row per model");
+            }
+            h::Require(Requests(logPath,"probe").size()==probesBefore+1,
+                "one probe click must reach the helper exactly once");
+            std::cout<<"PASS h-add: 探测 lists every model and selects them all\n";
+            // 名 + Key（掩码）+ 保存 → upsert-provider（v1.18：Key 变量名不再由用户填）
             Tap(client,FieldRect(client,0));
             TypeText(client,"MyRelay");
-            Tap(client,FieldRect(client,1));
-            TypeText(client,"MYRELAY_API_KEY");
-            Tap(client,FieldRect(client,3));
+            Tap(client,FieldRect(client,2));
             TypeText(client,"sk-hidden-value");
             snapshot=client.Request({{"command","dump"}});
-            h::Require(snapshot["add"]["fields"][3]["masked"].get<bool>(),"the API Key field is masked");
-            h::Require(snapshot["add"]["fields"][3]["value"].get<std::string>()=="sk-hidden-value",
+            h::Require(snapshot["add"]["fields"][2]["masked"].get<bool>(),"the API Key field is masked");
+            h::Require(snapshot["add"]["fields"][2]["value"].get<std::string>()=="sk-hidden-value",
                 "the value is held by the field (drawing masks it)");
             controls=client.Request({{"command","controls"}});
             Tap(client,controls["primaryButton"]);
@@ -236,10 +284,11 @@ int wmain(int argc,wchar_t** argv) {
             });
             const auto writes=Requests(logPath,"upsert-provider");
             h::Require(writes.size()==1,"one upsert-provider reached the helper");
+            // v1.18：面板不再发送 key_env（助手按供应商名推导 MYRELAY_API_KEY）。
             h::Require(writes[0]["name"].get<std::string>()=="MyRelay"
-                &&writes[0]["key_env"].get<std::string>()=="MYRELAY_API_KEY"
+                &&!writes[0].contains("key_env")
                 &&writes[0]["key"].get<std::string>()=="sk-hidden-value"
-                &&writes[0]["models"].size()==3,"the write carried name/key_env/key/models");
+                &&writes[0]["models"].size()==3,"the write carried name/key/models and no key_env");
             h::Require(snapshot["toast"]["text"].get<std::string>().find("\xE5\xB7\xB2\xE5\x86\x99\xE5\x85\xA5")
                 !=std::string::npos,"the write toasted");
             // 日志里绝不该出现 key 值（GOAL 硬性规则 7）
@@ -251,6 +300,35 @@ int wmain(int argc,wchar_t** argv) {
                     "the API key value never appears in the log");
             }
             std::cout<<"PASS h-add: upsert-provider carried the form and the key never hit the log\n";
+            // v1.18（用户要求）：模型可以不加——清空多行框和药丸后保存，请求里不该带 models，
+            // 写进配置后由 hermes 侧自己发现（面板下次轮询读到）。
+            {
+                const auto before=Requests(logPath,"upsert-provider").size();
+                Tap(client,FieldRect(client,0));
+                SelectAll(client);
+                TypeText(client,"BareRelay");
+                // v1.21：清空 = 点列表表头「全不选」。
+                controls=client.Request({{"command","controls"}});
+                h::Require(controls.contains("modelRowAll"),"the model list has a select-all header");
+                Tap(client,controls["modelRowAll"]);
+                auto cleared=WaitFor(client,[](const Json& value) {
+                    const auto selected=value["add"]["chipsSelected"];
+                    for(const auto& item:selected) if(item.get<bool>()) return false;
+                    return !selected.empty();
+                });
+                h::Require(!cleared["add"]["chipsSelected"].empty(),"the list still lists the models");
+                for(const auto& selected:cleared["add"]["chipsSelected"])
+                    h::Require(!selected.get<bool>(),"the header deselected every row");
+                controls=client.Request({{"command","controls"}});
+                Tap(client,controls["primaryButton"]);
+                const auto deadline=GetTickCount64()+15000;
+                while(GetTickCount64()<deadline&&Requests(logPath,"upsert-provider").size()<=before) Sleep(50);
+                const auto bare=Requests(logPath,"upsert-provider");
+                h::Require(bare.size()==before+1,"the empty-model save reached the helper");
+                h::Require(!bare.back().contains("models"),
+                    "a provider may be created without any model (v1.18)");
+                std::cout<<"PASS h-add: a provider can be saved without models\n";
+            }
             // 审计 F-012：眼睛按钮切换显示（旧版 #btn-np-eye）。
             {
                 controls=client.Request({{"command","controls"}});
@@ -260,106 +338,23 @@ int wmain(int argc,wchar_t** argv) {
                     return value["add"]["keyRevealed"].get<bool>();
                 });
                 h::Require(snapshot["add"]["keyRevealed"].get<bool>(),"the eye reveals the key");
-                h::Require(!snapshot["add"]["fields"][3]["masked"].get<bool>(),
+                h::Require(!snapshot["add"]["fields"][2]["masked"].get<bool>(),
                     "the revealed field is no longer masked");
                 controls=client.Request({{"command","controls"}});
                 Tap(client,controls["keyReveal"]);
                 snapshot=WaitFor(client,[](const Json& value) {
                     return !value["add"]["keyRevealed"].get<bool>();
                 });
-                h::Require(snapshot["add"]["fields"][3]["masked"].get<bool>(),
+                h::Require(snapshot["add"]["fields"][2]["masked"].get<bool>(),
                     "clicking the eye again masks the key");
             }
-            // 审计 F-007：手动输入两行模型 → upsert-provider 的 models 就是这两行。
-            {
-                const auto before=Requests(logPath,"upsert-provider").size();
-                controls=client.Request({{"command","controls"}});
-                Tap(client,controls["_fields"][4]);
-                SelectAll(client);          // 探测已填过这里：先清空再手输
-                TypeText(client,"manual-a\rmanual-b");
-                controls=client.Request({{"command","controls"}});
-                Tap(client,controls["primaryButton"]);
-                const auto deadline=GetTickCount64()+15000;
-                while(GetTickCount64()<deadline&&Requests(logPath,"upsert-provider").size()<=before) Sleep(50);
-                const auto manualWrites=Requests(logPath,"upsert-provider");
-                h::Require(manualWrites.size()==before+1,"the manual-model save reached the helper");
-                h::Require(manualWrites.back()["models"].size()==2
-                    &&manualWrites.back()["models"][0].get<std::string>()=="manual-a",
-                    "the manual model field became the models list");
-                std::cout<<"PASS h-add: the manual model field feeds upsert-provider\n";
-            }
-            // 加模型子页：选供应商（Beta=不可达）+ 从供应商探测填充 → probe 失败留下错误
-            controls=client.Request({{"command","controls"}});
-            Tap(client,controls["subTabModels"]);
-            snapshot=WaitFor(client,[](const Json& value) { return value["add"]["sub"].get<int>()==1; });
-            h::Require(snapshot["add"]["sub"].get<int>()==1,"the 加模型 sub-tab switched");
-            h::Require(snapshot["add"]["providers"].size()>=2,"the provider list is filled");
-            controls=client.Request({{"command","controls"}});
-            Tap(client,controls["probeButton"]);              // 默认选中第一个供应商 Alpha
-            snapshot=WaitFor(client,[](const Json& value) {
-                return !value["add"]["fields"][1]["value"].get<std::string>().empty();
-            });
-            // 审计 F-006：结果写进「模型 id」多行框（旧版 #am-models 的行为），不再只放药丸。
-            h::Require(snapshot["add"]["fields"][1]["value"].get<std::string>().find("probe-a")
-                !=std::string::npos,"从供应商探测填充 filled the model-id textarea");
-            h::Require(snapshot["add"]["chips"].empty(),
-                "the 加模型 page writes the textarea instead of the new-provider chips");
-            std::cout<<"PASS h-add: 加模型's 从供应商探测填充 works\n";
-            // 下拉必须能滚到最后一个供应商（真机：18 个供应商，只显示前 8 个、后面选不到）。
-            {
-                const int providerCount=static_cast<int>(snapshot["add"]["providers"].size());
-                h::Require(providerCount>=10,"the fixture must expose enough providers to scroll");
-                controls=client.Request({{"command","controls"}});
-                Tap(client,FieldRect(client,0));                 // 0 = 供应商下拉
-                auto opened=client.Request({{"command","dump"}})["select"];
-                h::Require(!opened["labels"].empty(),"the provider dropdown did not open");
-                h::Require(opened["total"].get<int>()==providerCount,"the dropdown knows every provider");
-                h::Require(opened["visible"].get<int>()<providerCount,
-                    "the dropdown should be a window over the list, not the whole list");
-                const int visible=opened["visible"].get<int>();
-                // 滚到底：可见项必须换成列表尾部，而且首项的下标就是 scroll。
-                for(int step=0;step<providerCount+2;++step) {
-                    client.Request({{"command","wheel"},{"delta",-120}});
-                    Sleep(20);
-                }
-                const auto scrolled=client.Request({{"command","dump"}})["select"];
-                h::Require(scrolled["scroll"].get<int>()==providerCount-visible,
-                    "the dropdown did not scroll to the end");
-                h::Require(scrolled["labels"][visible-1].get<std::string>()
-                    ==snapshot["add"]["providers"][providerCount-1].get<std::string>(),
-                    "the last provider is not reachable from the dropdown");
-                // 点最后一项：选中项必须变成最后一个供应商（旧实现点不到）。
-                controls=client.Request({{"command","controls"}});
-                const auto options=controls["_select"];
-                h::Require(static_cast<int>(options.size())==visible,"the visible options are clickable");
-                Tap(client,options[visible-1]);
-                snapshot=WaitFor(client,[](const Json& value) {
-                    return value["add"]["provider"].get<int>()>0;
-                });
-                h::Require(snapshot["add"]["provider"].get<int>()==providerCount-1,
-                    "picking the last option did not select the last provider");
-                std::cout<<"PASS h-add: the provider dropdown scrolls to the last entry and selects it\n";
-            }
-            // 追加：多行模型 → add-models（探测已经把结果填进文本框，先全选覆盖）
-            Tap(client,FieldRect(client,1));                  // 模型 id textarea
-            SelectAll(client);
-            TypeText(client,"beta-2\rbeta-3");
-            controls=client.Request({{"command","controls"}});
-            Tap(client,controls["primaryButton"]);
-            snapshot=WaitFor(client,[](const Json& value) { return value["add"]["fields"].size()>0
-                &&value["add"]["fields"][1]["value"].get<std::string>().empty(); });
-            const auto adds=Requests(logPath,"add-models");
-            h::Require(adds.size()==1,"one add-models reached the helper");
-            h::Require(adds[0]["models"].size()==2&&adds[0]["models"][0].get<std::string>()=="beta-2",
-                "the textarea's lines became the model list");
-            std::cout<<"PASS h-add: add-models carried the textarea's two lines\n";
             // 删除子页：现在是**供应商下拉**（真机要求：不要手输名字）。两条路径都要走通：
             //   ① 选一个可删的 → 危险确认框（Esc 取消，什么都不写）；
             //   ② 当前模型在用的那个在按钮上是禁用的（选它按钮不亮）。
             controls=client.Request({{"command","controls"}});
             Tap(client,controls["subTabDel"]);
-            snapshot=WaitFor(client,[](const Json& value) { return value["add"]["sub"].get<int>()==2; });
-            h::Require(snapshot["add"]["sub"].get<int>()==2,"the 删除 sub-tab switched");
+            snapshot=WaitFor(client,[](const Json& value) { return value["add"]["sub"].get<int>()==1; });
+            h::Require(snapshot["add"]["sub"].get<int>()==1,"the 删除 sub-tab switched");
             h::Require(snapshot["add"]["primaryDisabled"].get<bool>(),"nothing selected keeps the button disabled");
             const auto names=snapshot["add"]["providers"];
             Tap(client,FieldRect(client,0));
@@ -461,28 +456,6 @@ int wmain(int argc,wchar_t** argv) {
             h::Require(snapshot["add"]["providers"].size()+1==names.size(),
                 "the confirmed delete removed exactly one provider");
             std::cout<<"PASS h-add: the confirmed delete uses purge_key / remove_fallbacks\n";
-            // 审计 F-006：加模型页的"从供应商探测填充"必须把结果写进「模型 id」多行框。
-            controls=client.Request({{"command","controls"}});
-            Tap(client,controls["subTabModels"]);
-            Sleep(300);
-            controls=client.Request({{"command","controls"}});
-            h::Require(controls["_fields"].size()>=2,"the 加模型 form has a provider select and a textarea");
-            Tap(client,controls["_fields"][0]);          // 打开供应商下拉
-            Sleep(200);
-            {
-                const auto options=client.Request({{"command","controls"}})["_select"];
-                if(options.is_array()&&!options.empty()) Tap(client,options[0]);
-            }
-            controls=client.Request({{"command","controls"}});
-            Tap(client,controls["probeButton"]);
-            snapshot=WaitFor(client,[](const Json& value) {
-                const auto& text=value["add"]["fields"][1]["value"];
-                return text.is_string()&&!text.get<std::string>().empty();
-            },15000);
-            h::Require(snapshot["add"]["fields"][1]["value"].get<std::string>().find("probe-a")
-                !=std::string::npos,
-                "the probe filled the 模型 id textarea on the 加模型 page");
-            std::cout<<"PASS h-add: 从供应商探测填充 writes the probed ids into the textarea\n";
             // 审计 F-016：点异常灯 = 重试（DESIGN §4.2 #4）。
             {
                 const auto before=Requests(logPath,"list").size();
@@ -725,14 +698,14 @@ int wmain(int argc,wchar_t** argv) {
             // ---- F4 延迟探测：设置页暴露开关/间隔，探测结果落 latency.json ----
             controls=client.Request({{"command","controls"}});
             h::Require(controls["_switches"].size()==4,"four switch rows (F4 adds 延迟探测)");
-            h::Require(controls["_segments"].size()>=14,
-                "three latency + four widget segments precede the seven theme segments");
+            h::Require(controls["_segments"].size()>=12,
+                "two latency-adjacent widget segments precede the seven theme segments (3+2+7)");
             // 用量「刷新」的结果会把模态再打开（异步）：先 Esc，否则这次点击会被模态吃掉。
             client.Request({{"command","vk"},{"vk",VK_ESCAPE}});
             Sleep(200);
             controls=client.Request({{"command","controls"}});
-            // G11：挂件样式段（延迟 3 + 挂件 4 + 主题 7 = 14）。
-            Tap(client,controls["_segments"][3+1]);   // 铭牌
+            // G11：挂件样式段（延迟 3 + 挂件 2 + 主题 7 = 12）。
+            Tap(client,controls["_segments"][3]);   // 铭牌
             snapshot=WaitFor(client,[](const Json& value) {
                 return value["stored"]["widgetStyle"].get<std::string>()=="tag";
             });
@@ -945,12 +918,12 @@ int wmain(int argc,wchar_t** argv) {
                     "and it names the gateway port");   // 网关不可达
             }
             std::cout<<"PASS h-settings: tray notifications are edge-triggered, suppressed and clickable\n";
-            // ---- G1 贴边挂件：五套样式 → strip 尺寸随样式变化，贴边侧仍逐像素贴住 ----
+            // ---- G1 贴边挂件：两套样式 → strip 尺寸随样式变化，贴边侧仍逐像素贴住 ----
             client.Request({{"command","place"},{"state",4},{"edge",1},{"anchor",200}});
             Sleep(500);
             {
                 struct StyleCase { const char* id;int width;int height; };
-                const StyleCase styles[]={{"beacon",10,76},{"tag",14,74},{"flag",16,58},{"capsule",30,136}};
+                const StyleCase styles[]={{"tag",14,74},{"capsule",30,136}};
                 for(const auto& test:styles) {
                     // ① 展开态换样式：挂件窗口必须立刻同步到新尺寸。真机上这里曾留下旧尺寸的
                     //    窗口，贴边收回时校验不过 → 「message: fatal, closing」（应用自己退出）。
@@ -979,7 +952,7 @@ int wmain(int argc,wchar_t** argv) {
                         (std::string("the ")+test.id+" widget has its documented size").c_str());
                 }
             }
-            std::cout<<"PASS h-settings: three narrow widget styles dock with their documented sizes\n";
+            std::cout<<"PASS h-settings: the widget styles dock with their documented sizes\n";
             // ---- 模态键盘隔离：模态打开时输入不能落到后面的字段（WM_CHAR 也不能漏） ----
             client.Request({{"command","place"},{"state",1},{"edge",0}});
             Sleep(400);

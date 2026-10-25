@@ -24,9 +24,13 @@ bool WriteExact(HANDLE pipe,const void* data,unsigned size) {
     return true;
 }
 }
+// owner/message 是历史参数：管道线程拿到请求后直接经 handler 里的 SendMessageW 回到 UI 线程
+// （见 main.cpp 的 lambda），这两个参数从未被读取。保留签名不动调用方，用 (void) 标注意图。
 bool ControlPipe::Start(HWND owner,UINT message,const std::wstring& pipeName,Handler handler) {
+    (void)owner;
+    (void)message;
     if(thread_.joinable()) return false;
-    owner_=owner;message_=message;name_=pipeName;handler_=std::move(handler);
+    name_=pipeName;handler_=std::move(handler);
     stopEvent_=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if(!stopEvent_) return false;
     // 管道线程同样不能把异常漏出线程（std::terminate → __fastfail 会绕过崩溃探针）。

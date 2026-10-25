@@ -390,9 +390,12 @@ int main(int argc,char** argv) {
             std::cout<<Json{{"ok",false},{"error","provider and models are required"}}.dump()<<std::endl;
             return 1;
         }
+        // v1.19：prune=true = 用探测结果**替换**该供应商的模型列表（同步），默认仍只追加。
+        const bool prune=parsed.value("prune",false);
         for(auto& provider:state["providers"]) {
             if(provider.value("provider_id",std::string{})!=providerId) continue;
-            for(const auto& model:parsed["models"]) provider["models"].push_back(model);
+            if(prune) provider["models"]=parsed["models"];
+            else for(const auto& model:parsed["models"]) provider["models"].push_back(model);
             provider["default_model"]=provider["models"][0];
             state["config_mtime"]=state.value("config_mtime",1750000000LL)+60;
             Save(state);

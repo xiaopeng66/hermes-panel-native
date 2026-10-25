@@ -20,6 +20,8 @@ struct HelperReply {
 class HelperBridge {
 public:
     void Configure(std::wstring distro,std::wstring pythonExe,std::wstring helperPath);
+    // 空的 distro 表示"WSL 默认发行版"：此时不传 -d（传 -d "" 会被 wsl.exe 判为发行版不存在）。
+    std::wstring DistroSwitch() const;
     // Tests swap in a fake wsl; production leaves wsl.exe on PATH.
     void SetWslExecutable(std::wstring path);
     // Diagnostics sink. NEVER receives key/password/token values - only verbs, exit codes, counts.
@@ -33,6 +35,5 @@ private:
     std::wstring wslExe_=L"wsl.exe";
     std::wstring distro_,pythonExe_,helperPath_;
     std::function<void(const std::string&)> logSink_;
-    unsigned long long lastReadStart_=0;
 };
 }

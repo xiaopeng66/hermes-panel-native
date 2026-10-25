@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(/W4 /WX /utf-8 /permissive-)
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 
-add_executable(hermes-panel-native WIN32 assets/hermes.rc src/app/main.cpp src/app/application.cpp src/app/application_data.cpp src/app/application_pages.cpp src/app/application_input.cpp src/app/application_control.cpp src/app/control_pipe.cpp src/app/panel_view.cpp src/data/settings.cpp src/data/log.cpp src/core/geometry_controller.cpp src/core/state.cpp src/render/icons.cpp src/render/widgets.cpp src/render/textfield.cpp src/render/surface.cpp src/data/helper.cpp src/data/state.cpp src/data/probe.cpp src/data/http.cpp src/data/latency.cpp src/data/profiles.cpp src/data/unc_snapshot.cpp src/render/panel.cpp src/render/theme.cpp src/render/layout.cpp)
+add_executable(hermes-panel-native WIN32 assets/hermes.rc src/app/main.cpp src/app/application.cpp src/app/application_data.cpp src/app/application_pages.cpp src/app/application_input.cpp src/app/application_control.cpp src/app/control_pipe.cpp src/app/panel_view.cpp src/data/settings.cpp src/data/log.cpp src/core/geometry_controller.cpp src/core/state.cpp src/render/icons.cpp src/render/widgets.cpp src/render/textfield.cpp src/ui/native_field.cpp src/ui/busy_bar.cpp src/ui/spin_glyph.cpp src/render/surface.cpp src/data/helper.cpp src/data/state.cpp src/data/probe.cpp src/data/http.cpp src/data/latency.cpp src/data/profiles.cpp src/data/unc_snapshot.cpp src/render/panel.cpp src/render/theme.cpp src/render/layout.cpp)
 # 界面全自绘，没有任何 WebView2/内容运行时（H2a 的剥离）：exe 是自包含的，不链接也不需要随附 DLL。
 target_include_directories(hermes-panel-native PRIVATE third_party src)
 target_link_libraries(hermes-panel-native PRIVATE hermes-geometry user32 shell32 shcore dwmapi d2d1 dwrite ole32 winhttp crypt32 imm32)
@@ -57,13 +57,8 @@ add_executable(geometry-probe tests/harness/probe.cpp)
 target_include_directories(geometry-probe PRIVATE third_party)
 target_link_libraries(geometry-probe PRIVATE user32 gdi32 windowscodecs ole32)
 
-add_executable(environment-probe tests/harness/environment.cpp)
-target_link_libraries(environment-probe PRIVATE user32 shcore)
-
-# One-off drag repro used to diagnose the snap-band failure (kept until H2c clears it).
-add_executable(drag-repro tools/drag_repro.cpp tests/harness/client.h)
-target_include_directories(drag-repro PRIVATE third_party tests)
-target_link_libraries(drag-repro PRIVATE user32 ws2_32)
+# 2026-10-21 代码梳理：删掉两个零引用的调试目标——environment-probe（打印显示器清单，能力已由
+# geometry-probe 的 monitors 命令提供）与 drag-repro（注释写着"留到 H2c 清掉"，H2c 早已完成）。
 
 include(CTest)
 if(BUILD_TESTING)

@@ -3,15 +3,18 @@
 // 内部链接，ODR 安全）。只在 src/app 内部使用。
 #include "app/control_plane.h"   // HERMES_CONTROL_PLANE 宏（下面的 #if 求值前必须定义）
 #include "core/geometry.h"
+#include "core/text.h"   // Narrow/Widen（全产品一份）
 #include <json.hpp>
 #include <string>
 #include <windows.h>
+namespace hermes { class NativeField; }
 #include <windowsx.h>
 namespace hermes {
 using Json=nlohmann::json;   // application.h 的别名在这里也生效（internal.h 单独被 include 时）
 namespace {
 constexpr UINT kTrayMessage=WM_APP+10;
 constexpr UINT kDataMessage=WM_APP+13;
+constexpr UINT kProbeAllMessage=WM_APP+18;   // 一键探测：进度/完成（wparam=1 完成）
 constexpr UINT kTrayId=1;
 constexpr UINT_PTR kTrayGraceTimer=1;
 constexpr UINT_PTR kCaretTimer=2;         // the 530ms caret blink - lives only while a field is focused
@@ -21,16 +24,19 @@ constexpr UINT_PTR kPollTimer=3;          // the refresh cadence (settings.pollS
 constexpr UINT_PTR kPollNowTimer=14;
 constexpr UINT_PTR kToastTimer=4;         // one-shot: the toast clears itself after kToastMilliseconds
 constexpr UINT_PTR kTooltipTimer=5;       // one-shot: 悬停 450ms 后显示提示（旧 title 的等价物）
-constexpr UINT_PTR kSpinTimer=6;          // 周期：刷新进行中同步章图标的旋转动画
+constexpr UINT_PTR kSpinTimer=6;
+// 同步章旋转的刷新周期：主面板一帧（Debug ~16ms / Release ~5ms）要留出余量，否则
+// InvalidateRect 会堆积、实际帧率反而掉到 ~11fps（实测每帧转 49°，视觉上"不转只抖"）。
+// 33ms = 30fps，与 1.0 圈/秒搭配时每帧 12°，看起来是连续转动。
+constexpr UINT kSpinIntervalMs=33;          // 周期：刷新进行中同步章图标的旋转动画
 constexpr UINT_PTR kCheckTimer=7;         // one-shot: 刷新成功后对勾显示 800ms 再恢复刷新图标
 constexpr UINT_PTR kLatencyTimer=8;       // 周期：延迟探测（settings.latencyProbe）
-constexpr UINT_PTR kWidgetTimer=9;        // 周期：贴边挂件动画（声波/光环的呼吸）
 constexpr UINT_PTR kStripCardTimer=11;    // one-shot：贴条悬浮信息卡的延迟（300ms 静止）
 constexpr UINT kStripCardDelayMs=300;
 // 动效（移植自 balance-panel-native）：统一 ease-out 进度 + 一个只在动画期间存在的 16ms 计时器。
 constexpr UINT_PTR kMotionTimer=12;
 constexpr unsigned kMotionTickMs=16;
-constexpr unsigned kPanelMotionMs=140;    // 面板内容入场
+constexpr unsigned kPanelMotionMs=140;    // 切页内容淡入（展开入场已移除，见 DESIGN v1.11）
 constexpr unsigned kCardMotionMs=120;     // 悬浮卡入场
 constexpr unsigned kCardExitMs=80;        // 悬浮卡退场淡出
 constexpr unsigned kStripEnterMs=110;     // 收起瞬间贴条淡入
@@ -42,13 +48,16 @@ constexpr UINT kLatencyMessage=WM_APP+14; // 延迟探测结果回到 UI 线程�
 constexpr UINT kProfileMessage=WM_APP+15; // 配置档案应用结果回到 UI 线程
 constexpr UINT kProbeProgressMessage=WM_APP+16; // 逐条探测进度（每完成一条刷新一次按钮/行状态）
 constexpr UINT kProbeRowMessage=WM_APP+17;      // 逐条探测的单行结果（堆上的 ProbeRow，测完一条就投）
+constexpr UINT kSyncAllMessage=WM_APP+41;       // 一键同步完成
+constexpr UINT kNativeFieldMessage=WM_APP+40;   // 原生输入框事件（wParam=字段 id，lParam=NativeField::Event）
 constexpr UINT kTooltipDelayMs=450;
 constexpr UINT kToastMilliseconds=2600;   // old .toast lifetime (app.js toast 2.6s)
 constexpr unsigned long long kNotifySuppressionMs=10ull*60ull*1000ull;   // F6：同事件 10 分钟不重复
 constexpr UINT kCaretMilliseconds=530;
 constexpr UINT kGraceMilliseconds=400;
 // The scroll position is kept as a float, so the wheel can move by less than a whole row.
-constexpr int kFavoritesMax=200,kRecentsMax=12;   // main.js FAVORITES_MAX / RECENTS_MAX
+// kFavoritesMax / kRecentsMax 现在定义在 data/settings.h（加载时也要按它截断），
+// 调用点本来就在 hermes 命名空间里，直接可见，这里不再重复定义。
 Json RectJson(const Rect& rect) { return Json::array({rect.x,rect.y,rect.width,rect.height}); }
 std::wstring LegacyDefaultDirectory() {
     // %APPDATA%\HermesModelPanel - the Electron panel's own directory (never written by us).
@@ -62,24 +71,28 @@ std::wstring LegacyDefaultDirectory() {
 std::string ProviderLabelFor(const std::string& providerId) {
     return providerId.starts_with("custom:")?providerId.substr(7):providerId;
 }
-std::string Narrow(const std::wstring& value) {
-    if(value.empty()) return {};
-    const int length=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
-    std::string result(static_cast<std::size_t>(length),'\0');
-    WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),length,nullptr,nullptr);
-    return result;
+// v1.18：与助手 derive_key_env 同一份规则——表单不再让用户填 Key 变量名，只把推导结果作为提示显示。
+// 非字母数字的连续片段折成下划线、去首尾、转大写，末尾补 _API_KEY（已有就不重复加）。
+inline std::string DeriveKeyEnv(const std::string& name) {
+    std::string cleaned;
+    bool pendingSeparator=false;
+    for(const char ch:name) {
+        const bool alnum=(ch>='A'&&ch<='Z')||(ch>='a'&&ch<='z')||(ch>='0'&&ch<='9');
+        if(alnum) {
+            if(pendingSeparator&&!cleaned.empty()) cleaned+='_';
+            pendingSeparator=false;
+            cleaned+=static_cast<char>(ch>='a'&&ch<='z'?ch-32:ch);
+        } else pendingSeparator=true;
+    }
+    if(cleaned.empty()) return {};
+    if(cleaned.size()<8||cleaned.compare(cleaned.size()-8,8,"_API_KEY")!=0)
+        cleaned+="_API_KEY";
+    return cleaned;
 }
 POINT MessagePoint(HWND window,LPARAM lparam) {
     POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
     ClientToScreen(window,&point);
     return point;
-}
-std::wstring Widen(const std::string& value) {
-    if(value.empty()) return {};
-    const int length=MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0);
-    std::wstring result(static_cast<std::size_t>(length),L'\0');
-    MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),length);
-    return result;
 }
 Point CenterOf(const Rect& rect) { return {rect.x+rect.width/2,rect.y+rect.height/2}; }
 // 单行文本按字节截断，且不切断 UTF-8 码点（模态事实行 / 通知正文都用它）。

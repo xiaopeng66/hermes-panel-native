@@ -110,11 +110,17 @@ void HelperBridge::Configure(std::wstring distro,std::wstring pythonExe,std::wst
     pythonExe_=std::move(pythonExe);
     helperPath_=std::move(helperPath);
 }
+// 发行版留空 = 用 WSL 默认发行版：这时**不能**传 `-d ""`（wsl.exe 会报
+// WSL_E_DISTRO_NOT_FOUND，整条助手链路全挂）。设置页的占位提示写的就是这个语义。
+std::wstring HelperBridge::DistroSwitch() const {
+    if(distro_.empty()) return {};
+    return L" -d "+Quote(distro_);
+}
 void HelperBridge::SetWslExecutable(std::wstring path) { wslExe_=std::move(path); }
 void HelperBridge::SetLogSink(std::function<void(const std::string&)> sink) { logSink_=std::move(sink); }
 
 bool HelperBridge::WslReachable() {
-    const std::wstring command=Quote(wslExe_)+L" -d "+Quote(distro_)+L" -- true";
+    const std::wstring command=Quote(wslExe_)+DistroSwitch()+L" -- true";
     STARTUPINFOW startup{sizeof(startup)};
     startup.dwFlags=STARTF_USESHOWWINDOW|STARTF_USESTDHANDLES;
     startup.wShowWindow=SW_HIDE;
@@ -147,7 +153,7 @@ bool HelperBridge::WslReachable() {
 
 HelperReply HelperBridge::Call(const std::string& requestLine,unsigned timeoutMs) {
     HelperReply reply;
-    const std::wstring command=Quote(wslExe_)+L" -d "+Quote(distro_)+L" -- "
+    const std::wstring command=Quote(wslExe_)+DistroSwitch()+L" -- "
         +Quote(pythonExe_)+L" "+Quote(helperPath_);
     STARTUPINFOW startup{sizeof(startup)};
     startup.dwFlags=STARTF_USESHOWWINDOW|STARTF_USESTDHANDLES;

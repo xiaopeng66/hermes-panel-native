@@ -42,16 +42,14 @@ Size TierSize(Tier tier, unsigned dpi) { return {ScaleDip(384,dpi),ScaleDip(tier
 Size TierSize(const GeometryModel& model, unsigned dpi) {
     // 宽度 384（旧 CANON_W："给模型名多留 24px"）；完整档用用户固定的高度（DIP），
     // 紧凑档固定 152（旧"紧凑视图"）。切页不再改窗口高度。
-    const int height=model.tier==Tier::Compact?152:model.heightDip;
+    const int height=model.tier==Tier::Compact?152:model.heightDip;   // 紧凑档固定 152（几何门禁契约）
     return {ScaleDip(384,dpi),ScaleDip(height,dpi)};
 }
 Size WidgetSize(WidgetStyle style, Edge edge, unsigned dpi) {
     // DIP 尺寸表：竖边（左右）用 width×height，横边（上下）转置。
     int width=0,height=0;
     switch(style) {
-    case WidgetStyle::Beacon: width=10;height=76;break;
     case WidgetStyle::Tag: width=14;height=74;break;
-    case WidgetStyle::Flag: width=16;height=58;break;
     case WidgetStyle::Capsule: width=30;height=136;break;   // 旧胶囊原尺寸
     }
     if(edge==Edge::Top||edge==Edge::Bottom) std::swap(width,height);
@@ -61,46 +59,29 @@ WidgetMetrics WidgetMetricsFor(WidgetStyle style,unsigned dpi) {
     // 绘制与命中（GDI 区域）共用同一份几何参数：两边各写一套必然漂移。
     WidgetMetrics metrics;
     switch(style) {
-    case WidgetStyle::Beacon:
-        metrics.gap=ScaleDip(3,dpi);          // 三段之间的缝
-        metrics.radius=ScaleDip(2,dpi);       // 段端小圆角：读作"信号段"而不是小胶囊
-        metrics.accent=ScaleDip(2,dpi);       // 异常段的呼吸微光外扩
-        break;
     case WidgetStyle::Tag:
         metrics.radius=ScaleDip(4,dpi);
         metrics.spine=ScaleDip(3,dpi);        // 贴边侧身份色轨
-        metrics.gap=ScaleDip(4,dpi);          // 底部三灯的间距
         metrics.accent=ScaleDip(2,dpi);       // 待重启时顶部琥珀条
-        break;
-    case WidgetStyle::Flag:
-        metrics.radius=ScaleDip(4,dpi);
-        metrics.tail=ScaleDip(12,dpi);        // 燕尾长度
-        metrics.spine=ScaleDip(3,dpi);        // 最差状态高饱和亮条
-        metrics.gap=ScaleDip(3,dpi);
         break;
     case WidgetStyle::Capsule:
         metrics.radius=ScaleDip(15,dpi);      // 半宽：桌面侧全圆角
-        metrics.gap=ScaleDip(4,dpi);
         break;
     }
     return metrics;
 }
 const char* WidgetStyleName(WidgetStyle style) {
     switch(style) {
-    case WidgetStyle::Beacon: return "beacon";
     case WidgetStyle::Tag: return "tag";
-    case WidgetStyle::Flag: return "flag";
     case WidgetStyle::Capsule: return "capsule";
     }
-    return "beacon";
+    return "capsule";
 }
 WidgetStyle WidgetStyleFromName(const std::string& name) {
-    // 旧值继续接受：capsule 仍是胶囊；pulse（声波）已删，落到最窄的信标；
-    // halo/badge 落到铭牌，magnet 落到旗标。
-    if(name=="capsule") return WidgetStyle::Capsule;
+    // 旧值继续接受：capsule 仍是胶囊，halo/badge 落到铭牌；
+    // 已删除的样式（beacon/pulse/flag/magnet）与未知值都落到胶囊。
     if(name=="tag"||name=="halo"||name=="badge") return WidgetStyle::Tag;
-    if(name=="flag"||name=="magnet") return WidgetStyle::Flag;
-    return WidgetStyle::Beacon;   // beacon / pulse / 未知值
+    return WidgetStyle::Capsule;
 }
 WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
     const auto size = TierSize(model,monitor.dpi);
@@ -108,7 +89,14 @@ WindowRects ComputeRect(const GeometryModel& model, const Monitor& monitor) {
     Rect panel{model.floating.x,model.floating.y,size.width,size.height};
     const auto& work = monitor.work;
     switch(model.edge) {
-    case Edge::None: return {panel,std::nullopt};
+    case Edge::None: {
+        // 浮动窗口也必须夹进**工作区**（任务栏在左/上/任意侧时，屏幕边 != 工作区边）。
+        // 以前这里直接返回模型里的原始坐标：任务栏在顶部时面板会压到任务栏下面
+        // （set 里存的是旧工作区坐标，换任务栏位置后也不会被纠正）。
+        const auto clamped=ClampFloating({model.floating.x,model.floating.y},size,work);
+        panel.x=clamped.x;panel.y=clamped.y;
+        return {panel,std::nullopt};
+    }
     case Edge::Left:
     case Edge::Right: {
         panel.x = model.edge==Edge::Left ? work.x : work.right()-size.width;

@@ -34,7 +34,14 @@ void GeometryController::Place(const GeometryModel& model,const Monitor& monitor
 }
 void GeometryController::Visibility(State state) {
     Assert(state!=State::Dragging,"INV2: visibility controller called during system drag");
-    if(state==State::Hidden) { ShowWindow(panel_,SW_HIDE);ShowWindow(strip_,SW_HIDE); }
+    if(state==State::Hidden) {
+        // 最小化的窗口 SW_HIDE 不会真的消失：系统保留任务栏条目，之后再恢复时窗口又冒出来，
+        // 而 state_ 已经停在 Hidden —— 几何状态机与真实可见性脱节。脱节后 HitTest 里
+        // `if(state_!=State::Hidden)` 整块被跳过，恒返回 HTCLIENT：标题栏拖不动、底边也拉不高
+        // （真机实测 WM_NCHITTEST 从 2 变成 1）。先 SW_RESTORE 再 SW_HIDE，隐藏才是真的隐藏。
+        if(IsIconic(panel_)) ShowWindow(panel_,SW_RESTORE);
+        ShowWindow(panel_,SW_HIDE);ShowWindow(strip_,SW_HIDE);
+    }
     else if(state==State::Collapsed) { ShowWindow(panel_,SW_HIDE);ShowWindow(strip_,SW_SHOWNOACTIVATE); }
     else {
         // 最小化的窗口用 SW_SHOWNOACTIVATE 不会恢复（GetWindowRect 仍是任务栏小矩形）；

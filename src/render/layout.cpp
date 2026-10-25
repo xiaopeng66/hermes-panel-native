@@ -24,7 +24,10 @@ constexpr float kIcb=24.0f;
 
 constexpr float kLampRow=27.0f,kRegPadX=9.0f,kLampDot=6.0f,kLampGap=5.0f,kRegGap=11.0f;
 
-constexpr float kSyncWidth=92.0f;
+// 同步章（刷新按钮）宽度 = 图标 11 + 间距 5 + "HH:MM" ≈ 30 + 右侧内边距 4 + 少量留白。
+// 以前 92 DIP：内容右对齐，按钮左侧空出约 50 DIP 的空白点击区（真机 2026-10-21 报
+// 「logo 左边一大块空白控件」）。宽度只影响命中/悬停底，内容仍右对齐。
+constexpr float kSyncWidth=60.0f;
 
 constexpr float kChipHeight=22.0f,kChipWidth=110.0f;
 
@@ -58,7 +61,7 @@ constexpr float kGroupHeadPadX=11.0f,kGroupHeadGap=7.0f,kCaret=14.0f,kGdot=6.0f,
 
     kMenuButton=20.0f;
 
-constexpr float kRowLeftPad=31.0f,kRowRightPad=9.0f,kRowGap=8.0f,kPcol=86.0f,kStar=22.0f;
+constexpr float kRowRightPad=9.0f,kRowGap=8.0f,kPcol=86.0f,kStar=22.0f;
 
 // ---- H5 页面的度量（styles.css：.ph 9/11/7、.fb-row 8px 竖距 + 20px 序号、.addline 8/11、
 
@@ -72,9 +75,9 @@ constexpr float kListMinHeight=384.0f,kFallbackMinHeight=400.0f,kAddMinHeight=45
 
 constexpr float kPageHeadTop=9.0f,kPageHeadGap=8.0f,kPageHeadHeight=34.0f,kPageTitleFont=12.5f;
 
-constexpr float kLadderPadX=11.0f,kLadderPadTop=2.0f,kLadderRowPad=8.0f,kLadderIndex=20.0f;
+constexpr float kLadderPadTop=2.0f,kLadderRowPad=8.0f,kLadderIndex=20.0f;
 
-constexpr float kAddLinePad=8.0f,kAddLineMargin=8.0f,kAddLineBottom=11.0f,kAddLineHeight=34.0f;
+constexpr float kAddLineMargin=8.0f,kAddLineBottom=11.0f,kAddLineHeight=34.0f;
 
 constexpr float kFoldTop=46.0f,kFoldPad=11.0f,kFoldGap=9.0f,kFoldX=7.0f;
 
@@ -88,7 +91,6 @@ constexpr float kModalBodyFont=11.0f;
 
 constexpr float kToastBottom=55.0f,kToastPadX=10.0f,kToastPadY=8.0f,kToastGap=8.0f;
 
-constexpr float kCardRadius=9.0f;
 
 // ---- H5b/H5c 三页的度量（styles.css：.form gap 9 / .srow 5px 竖距 / .sect 7/11/3 / .bkp-row 42）----
 
@@ -136,6 +138,15 @@ D2D1_RECT_F Box(float x,float y,float width,float height) {
 
     return D2D1::RectF(x,y,x+width,y+height);
 
+}
+
+// 下拉列表的落点：默认贴在字段下沿，下方装不下就整体翻到字段**上方**。
+// 设置页「关闭按钮」就在视口最后一行，向下展开时第二项（退出程序）正好落进底栏，
+// 渲染出来被整块盖住、点也点不到（真机实测：下拉只露出第一项）。
+float SelectListTop(float fieldBottom,float fieldTop,float listHeight,float limitBottom) {
+    if(fieldBottom+listHeight<=limitBottom) return fieldBottom;
+    const float flipped=fieldTop-listHeight;
+    return flipped>=0.0f?flipped:std::max(0.0f,limitBottom-listHeight);
 }
 
 }
@@ -272,7 +283,10 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             if(index<3) {
 
-                const auto box=D2D1::RectF(lamp.dot.left,lamp.dot.top,lamp.label.right,lamp.dot.bottom);
+                // 悬停/命中盒覆盖**整行高度**：以前只到 dot.bottom（8px 高的一条），
+                // 鼠标落在灯的文字上不弹提示，取矩形中点也会落到灯下面那一行。
+                const auto box=D2D1::RectF(lamp.dot.left,layout.lampRow.top,lamp.label.right,
+                    layout.lampRow.bottom);
 
                 layout.controls.push_back({lampIds[index],box,static_cast<int>(index)});
 
@@ -353,7 +367,9 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
     const bool modelPage=view.activePage==0&&view.offlineReason.empty();
 
-    layout.hero=modelPage?Box(0,dip(kTitleBar+kLampRow),width,dip(kHeroHeight)):D2D1::RectF();
+    // hero 只在模型页出现（紧凑视图已删除，窗口高度由用户固定，不再有"装不下"的档位）。
+    const bool heroFits=modelPage;
+    layout.hero=heroFits?Box(0,dip(kTitleBar+kLampRow),width,dip(kHeroHeight)):D2D1::RectF();
 
     layout.heroDivider=Box(0,layout.hero.bottom-dip(1),width,dip(1));
 
@@ -361,7 +377,9 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         const float lampSize=dip(8);
 
-        layout.heroLamp=Box(dip(kHeroPadX+2),layout.hero.top+(dip(kHeroHeight)-lampSize)/2.0f,lampSize,lampSize);
+        layout.heroLamp=heroFits
+            ?Box(dip(kHeroPadX+2),layout.hero.top+(dip(kHeroHeight)-lampSize)/2.0f,lampSize,lampSize)
+            :D2D1::RectF();
 
         const float textLeft=layout.heroLamp.right+dip(kHeroGap);
 
@@ -435,9 +453,14 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
     // （真机反馈"输入框的边框显示不完全"）。左边界同理留 0.5。
 
+    // 内容区高度夹到**非负**：窗口被工作区夹得极矮时（用户把高度拉到下限），
+    // 直接相减会得到负数，后续各处 `std::max(96, …)` 之类的兜底又把它撑回 96+，
+    // 最终控件被画到窗口外（真机上点不到）。
+    const float availableContent=std::max(0.0f,layout.nav.top-contentTop);   // 已是像素，不能再乘 scale
     layout.content=Box(dip(kPagePadX),contentTop,
 
-        width-dip(kPagePadX*2)-dip(kStrokeInset),layout.nav.top-contentTop);
+        width-dip(kPagePadX*2)-dip(kStrokeInset),availableContent);
+    const bool tightContent=availableContent<dip(80.0f);
 
     layout.pageTitle=Box(layout.content.left,layout.content.top,layout.content.right-layout.content.left,dip(22));
 
@@ -451,26 +474,24 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
     layout.searchIcon=Box(layout.search.left+dip(8),layout.search.top+dip(8),dip(14),dip(14));
 
-    layout.searchHint=Box(layout.search.right-dip(22),layout.search.top+dip(6),dip(14),dip(18));
+    // v1.25：搜索框右端是「✕ + 刷新同步」两个按钮，互不重叠；文字区在它们左边。
+    layout.syncModels=Box(layout.search.right-dip(92),layout.search.top+dip(5),dip(84),
+        dip(kSearchHeight)-dip(10));
 
-    layout.searchClear=Box(layout.search.right-dip(28),layout.search.top+dip(5),dip(20),dip(20));
+    layout.searchClear=Box(layout.search.right-dip(114),layout.search.top+dip(5),dip(20),dip(20));
+
+    layout.searchHint=Box(layout.search.right-dip(134),layout.search.top+dip(6),dip(14),dip(18));
 
     layout.searchText=Box(layout.search.left+dip(29),layout.search.top,
-
-        (view.searchHasText?layout.searchClear.left:layout.searchHint.left)-dip(3)-layout.search.left-dip(29),
-
+        (view.searchHasText?layout.searchClear.left:layout.searchHint.left)
+            -dip(3)-layout.search.left-dip(29),
         dip(kSearchHeight));
 
     if(view.activePage==0) {
-
-        // The clear button sits inside the box, so it is listed first: ControlAt returns the first
-
-        // match, and the small button must win over the box it lives in.
-
+        // 命中顺序：✕ → 同步按钮 → 搜索框（搜索框是整行大矩形，必须最后）。
         if(view.searchHasText) layout.controls.push_back({ControlId::SearchClear,layout.searchClear});
-
+        layout.controls.push_back({ControlId::SyncModels,layout.syncModels});
         layout.controls.push_back({ControlId::SearchBox,layout.search});
-
     }
 
     // ---- 过滤行（.filters：三个 seg + 右侧 .hint）与列表（.list）----只属于模型页 ----
@@ -515,16 +536,26 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
     const float listBoxTop=layout.filters.bottom+dip(kFiltersPadBottom);
 
-    const float listAvailable=std::max(dip(96.0f),layout.nav.top-listBoxTop-dip(1));
+    const float listAvailable=tightContent?0.0f
+        :std::max(dip(96.0f),layout.nav.top-listBoxTop-dip(1));
 
     // 模型页列表吃掉固定窗口的剩余高度（窗口可手动拉高）；其它页保持旧的 384 上限，
     // 备份页在自己的分支里再按可用空间夹取。
     const float listHeight=view.activePage==0?listAvailable
         :std::min(dip(kListMinHeight+1.0f),listAvailable);
 
+    // 高度夹进窗口：紧凑档（或窗口被工作区夹短）时 listBoxTop 已经接近底部导航，
+    // 直接给 listAvailable 会把列表画到底栏下面。
+    const float listBottomLimit=std::max(listBoxTop,layout.nav.top-dip(1));
+    // 右侧留白：滑条画在 content.right+2..+8（距窗口右缘 3.5 DIP），已经在卡片右缘之外，
+    // 不会压住卡片 —— 所以**不要**为它额外收窄列表。列表盒就用 content 的左右边界，
+    // 两者都是 kPagePadX，天然对称。
+    // （曾在这里加过 dip(kPagePadX) 的右侧内缩，结果右缘距窗口 22.5 DIP、左边只有 11，
+    //   真机立刻看出左右不对称 —— 那次修错了，已撤回。）
     layout.list=Box(layout.filters.left,listBoxTop,
 
-        layout.filters.right-layout.filters.left,listHeight);
+        layout.filters.right-layout.filters.left,
+        std::min(listHeight,std::max(0.0f,listBottomLimit-listBoxTop)));
 
     layout.listViewport=layout.list;
 
@@ -700,7 +731,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             const float barWidth=dip(kScrollBar);
 
-            layout.scrollTrack=Box(layout.list.right-barWidth-dip(1),layout.listViewport.top,barWidth,
+            layout.scrollTrack=Box(layout.content.right+dip(2.0f),layout.listViewport.top,barWidth,
 
                 viewportHeight);
 
@@ -772,17 +803,23 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         const float addHeight=dip(kAddLineMargin+kAddLineHeight+kAddLineBottom);
 
-        layout.ladder=Box(layout.content.left,layout.pageHead.bottom+dip(7),
-
-            layout.content.right-layout.content.left,
-
+        // 阶梯高度夹到非负：紧凑档（或窗口被夹得很矮）时 content 已经很矮，直接相减会是负数，
+        // 后续 addLine/折叠控件就被算到窗口外面（audit 报 fbFoldToggle outside）。
+        const float ladderTop=layout.pageHead.bottom+dip(7);
+        const float ladderHeight=std::max(0.0f,
             layout.content.bottom-layout.pageHead.bottom-dip(7)-addHeight);
+        layout.ladder=Box(layout.content.left,ladderTop,
+
+            layout.content.right-layout.content.left,ladderHeight);
 
         layout.addLine=Box(layout.content.left,layout.ladder.bottom+dip(kAddLineMargin),
 
             layout.content.right-layout.content.left,dip(kAddLineHeight));
 
-        layout.controls.push_back({ControlId::FbFoldToggle,layout.addLine});
+        // 连「追加一条」都放不下时（紧凑档）不注册控件：不然它落在窗口外，点不到却仍占命中表。
+        const bool addLineVisible=layout.addLine.bottom<=layout.content.bottom+0.5f;
+        if(addLineVisible) layout.controls.push_back({ControlId::FbFoldToggle,layout.addLine});
+        else layout.addLine=D2D1::RectF();
 
         // 阶梯行：8px 竖距 + 20px 序号 + 两行文字（== 50 高），按钮在行尾。
         // 条目多于视口时在阶梯内部滚动（旧版 #fb-list 的 overflow-y:auto），否则第 9 条以后点不到。
@@ -847,6 +884,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
         }
 
         if(view.fallback.formOpen) {
+            const auto foldControlStart=layout.controls.size();
 
             // .fold：浮在阶梯上面（不把页面撑高），top 46、左右 11、padding 11。
 
@@ -912,39 +950,17 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             advance(30);
 
-            cardField(0,30,cardLeft,cardWidth,1);
+            cardField(3,30,cardLeft,cardWidth,1);
+
+            // v1.25（用户要求）：模型只能选、不能手打——整块字段都算下拉命中区。
+            {
+                const auto fieldBox=layout.fields[1].box;
+                layout.controls.insert(layout.controls.begin()+static_cast<std::ptrdiff_t>(foldControlStart),
+                    {ControlId::FbModelSelect,Box(fieldBox.left,fieldBox.top,
+                        fieldBox.right-fieldBox.left,fieldBox.bottom-fieldBox.top)});
+            }
 
             advance(30);
-
-            if(view.fallback.source==0) {
-
-                // 手填模式：四个字段两行两列（旧版一列，窗口会长高；这里档位固定所以并排）。
-
-                const float gap=dip(7);
-
-                const float columnWidth=(cardWidth-gap)/2.0f;
-
-                const auto pair=[&](int leftIndex,int rightIndex) {
-
-                    cardField(leftIndex==5?1:0,30,cardLeft,columnWidth,leftIndex);
-
-                    cardField(rightIndex==5?1:0,30,cardLeft+columnWidth+gap,columnWidth,rightIndex);
-
-                    advance(30);
-
-                };
-
-                pair(2,3);                                     // provider 名 + Base URL
-
-                pair(4,5);                                     // Key 变量名 + API Key
-
-                // 卡片高度还要装下展开时的下拉列表（最多 6 行）：让卡片把列表盖住，而不是列表戳出卡外。
-
-                if(!view.fallback.sources.empty())
-
-                    foldHeight+=dip(kFieldLabel+kFieldGap);
-
-            }
 
             // 下拉框本身也是一个控件（点开/收起）
 
@@ -969,6 +985,12 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
             layout.foldClose=Box(layout.fold.right-dip(kFoldX+24),layout.fold.top+dip(kFoldX),dip(24),dip(24));
 
             layout.controls.push_back({ControlId::FbFoldClose,layout.foldClose});
+            // v1.25：折叠卡浮在阶梯之上——它的控件整体挪到控件表最前，让 ControlAt 先命中卡片。
+            // 否则点卡片的 × / 保存 会被下边阶梯行的三个按钮抢走（真机反馈"收起按钮穿透"）。
+            // v1.25：折叠卡浮在阶梯之上——它的控件整体挪到控件表最前，让 ControlAt 先命中卡片。
+            if(foldControlStart<layout.controls.size())
+                std::rotate(layout.controls.begin(),layout.controls.begin()+foldControlStart,
+                    layout.controls.end());
 
             if(view.fallback.selectOpen) {
                 // 下拉展开：贴在「来源供应商」字段下面，宽度与字段一致；可视 6 行，超出的滚动。
@@ -977,13 +999,59 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
                 const int maxFirst=static_cast<int>(total>kRows?total-kRows:0);
                 const int first=std::clamp(view.fallback.sourceScroll,0,maxFirst);
                 const std::size_t count=std::min<std::size_t>(kRows,total-static_cast<std::size_t>(first));
-                layout.selectList=Box(layout.fields[0].box.left,layout.fields[0].box.bottom,
-                    layout.fields[0].box.right-layout.fields[0].box.left,
-                    dip(30.0f*static_cast<float>(count)+8));
+                const float optionListHeight=dip(30.0f*static_cast<float>(count)+8);
+                const float optionListTop=SelectListTop(layout.fields[0].box.bottom,
+                    layout.fields[0].box.top,optionListHeight,layout.content.bottom);
+                layout.selectList=Box(layout.fields[0].box.left,optionListTop,
+                    layout.fields[0].box.right-layout.fields[0].box.left,optionListHeight);
                 layout.selectLabels.clear();
                 for(std::size_t i=0;i<count;++i)
                     layout.selectLabels.push_back(view.fallback.sources[static_cast<std::size_t>(first)+i]);
                 layout.selectActive=view.fallback.source;
+                layout.selectScroll=first;
+                layout.selectTotal=static_cast<int>(total);
+                layout.selectVisible=static_cast<int>(count);
+                float optionY=layout.selectList.top+dip(4);
+                for(std::size_t i=0;i<count;++i) {
+                    ControlRect option;
+                    option.id=ControlId::SelectOption;
+                    option.index=first+static_cast<int>(i);
+                    option.rect=Box(layout.selectList.left,optionY,
+                        layout.selectList.right-layout.selectList.left,dip(30));
+                    layout.selectOptions.push_back(option);
+                    optionY+=dip(30);
+                }
+                if(total>count) {
+                    const float trackTop=layout.selectList.top+dip(4);
+                    const float trackHeight=dip(30.0f*static_cast<float>(count));
+                    const float thumbHeight=trackHeight*static_cast<float>(count)/static_cast<float>(total);
+                    const float thumbTop=trackTop+trackHeight*static_cast<float>(first)/static_cast<float>(total);
+                    layout.selectBar=Box(layout.selectList.right-dip(4),trackTop,dip(3),trackHeight);
+                    layout.selectThumb=Box(layout.selectBar.left,thumbTop,dip(3),thumbHeight);
+                }
+            }
+            if(view.fallback.modelSelectOpen&&!view.fallback.modelOptions.empty()) {
+                // v1.16：模型 ▾ 贴在「模型 id」下面，规则与来源供应商下拉一致（可视 6 行 + 滚动）。
+                // 与来源列表互斥由应用层保证，两者不会同时写这一组布局槽位。
+                constexpr std::size_t kRows=6;
+                const auto total=view.fallback.modelOptions.size();
+                const int maxFirst=static_cast<int>(total>kRows?total-kRows:0);
+                const int first=std::clamp(view.fallback.sourceScroll,0,maxFirst);
+                const std::size_t count=std::min<std::size_t>(kRows,total-static_cast<std::size_t>(first));
+                const float optionListHeight=dip(30.0f*static_cast<float>(count)+8);
+                const float optionListTop=SelectListTop(layout.fields[1].box.bottom,
+                    layout.fields[1].box.top,optionListHeight,layout.content.bottom);
+                layout.selectList=Box(layout.fields[1].box.left,optionListTop,
+                    layout.fields[1].box.right-layout.fields[1].box.left,optionListHeight);
+                layout.selectLabels.clear();
+                int active=-1;
+                for(std::size_t i=0;i<total;++i) {
+                    if(view.fallback.modelOptions[i]==view.fallback.modelValue)
+                        active=static_cast<int>(i);
+                }
+                for(std::size_t i=0;i<count;++i)
+                    layout.selectLabels.push_back(view.fallback.modelOptions[static_cast<std::size_t>(first)+i]);
+                layout.selectActive=active;
                 layout.selectScroll=first;
                 layout.selectTotal=static_cast<int>(total);
                 layout.selectVisible=static_cast<int>(count);
@@ -1031,9 +1099,11 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         if(view.activePage==3) {
 
-            layout.pageHeadSub=Box(layout.content.left+dip(120),dip(0),dip(160),dip(30));
-
-            layout.pageHeadAction=Box(layout.content.right-dip(88),dip(0),dip(88),dip(30));
+            // 页头动作按钮（备份页「刷新」）必须落在**页头**里：之前纵坐标写的是 dip(0)，
+            // 于是它被画到窗口最顶端，和标题栏的吸附/最小化按钮叠在一起（真机截图里那枚
+            // 顶着 ↻ 和「刷新」字样的怪按钮就是它）。
+            layout.pageHeadAction=Box(layout.content.right-dip(88),layout.content.top+dip(y),
+                dip(88),dip(30));
 
             layout.controls.push_back({ControlId::BackupRefresh,layout.pageHeadAction});
 
@@ -1083,11 +1153,11 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
                 layout.content.right-layout.content.left,dip(kSubRow));
 
-            const ControlId subIds[3]={ControlId::SubTabNew,ControlId::SubTabModels,ControlId::SubTabDel};
+            const ControlId subIds[2]={ControlId::SubTabNew,ControlId::SubTabDel};
 
             float x=layout.subTabs.left;
 
-            for(std::size_t index=0;index<view.add.subs.size()&&index<3;++index) {
+            for(std::size_t index=0;index<view.add.subs.size()&&index<2;++index) {
 
                 const float itemWidth=dip(kSegPadX*2+kSegSlack)+EstimateWidth(view.add.subs[index],kSegFont)*scale;
 
@@ -1251,36 +1321,43 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
                 cursor+=dip(kSegHeight+kFormRowGap);
 
-                // 模型药丸行 + 手动输入开关
-
-                layout.chipRow=Box(layout.content.left,cursor,rowWidth(),dip(0));
-
+                // v1.21（用户要求）：模型列表——一个可滚动的列表，不再是一行会溢出的药丸。
+                // 表头一行「全选/全不选」，下面 5 行可视，超出用滚轮 + 右侧滑块。
                 if(!page.chips.empty()) {
-
-                    layout.chipRow=Box(layout.content.left,cursor,rowWidth(),dip(kChipPillHeight));
-
-                    float chipX=layout.chipRow.left;
-
-                    for(std::size_t chipIndex=0;chipIndex<page.chips.size()&&chipIndex<8;++chipIndex) {
-
-                        const auto& chip=page.chips[chipIndex];
-
-                        const float itemWidth=dip(7*2)+EstimateWidth(chip.model,kSegFont)*scale;
-
-                        if(chipX+width>layout.chipRow.right) break;
-
-                        layout.segments.push_back({ControlId::ModelChip,Box(chipX,cursor,itemWidth,dip(kChipPillHeight))});
-
-                        layout.segments.back().index=static_cast<int>(chipIndex);
-
-                        layout.controls.push_back(layout.segments.back());
-
-                        chipX+=width+dip(5);
-
+                    constexpr std::size_t kVisibleRows=5;
+                    const float rowHeight=dip(28);
+                    const float headerHeight=dip(26);
+                    const auto total=page.chips.size();
+                    const int maxFirst=static_cast<int>(total>kVisibleRows?total-kVisibleRows:0);
+                    const int first=std::clamp(page.modelScroll,0,maxFirst);
+                    const std::size_t count=std::min<std::size_t>(
+                        kVisibleRows,total-static_cast<std::size_t>(first));
+                    layout.modelList=Box(layout.content.left,cursor,rowWidth(),
+                        headerHeight+rowHeight*static_cast<float>(count)+dip(4));
+                    layout.controls.push_back({ControlId::ModelRowAll,
+                        Box(layout.modelList.left,layout.modelList.top,rowWidth()-dip(4),headerHeight)});
+                    float rowY=layout.modelList.top+headerHeight;
+                    layout.modelRows.clear();
+                    for(std::size_t slotIndex=0;slotIndex<count;++slotIndex) {
+                        ControlRect row;
+                        row.id=ControlId::ModelRow;
+                        row.index=first+static_cast<int>(slotIndex);
+                        row.rect=Box(layout.modelList.left,rowY,rowWidth()-dip(4),rowHeight);
+                        layout.modelRows.push_back(row);
+                        layout.controls.push_back(row);
+                        rowY+=rowHeight;
                     }
-
-                    cursor+=dip(kChipPillHeight+kFormRowGap);
-
+                    if(total>kVisibleRows) {
+                        const float trackTop=layout.modelList.top+headerHeight;
+                        const float trackHeight=rowHeight*static_cast<float>(count);
+                        const float thumbHeight=trackHeight*static_cast<float>(count)
+                            /static_cast<float>(total);
+                        const float thumbTop=trackTop+trackHeight*static_cast<float>(first)
+                            /static_cast<float>(total);
+                        layout.modelListBar=Box(layout.modelList.right-dip(3),trackTop,dip(3),trackHeight);
+                        layout.modelListThumb=Box(layout.modelListBar.left,thumbTop,dip(3),thumbHeight);
+                    }
+                    cursor+=headerHeight+rowHeight*static_cast<float>(count)+dip(4)+dip(kFormRowGap);
                 }
 
             }
@@ -1300,7 +1377,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
             // 审计 F-012：API Key 字段右内侧的眼睛按钮（旧版 #btn-np-eye）。
             if(page.sub==0) {
                 for(const auto& field:layout.fields) {
-                    if(field.index!=3) continue;
+                    if(field.index!=2) continue;
                     const float size=dip(26);
                     const float pad=dip(5);
                     layout.controls.push_back({ControlId::KeyReveal,
@@ -1323,8 +1400,11 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
                     const int maxFirst=static_cast<int>(total>kRows?total-kRows:0);
                     const int first=std::clamp(page.providerScroll,0,maxFirst);
                     const std::size_t count=std::min<std::size_t>(kRows,total-static_cast<std::size_t>(first));
-                    layout.selectList=Box(field.box.left,field.box.bottom,field.box.right-field.box.left,
-                        dip(30.0f*static_cast<float>(count)+8));
+                    const float optionListHeight=dip(30.0f*static_cast<float>(count)+8);
+                    const float optionListTop=SelectListTop(field.box.bottom,field.box.top,
+                        optionListHeight,layout.content.bottom-dip(kFootHeight));
+                    layout.selectList=Box(field.box.left,optionListTop,
+                        field.box.right-field.box.left,optionListHeight);
                     layout.selectLabels.clear();
                     for(std::size_t i=0;i<count;++i)
                         layout.selectLabels.push_back(page.providers[static_cast<std::size_t>(first)+i]);
@@ -1367,21 +1447,21 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             // 探测按钮在保存按钮左边（加模型页的文案更长，单独加宽）
 
-            const float probeWidth=view.activePage==2&&view.add.sub==1?dip(140):buttonWidth;
+            // v1.18：探测按钮只在「新建供应商」页（删除页没有可探测的对象）。
+            if(view.activePage!=2||view.add.sub==0) {
 
-            layout.secondaryButton=Box(layout.primaryButton.left-dip(7)-probeWidth,layout.primaryButton.top,
+                layout.secondaryButton=Box(layout.primaryButton.left-dip(7)-buttonWidth,
+                    layout.primaryButton.top,buttonWidth,dip(30));
 
-                probeWidth,dip(30));
+                layout.controls.push_back({ControlId::ProbeButton,layout.secondaryButton});
 
-            layout.controls.push_back({ControlId::ProbeButton,layout.secondaryButton});
+            }
 
             // 说明/错误行止于左侧按钮之前，避免文字压到按钮下面。
 
-            const float probeSpan=(view.activePage==2&&view.add.sub==1)?dip(140):buttonWidth;
-
             layout.errorLine=Box(layout.content.left,footTop+dip(6),
 
-                std::max(dip(60),rowWidth()-buttonWidth-probeSpan-dip(24)),dip(34));
+                std::max(dip(60),rowWidth()-buttonWidth-buttonWidth-dip(24)),dip(34));
 
             // 危险卡的边框：把「删除供应商」按钮包进红框（旧 .danger 卡片）
 
@@ -1389,7 +1469,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
                 rowWidth(),dip(0));
 
-            layout.pageScroll=0;                     // 添加页正文不超过视口，只有手动输入展开时接近
+            // 正文超过视口时由页内滚动接住（底部动作栏固定在视口之外，不跟着滚）。
 
         } else if(view.activePage==3) {
 
@@ -1406,7 +1486,8 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
             const float listTop=bodyTop;
 
             // 视口取「384 与可用高度」的较小值：窗口被手动拉矮后，列表不能再压到底栏上。
-            const float backupAvailable=std::max(dip(96.0f),layout.content.bottom-listTop);
+            const float backupAvailable=tightContent?0.0f
+                :std::max(dip(96.0f),layout.content.bottom-listTop);
             const float listViewportHeight=std::min(dip(kListMinHeight),backupAvailable);
 
             layout.list=Box(layout.content.left,listTop,rowWidth(),listViewportHeight);
@@ -1449,13 +1530,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             // 也要算进列表的滚动范围，否则第二行被裁掉（真机上就是"脚注被切断"）。
 
-            const float footHeight=dip(38);
-
-            layout.cardFoot=Box(layout.content.left,rowY+dip(9),rowWidth(),footHeight);
-
-            const float rowsHeight=dip(kBackupRow)*static_cast<float>(view.backup.rows.size())
-
-                +footHeight+dip(9);
+            const float rowsHeight=dip(kBackupRow)*static_cast<float>(view.backup.rows.size());
 
             layout.pageMaxScroll=std::max(0.0f,rowsHeight-listViewportHeight);
 
@@ -1868,9 +1943,15 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
                     const auto count=page.closeOptions.size();
 
-                    layout.selectList=Box(closeBox->left,closeBox->bottom,
+                    const float optionListHeight=dip(30.0f*static_cast<float>(count)+8);
+                    // 关闭按钮常落在视口最后一行：下方放不下时向上翻，否则第二项会被底栏盖住、
+                    // 点也点不到（真机实测只露出「隐藏到托盘」）。
+                    const float optionListTop=SelectListTop(closeBox->bottom,closeBox->top,
+                        optionListHeight,layout.content.bottom);
 
-                        closeBox->right-closeBox->left,dip(30.0f*static_cast<float>(count)+8));
+                    layout.selectList=Box(closeBox->left,optionListTop,
+
+                        closeBox->right-closeBox->left,optionListHeight);
 
                     layout.selectLabels.clear();
 
@@ -1906,9 +1987,25 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         // ---- 页内滚动：正文超出视口时可见滚动条（旧 body.clamped .page 的等价物）----
 
-        layout.pageViewport=Box(layout.content.left,layout.content.top,
+        // 添加页底部是固定动作栏（探测/保存）：正文视口止于它的上沿，否则窗口拉矮后
 
-            layout.content.right-layout.content.left,layout.content.bottom-layout.content.top);
+        // 正文会被动作栏盖住（真机：「接口模式」与 .env 说明被按钮压住）。
+
+        const float bodyBottom=(view.activePage==2&&layout.footBar.bottom>layout.footBar.top)
+
+            ?layout.footBar.top:layout.content.bottom;
+
+        // 裁剪起点必须是**页头之后、子页分段之前**，而不是 bodyTop（正文起点）：
+        // 添加页的「新建/删除供应商」和「接口模式」两排分段都排在 bodyTop 之上，
+        // 用 bodyTop 当裁剪上沿会把它们整排裁掉 —— 真机看到的就是"「添加」下面一大片空白"。
+        // 没有子页分段的页（设置页）起点就是页头下沿，行为不变。
+        const float viewportTop=layout.subTabs.bottom>layout.subTabs.top
+            ?layout.subTabs.top
+            :(layout.pageHead.bottom>layout.pageHead.top?layout.pageHead.bottom:bodyTop);
+        layout.pageViewport=Box(layout.content.left,viewportTop,
+
+            layout.content.right-layout.content.left,
+            std::max(0.0f,bodyBottom-viewportTop));
 
         // 备份页的滚动范围由它自己的列表决定（上面已算好），其它页按正文实测。
 
@@ -1916,7 +2013,7 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             const float contentHeight=(cursor+view.pageScroll)-bodyTop;
 
-            layout.pageMaxScroll=std::max(0.0f,contentHeight-(layout.content.bottom-bodyTop));
+            layout.pageMaxScroll=std::max(0.0f,contentHeight-(bodyBottom-bodyTop));
 
         }
 
@@ -1954,11 +2051,11 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         }
 
-        layout.pageScrollVisible=layout.pageMaxScroll>0;
+        layout.pageScrollVisible=layout.pageMaxScroll>0&&layout.pageViewport.bottom>layout.pageViewport.top;
 
         if(layout.pageScrollVisible) {
 
-            const float viewportHeight=layout.content.bottom-bodyTop;
+            const float viewportHeight=layout.pageViewport.bottom-layout.pageViewport.top;
 
             const float barWidth=dip(kScrollBar);
 
@@ -2356,15 +2453,62 @@ ListHit ListHitTest(const PanelLayout& layout,float x,float y) {
 
 }
 
+namespace {
+// 这些控件属于外壳/浮层，不参与"裁进内容区"的规则（底栏、标题栏、模态、下拉列表）。
+bool ShellControl(ControlId id) {
+    switch(id) {
+    case ControlId::Snap: case ControlId::Pin: case ControlId::Minimize: case ControlId::Close:
+    case ControlId::TabModels: case ControlId::TabFallback: case ControlId::TabAdd:
+    case ControlId::TabBackup: case ControlId::TabSettings:
+    case ControlId::Refresh: case ControlId::Chip: case ControlId::ChipWarn:
+    case ControlId::ChipHelper: case ControlId::RegisterRestartGateway:
+    case ControlId::StatusPill: case ControlId::LampWsl: case ControlId::LampWebui:
+    case ControlId::LampGateway: case ControlId::ModalConfirm: case ControlId::ModalCancel:
+    case ControlId::SelectOption: case ControlId::SyncModels:
+    case ControlId::SearchClear: case ControlId::SearchBox:
+        return true;
+    default: return false;
+    }
+}
+}
+
 ControlId ControlAt(const PanelLayout& layout,float x,float y) {
+
+    const auto hit=[&](const ControlRect& control) {
+
+        return x>=control.rect.left&&x<control.rect.right
+
+            &&y>=control.rect.top&&y<control.rect.bottom;
+
+    };
+
+    // v1.25（真机反馈"点设置会点到下边的按钮/很多按钮穿透"）：命中顺序必须跟**绘制层级**一致。
+
+    // 底栏/标题栏/模态/下拉是最后画的，却因为登记得晚排在控件表尾部；旧实现按登记顺序取第一个
+
+    // 命中，于是页面里滚出视口的控件会先被选中。现在：①外壳控件优先；②页面控件必须落在内容区
+
+    // （滚到页脚/底栏下面的行不再吃点击）；③其余仍按登记顺序（折叠卡已提前）。
 
     for(const auto& control:layout.controls) {
 
-        if(control.id==ControlId::None) continue;
+        if(control.id==ControlId::None||!ShellControl(control.id)) continue;
 
-        if(x>=control.rect.left&&x<control.rect.right&&y>=control.rect.top&&y<control.rect.bottom)
+        if(hit(control)) return control.id;
 
-            return control.id;
+    }
+
+    const bool insideContent=x>=layout.content.left-2.0f&&x<layout.content.right+2.0f
+
+        &&y>=layout.content.top-2.0f&&y<layout.content.bottom+2.0f;
+
+    if(!insideContent) return ControlId::None;
+
+    for(const auto& control:layout.controls) {
+
+        if(control.id==ControlId::None||ShellControl(control.id)) continue;
+
+        if(hit(control)) return control.id;
 
     }
 

@@ -45,6 +45,7 @@ switch(id) {
             case ControlId::KeyReveal: return std::string("keyReveal");
             case ControlId::SearchBox: return std::string("searchBox");
             case ControlId::SearchClear: return std::string("searchClear");
+            case ControlId::SyncModels: return std::string("syncModels");
             case ControlId::FilterAll: return std::string("filterAll");
             case ControlId::FilterFav: return std::string("filterFav");
             case ControlId::FilterRecent: return std::string("filterRecent");
@@ -57,10 +58,10 @@ switch(id) {
             case ControlId::FbFoldClose: return std::string("fbFoldClose");
             case ControlId::FbSubmit: return std::string("fbSubmit");
             case ControlId::FbSelect: return std::string("fbSelect");
+            case ControlId::FbModelSelect: return std::string("fbModelSelect");
             case ControlId::ModalConfirm: return std::string("modalConfirm");
             case ControlId::ModalCancel: return std::string("modalCancel");
             case ControlId::SubTabNew: return std::string("subTabNew");
-            case ControlId::SubTabModels: return std::string("subTabModels");
             case ControlId::SubTabDel: return std::string("subTabDel");
             case ControlId::ProbeButton: return std::string("probeButton");
             case ControlId::PrimaryButton: return std::string("primaryButton");
@@ -133,7 +134,7 @@ Json Application::Dump() const {
     return Json{
         {"instance",Narrow(control_?[this]{wchar_t name[128]{};GetWindowTextW(control_,name,128);return std::wstring(name);}():L"")},
         {"state",static_cast<int>(state_)},{"edge",static_cast<int>(model_.edge)},
-        {"anchor",model_.anchor},{"compact",model_.tier==Tier::Compact},
+        {"anchor",model_.anchor},{"compact",false},   // 紧凑视图已删除
         {"pinned",stored_.topmost},{"activePage",activePage_},
         {"search",{{"text",search_.TextUtf8()},{"focused",focusedField_==&search_},
             {"composing",search_.Composing()},{"composingText",Narrow(search_.composition)}}},
@@ -204,6 +205,14 @@ Json Application::Dump() const {
         // ---- H4 models page: what the gate asserts on (state, filters, list, switch bookkeeping) ----
         {"data",{{"busy",workerBusy_.load()},{"signature",stateSignature_},
             {"wsl",hermesState_.wsl},{"providers",hermesState_.providers.size()},
+            // 供应商逐条（名称/地址/密钥变量名/模型数）：门禁要断言"某个动作发的是这个供应商的地址"，
+            // 只给个数不够（v1.15 的供应商菜单探测路径就是这么漏覆盖的）。
+            {"providerList",[this]{Json list=Json::array();
+                for(const auto& provider:hermesState_.providers)
+                    list.push_back({{"name",provider.name},{"providerId",provider.providerId},
+                        {"baseUrl",provider.baseUrl},{"keyEnv",provider.keyEnv},
+                        {"models",provider.models.size()},{"isActive",provider.isActive}});
+                return list;}()},
             {"fallbacks",hermesState_.fallbacks.size()},
             {"currentProvider",hermesState_.model.provider},{"currentModel",hermesState_.model.model},
             {"webuiReachable",hermesState_.webui.reachable},{"gatewayReachable",hermesState_.gateway.reachable},
@@ -230,7 +239,7 @@ Json Application::Dump() const {
                 if(!panel_) return list;
                 RECT client{};GetClientRect(panel_,&client);
                 const auto layout=ComputeLayout(view,static_cast<float>(client.right),
-                    static_cast<float>(client.bottom),static_cast<float>(monitor_.geometry.dpi)/96.0f);
+                    static_cast<float>(client.bottom),static_cast<float>(WindowDpi())/96.0f);
                 POINT origin{0,0};ClientToScreen(panel_,&origin);
                 for(const auto& row:layout.statusRows)
                     list.push_back({{"x",static_cast<int>(std::lround(origin.x+row.row.left))},
@@ -244,7 +253,7 @@ Json Application::Dump() const {
         {"select",[this,&view]{
             RECT client{};GetClientRect(panel_,&client);
             const auto layout=ComputeLayout(view,static_cast<float>(client.right),
-                static_cast<float>(client.bottom),static_cast<float>(monitor_.geometry.dpi)/96.0f);
+                static_cast<float>(client.bottom),static_cast<float>(WindowDpi())/96.0f);
             Json labels=Json::array();
             for(const auto& label:layout.selectLabels) labels.push_back(label);
             return Json{{"labels",labels},{"scroll",layout.selectScroll},
@@ -256,10 +265,10 @@ Json Application::Dump() const {
             {"probeLabel",view.fallback.probeLabel},{"probeRunning",view.fallback.probeRunning},
             {"formOpen",view.fallback.formOpen},{"selectOpen",view.fallback.selectOpen},
             {"source",view.fallback.source},{"sources",view.fallback.sources},
-            {"manual",view.fallback.source==0},{"busy",view.fallback.busy},
+            {"busy",view.fallback.busy},
             {"error",view.fallback.error},{"modelValue",view.fallback.modelValue},
-            {"providerValue",view.fallback.providerValue},{"urlValue",view.fallback.urlValue},
-            {"keyEnvValue",view.fallback.keyEnvValue},{"keyValue",view.fallback.keyValue},
+            {"modelSelectOpen",view.fallback.modelSelectOpen},
+            {"modelOptions",view.fallback.modelOptions},
             {"rows",[&view]{Json list=Json::array();
                 for(const auto& row:view.fallback.rows) list.push_back({{"provider",row.provider},
                     {"model",row.model},{"baseUrl",row.baseUrl},{"keyEnv",row.keyEnv},
@@ -311,6 +320,10 @@ Json Application::Dump() const {
             {"chips",[&view]{Json list=Json::array();
                 for(const auto& chip:view.add.chips) list.push_back(chip.model);
                 return list;}()},
+            {"chipsSelected",[&view]{Json list=Json::array();
+                for(const auto& chip:view.add.chips) list.push_back(chip.selected);
+                return list;}()},
+            {"modelScroll",view.add.modelScroll},
             {"countText",view.add.countText},{"chipNote",view.add.chipNote},
             {"keyRevealed",view.add.keyRevealed},
             {"primaryDisabled",view.add.primaryDisabled},
@@ -354,12 +367,35 @@ Json Application::Dump() const {
                 for(const auto& row:view.settings.switches) list.push_back({{"label",row.label},
                     {"note",row.note},{"on",row.on},{"index",row.index}});
                 return list;}()}}},
-        {"focus",{{"field",view.focusedFormField},{"hotkeyCapturing",setHotkeyCapturing_},
+        {"focus",{{"field",view.focusedFormField},{"caret",view.focusedFormCaret},
+            {"native",[this]{const auto* native=NativeFor(focusedField_);
+                return Json(native?native->Focused():false);}()},
+            {"multiline",view.focusedFormMultiline},{"hotkeyCapturing",setHotkeyCapturing_},
             {"control",focusControl_},{"index",focusControlIndex_}}},
         {"fallback",{{"formOpen",fbFormOpen_},{"selectOpen",fbSelectOpen_},{"source",fbSource_}}},
+        {"probeAll",{{"busy",allProbeBusy_.load()},{"done",allProbeDone_.load()},
+            {"total",allProbeTotal_.load()},{"ok",allProbeOk_.load()},
+            {"providers",[this]{Json list=Json::array();std::lock_guard<std::mutex> lock(probedMutex_);
+                for(const auto& entry:probedModels_)
+                    list.push_back({{"name",entry.first},{"count",entry.second.size()}});
+                return list;}()}}},
         {"tooltip",{{"visible",view.tooltip.visible},{"text",view.tooltip.text},
             {"control",tooltipHover_}}},
         {"tooltipHoverIndex",tooltipHoverIndex_},
+        // 悬停高亮状态（排查"悬停没反应/闪过虚影"用：hovered 是命中控件，amount 是过渡进度）。
+        {"hover",{{"control",view.hoverControl},{"amount",view.motion.hoverAmount},
+            {"previous",view.motion.hoverPrevious}}},
+        // 同步章角度（排查"不转/抖动"用）：按时间算，正常应随每次 dump 递增。
+        {"spin",{{"angle",view.syncSpinAngle},{"busy",view.busy}}},
+        // v1.24：忙碌条是独立子窗口——门禁断言"忙碌期间它持续重绘且单帧很便宜"。
+        {"syncAll",{{"busy",syncAllBusy_.load()},{"done",syncAllDone_.load()},
+            {"total",syncAllTotal_.load()},{"changed",syncAllChanged_.load()}}},
+        {"paintFrames",paintFrames_},
+        {"hoverLayout",{{"hits",hoverLayoutHits_},{"misses",hoverLayoutMisses_}}},
+        {"measure",{{"hits",panelContext_.surface.MeasureHits()},
+            {"misses",panelContext_.surface.MeasureMisses()}}},
+        {"busyBar",{{"visible",busyBar_.Visible()},{"paints",busyBar_.Paints()},
+            {"lastPaintMs",busyBar_.LastPaintMs()}}},
         {"tooltipPopup",{{"visible",tooltipView_.visible},{"text",tooltipView_.text},
             {"left",tooltipView_.left},{"top",tooltipView_.top}}},
         {"providerMenu",{{"open",pending_==Pending::ProviderMenu},
@@ -367,10 +403,10 @@ Json Application::Dump() const {
         {"pageScroll",pageScroll_},
         {"fit",{{"contentHeight",model_.heightDip},{"heightDip",model_.heightDip},
             {"desiredPhysical",[this,&view]{RECT client{};GetClientRect(panel_,&client);
-                const auto scale=static_cast<float>(monitor_.geometry.dpi)/96.0f;
+                const auto scale=static_cast<float>(WindowDpi())/96.0f;
                 return ComputeLayout(view,static_cast<float>(client.right),
                     static_cast<float>(client.bottom),scale).desiredHeight;}()},
-            {"scale",static_cast<double>(monitor_.geometry.dpi)/96.0}}},
+            {"scale",static_cast<double>(WindowDpi())/96.0}}},
         {"models",{{"filter",filterKind_},{"cursor",cursor_},{"scroll",listScroll_},
             {"pointer",{{"x",pointerX_},{"y",pointerY_},{"inside",pointerInside_}}},
             {"expanded",expanded_},{"search",search_.TextUtf8()},
@@ -479,7 +515,7 @@ Json Application::Command(const Json& request) {
         // 布局自查：控件/分段/字段/阶梯行/模态行的越界与退化。全页×主题扫描靠它断言"一个都不许有"。
         RECT client{};
         GetClientRect(panel_,&client);
-        const auto scale=static_cast<float>(monitor_.geometry.dpi)/96.0f;
+        const auto scale=static_cast<float>(WindowDpi())/96.0f;
         const auto view=CurrentView();
         const auto layout=ComputeLayout(view,static_cast<float>(client.right),
             static_cast<float>(client.bottom),scale);
@@ -599,7 +635,7 @@ Json Application::Command(const Json& request) {
         GetClientRect(panel_,&client);
         POINT origin{0,0};
         ClientToScreen(panel_,&origin);
-        const auto scale=static_cast<float>(monitor_.geometry.dpi)/96.0f;
+        const auto scale=static_cast<float>(WindowDpi())/96.0f;
         const auto view=CurrentView();
         const auto layout=ComputeLayout(view,static_cast<float>(client.right),
             static_cast<float>(client.bottom),scale);
@@ -661,6 +697,18 @@ Json Application::Command(const Json& request) {
         for(const auto& control:layout.controls)
             if(control.id==ControlId::SwitchRowControl) switchRows.push_back(translate(control.rect));
         controls["_switches"]=switchRows;
+        // 模型药丸（新建供应商页的探测结果）：门禁要能逐个点掉。
+        Json chipRects=Json::array();
+        for(const auto& control:layout.controls)
+            if(control.id==ControlId::ModelChip) chipRects.push_back(translate(control.rect));
+        controls["_chips"]=chipRects;
+        // v1.21：模型列表的行（索引与 dump.add.chips 对齐）。
+        Json modelRowRects=Json::array();
+        for(const auto& row:layout.modelRows)
+            modelRowRects.push_back({{"index",row.index},{"rect",translate(row.rect)}});
+        controls["_modelRows"]=modelRowRects;
+        if(const auto* all=ControlRectFor(layout,ControlId::ModelRowAll))
+            controls["modelRowAll"]=translate(*all);
         Json restore=Json::array();
         for(const auto& control:layout.controls)
             if(control.id==ControlId::RestoreButton) restore.push_back(translate(control.rect));
@@ -793,16 +841,20 @@ Json Application::Command(const Json& request) {
         // procedure, so the field editing, the list cursor and the clear-on-Esc paths run for real.
         // (Real SendInput for the same keys lives in the h-ime gate, which skips when the desktop is
         // busy; this desktop's foreground window is often held by another application.)
+        // v1.23：焦点在原生输入框时，字符/按键要送进那个 EDIT（系统控件自己处理光标与选区）。
+        HWND target=panel_;
+        if(auto* native=NativeFor(focusedField_))
+            if(native->Handle()) target=native->Handle();
         if(command=="key") {
             for(const auto character:request.at("text").get<std::string>())
-                SendMessageW(panel_,WM_CHAR,static_cast<WPARAM>(static_cast<unsigned char>(character)),0);
+                SendMessageW(target,WM_CHAR,static_cast<WPARAM>(static_cast<unsigned char>(character)),0);
             return {{"chars",request.at("text").get<std::string>().size()}};
         }
         const auto key=request.at("vk").get<UINT>();
         // `mods` 是给门禁用的合成修饰键状态（真实键盘由 GetKeyState 提供，合成按键不会改它）。
         syntheticMods_=request.value("mods",0);
-        SendMessageW(panel_,WM_KEYDOWN,key,0);
-        SendMessageW(panel_,WM_KEYUP,key,0);
+        SendMessageW(target,WM_KEYDOWN,key,0);
+        SendMessageW(target,WM_KEYUP,key,0);
         syntheticMods_=0;
         return {{"vk",key}};
     }
@@ -933,6 +985,10 @@ Json Application::Command(const Json& request) {
         const auto x=request.at("x").get<int>(),y=request.at("y").get<int>();
         // 不调 PointerMovedOnPanel：它会 arm TME_LEAVE，而真实指针在面板外时系统会立刻回一个
         // WM_MOUSELEAVE，把刚点起来的气泡又收掉（合成悬停不该受真实指针影响）。
+        syntheticHover_=true;      // 忽略紧随其后的真实 WM_MOUSELEAVE（指针在面板外）
+        // 2 秒保护窗：真实指针可能正停在面板上别处（或系统补发 WM_MOUSEMOVE），
+        // 那会把合成悬停立刻覆盖成"指针下的控件"，提示永远弹不出来。
+        syntheticHoverUntil_=GetTickCount64()+2000;
         TrackHover(panel_,static_cast<float>(x),static_cast<float>(y));
         return {{"hovered",hoverControl_},{"index",tooltipHoverIndex_}};
     }
@@ -947,10 +1003,10 @@ Json Application::Command(const Json& request) {
                 ControlId::TabSettings,ControlId::Refresh,ControlId::Chip,ControlId::ChipWarn,
                 ControlId::SearchBox,ControlId::SearchClear,ControlId::FilterAll,ControlId::FilterFav,
                 ControlId::FilterRecent,ControlId::FbProbe,ControlId::FbFoldToggle,ControlId::FbFoldClose,
-                ControlId::FbSubmit,ControlId::FbSelect,ControlId::FbUp,ControlId::FbDown,ControlId::FbRemove,
+                ControlId::FbSubmit,ControlId::FbSelect,ControlId::FbModelSelect,ControlId::FbUp,ControlId::FbDown,ControlId::FbRemove,
                 ControlId::FormField,
                 ControlId::SelectOption,ControlId::ModalConfirm,ControlId::ModalCancel,ControlId::SubTabNew,
-                ControlId::SubTabModels,ControlId::SubTabDel,ControlId::ModelChip,
+                ControlId::SubTabDel,ControlId::ModelChip,
                 ControlId::ProbeButton,ControlId::PrimaryButton,
                 ControlId::SwitchRowControl,ControlId::ModeSeg,ControlId::ThemeSeg,ControlId::RestoreButton,
                 ControlId::BackupRefresh,ControlId::OpenWebUiButton,ControlId::ChipHelper,ControlId::OfflineStart};
@@ -983,8 +1039,13 @@ Json Application::Command(const Json& request) {
             DWORD pid=0;
             if(window) GetWindowThreadProcessId(window,&pid);
             const auto style=window?GetWindowLongPtrW(window,GWL_EXSTYLE):0;
+            // v1.23：命中我们自己的原生输入框（面板的子窗口）也算"点得到"——
+            // 它就在面板内部，不是遮挡。
             return Json{{"hwnd",reinterpret_cast<std::uintptr_t>(window)},{"class",Narrow(cls)},
-                {"pid",pid},{"topmost",(style&WS_EX_TOPMOST)!=0},{"isPanel",window==panel_},{"isStrip",window==strip_}};
+                {"pid",pid},{"topmost",(style&WS_EX_TOPMOST)!=0},
+                {"isPanel",window==panel_},
+                {"isPanelChild",window&&panel_&&(window==panel_||GetAncestor(window,GA_ROOT)==panel_)},
+                {"isStrip",window==strip_}};
         };
         GUITHREADINFO info{sizeof(info)};
         const auto haveInfo=GetGUIThreadInfo(0,&info)!=0;

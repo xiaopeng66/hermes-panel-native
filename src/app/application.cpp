@@ -1,7 +1,9 @@
 #include "application.h"
 #include "app/application_internal.h"
 #include "control_plane.h"
+#include <algorithm>
 #include <cmath>
+#include "core/text.h"
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -23,9 +25,9 @@ const std::vector<MenuEntry>& MenuEntries() {
     static const std::vector<MenuEntry> entries{
         {static_cast<unsigned>(MenuCommand::ToggleVisibility),"hide",L"显示/隐藏面板"},
         {static_cast<unsigned>(MenuCommand::Refresh),"refresh",L"刷新状态"},
+        {static_cast<unsigned>(MenuCommand::ProbeAllModels),"probe-all",L"探测全部供应商模型（只读）"},
         {static_cast<unsigned>(MenuCommand::OpenWebUI),"open-webui",L"打开 WebUI"},
         {static_cast<unsigned>(MenuCommand::RestartGateway),"restart-gateway",L"重启网关"},
-        {static_cast<unsigned>(MenuCommand::CompactView),"compact",L"紧凑视图"},
         {static_cast<unsigned>(MenuCommand::AlwaysOnTop),"topmost",L"始终置顶"},
         {static_cast<unsigned>(MenuCommand::Dock),"dock",L"贴边收回"},
         {static_cast<unsigned>(MenuCommand::Undock),"undock",L"解除贴边"},
@@ -62,12 +64,12 @@ HMONITOR MonitorByDevice(const std::string& deviceUtf8) {
 NativeMonitor MonitorAt(Point point) { return ReadMonitor(MonitorFromPoint({point.x,point.y},MONITOR_DEFAULTTONEAREST)); }
 
 bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* settings,Log* log) {
-    instance_=instance;control_=control;settings_=settings;log_=log;
+    control_=control;settings_=settings;log_=log;
     // 表单字段的形态（旧 textarea 是多行；API Key 掩码由绘制层按 masked 处理）。
-    addModels_.multiline=true;
-    addModels_.placeholder="deepseek-v4-flash";
-    addNewModels_.multiline=true;
-    addNewModels_.placeholder="deepseek-v4-flash";
+    // v1.21：模型区是"单行输入 + 列表"——单行才会让 Enter 走"失焦即添加"。
+    RegisterNativeFieldClass(instance);
+    RegisterBusyBarClass(instance);
+    RegisterSpinGlyphClass(instance);
     if(log_) log_->Info("app","starting instance");
     palette_=ResolveTheme(stored_.theme);
     // The hermes panel has no stored session of its own: the WSL helper owns every secret.
@@ -133,8 +135,10 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     if(!RegisterClassExW(&cls)) return false;
     const auto rects=ComputeRect(model_,monitor_.geometry);
     const auto& rect=rects.panel;
+    // v1.23：WS_CLIPCHILDREN —— 原生输入框是子窗口，父窗口绘制时必须让出它们的位置，
+    // 否则每次重绘都会把输入框区域刷掉一帧（真机反馈"输入框一直在闪烁"）。
     panel_=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_TOPMOST,L"HermesModelPanelNative.Panel",L"Hermes \u6A21\u578B\u9762\u677F",
-        WS_POPUP,rect.x,rect.y,rect.width,rect.height,nullptr,nullptr,instance,&panelContext_);
+        WS_POPUP|WS_CLIPCHILDREN,rect.x,rect.y,rect.width,rect.height,nullptr,nullptr,instance,&panelContext_);
     strip_=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_TOPMOST|WS_EX_NOACTIVATE|WS_EX_LAYERED,L"HermesModelPanelNative.Strip",L"Hermes \u6A21\u578B\u9762\u677F",
         WS_POPUP,rect.x,rect.y,ScaleDip(8,monitor_.geometry.dpi),rect.height,nullptr,nullptr,instance,&stripContext_);
     hoverCard_=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_TOPMOST|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT,
@@ -142,6 +146,9 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
         &hoverCardContext_);
     if(!panel_||!strip_||!hoverCard_) return false;
     ShowWindow(hoverCard_,SW_HIDE);
+    CreateNativeFields();
+    busyBar_.Create(panel_,9001);
+    spinGlyph_.Create(panel_,9002);
     const DWM_WINDOW_CORNER_PREFERENCE corners=DWMWCP_ROUND;
     DwmSetWindowAttribute(panel_,DWMWA_WINDOW_CORNER_PREFERENCE,&corners,sizeof(corners));
     geometry_.Attach(panel_,strip_,log_);
@@ -171,6 +178,10 @@ Application::~Application() {
     if(worker_.joinable()) worker_.detach();
     if(latencyWorker_.joinable()) latencyWorker_.detach();
     if(profileWorker_.joinable()) profileWorker_.detach();
+    // v1.26：一键探测 / 一键同步的 worker 也必须 detach——退出时还在跑的话，
+    // joinable 的 std::thread 析构会直接 std::terminate（"关面板时进程崩一下"）。
+    if(allProbeWorker_.joinable()) allProbeWorker_.detach();
+    if(syncAllWorker_.joinable()) syncAllWorker_.detach();
     if(hoverCard_) DestroyWindow(hoverCard_);
     if(panel_) DestroyWindow(panel_);
     if(strip_) DestroyWindow(strip_);
@@ -301,6 +312,10 @@ std::wstring Application::TrayTooltip() const {
 }
 void Application::UpdateTrayStatus() {
     if(!trayRegistered_) return;
+    // 真机 2026-10-21「切换模型/重启网关时偶发卡一下」：Shell_NotifyIcon 在资源管理器忙时
+    // 会同步阻塞几百毫秒，而它正好发生在状态翻转（网关灯变红）那一刻。>80ms 记一行，定性用。
+    LARGE_INTEGER shellFreq{},shellStart{},shellDone{};
+    QueryPerformanceFrequency(&shellFreq);QueryPerformanceCounter(&shellStart);
     const auto colour=TrayColour();
     // 图标只在状态色变化时重画（每次刷新重画会闪）。
     if(colour!=trayColour_||!trayIcon_) {
@@ -325,6 +340,12 @@ void Application::UpdateTrayStatus() {
         data.cbSize=sizeof(data);data.hWnd=control_;data.uID=kTrayId;data.uFlags=NIF_TIP;
         wcsncpy_s(data.szTip,trayTip_.c_str(),_TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY,&data);
+    }
+    QueryPerformanceCounter(&shellDone);
+    if(shellFreq.QuadPart>0&&log_) {
+        const auto ms=static_cast<double>(shellDone.QuadPart-shellStart.QuadPart)*1000.0
+            /static_cast<double>(shellFreq.QuadPart);
+        if(ms>=80.0) log_->Info("ui","tray update "+std::to_string(static_cast<int>(ms))+"ms");
     }
 }
 void Application::RemoveTray() {
@@ -441,10 +462,7 @@ HMENU Application::BuildMenu() const {
     AppendMenuW(menu,MF_STRING|(AutoStartEnabled()?MF_CHECKED:0),label(MenuCommand::AutoStart),
         L"\u5F00\u673A\u81EA\u542F");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-    // 组 4：外壳自己的三项（旧版没有：紧致视图是原生档位、刷新间隔属于设置页、数据目录是新壳的入口）。
     // 单独成组放在最后，免得和旧版那三组混在一起（这就是用户看到的「分类混乱」）。
-    AppendMenuW(menu,MF_STRING|(model_.tier==Tier::Compact?MF_CHECKED:0),label(MenuCommand::CompactView),
-        L"\u7D27\u81F4\u89C6\u56FE");
     {
         HMENU poll=CreatePopupMenu();
         const auto addPoll=[&](MenuCommand command,int seconds) {
@@ -455,6 +473,14 @@ HMENU Application::BuildMenu() const {
         addPoll(MenuCommand::Poll60,60);
         addPoll(MenuCommand::Poll120,120);
         addPoll(MenuCommand::Poll300,300);
+        // 设置页的「刷新间隔」输入框允许任意 5..3600 秒。当前值不在上面四档里时（真机基线就是
+        // 20 秒），整个子菜单一个勾都没有，用户看不出现在的间隔是多少 —— 补一条只读的当前值。
+        const bool inPresets=stored_.pollSeconds==30||stored_.pollSeconds==60
+            ||stored_.pollSeconds==120||stored_.pollSeconds==300;
+        if(!inPresets) {
+            AppendMenuW(poll,MF_STRING|MF_CHECKED|MF_GRAYED,0,
+                (L"\u5F53\u524D\uFF1A"+std::to_wstring(stored_.pollSeconds)+L" \u79D2").c_str());
+        }
         AppendMenuW(menu,MF_STRING|MF_POPUP,reinterpret_cast<UINT_PTR>(poll),L"\u5237\u65B0\u95F4\u9694");
     }
     AppendMenuW(menu,MF_STRING,label(MenuCommand::OpenDataDir),L"\u6253\u5F00\u6570\u636E\u76EE\u5F55");
@@ -501,6 +527,7 @@ void Application::InvokeMenu(unsigned id) {
     case MenuCommand::Dock: if(model_.edge!=Edge::None) Undock(); else DockNearest(); return;
     case MenuCommand::Undock: Undock(); return;
     case MenuCommand::Refresh: RefreshData();InvalidateAll();return;
+    case MenuCommand::ProbeAllModels: ProbeAllModels();return;
     case MenuCommand::ThemeDark: SetSetting("theme","dark");return;
     case MenuCommand::ThemeLight: SetSetting("theme","light");return;
     case MenuCommand::ThemeSystem: SetSetting("theme","system");return;
@@ -534,7 +561,6 @@ void Application::InvokeMenu(unsigned id) {
         MessageBoxW(panel_,body.c_str(),L"\u5173\u4E8E Hermes \u6A21\u578B\u9762\u677F",MB_OK|MB_ICONINFORMATION);
         return;
     }
-    case MenuCommand::CompactView: SetTier(model_.tier==Tier::Compact?Tier::Full:Tier::Compact);return;
     case MenuCommand::AlwaysOnTop: SetTopmost(!stored_.topmost);return;
     case MenuCommand::Poll30: SetPollSeconds(30);return;
     case MenuCommand::Poll60: SetPollSeconds(60);return;
@@ -552,19 +578,6 @@ void Application::SetPollSeconds(int seconds) {
     PersistSettings(true);
     if(log_) log_->Info("settings","poll interval "+std::to_string(seconds)+"s");
 }
-void Application::SetTier(Tier tier) {
-    if(model_.tier==tier) return;
-    const auto previous=state_;
-    model_.tier=tier;
-    // Whole-tier switch is one absolute write per window; floating keeps its top-left corner and a
-    // docked panel keeps its anchor (DESIGN §5.4), both of which ComputeRect already guarantees.
-    // 完整档回到用户固定高度，紧凑档固定 152——切档不再触发第二次 content-fit 写入。
-    geometry_.Place(model_,monitor_.geometry,state_,"tier");
-    ++tierWrites_;
-    ApplyState("tier",previous);
-    PersistSettings(true);
-    InvalidateAll();
-}
 void Application::SetTopmost(bool topmost) {
     stored_.topmost=topmost;
     SyncTopmostStyle();
@@ -580,15 +593,318 @@ void Application::SyncTopmostStyle() {
     place(panel_,stored_.topmost);
     place(strip_,stored_.topmost);
 }
+// ---- v1.23 原生输入框：创建 / 摆放 / 事件 ----
+namespace {
+// 字段 id = 绑定表下标 + 1（0 保留给"没有焦点"）。
+constexpr int kNativeFieldBase=1;
+}
+void Application::CreateNativeFields() {
+    if(!panel_||!nativeBindings_.empty()) return;
+    // 顺序固定：id 与绑定表下标一一对应。只收**单行**文本字段；热键捕获框保持自绘
+    // （它要截获组合键，原生 EDIT 做不了），供应商下拉不是文本。
+    struct Entry { TextField* field;bool password;bool right; };
+    const Entry entries[]={
+        {&search_,false,false},
+        {&addName_,false,false},{&addUrl_,false,false},{&addKey_,true,false},
+
+        // v1.25：回退链只剩两个下拉，没有原生输入框。
+        // 三个设置字段统一 ES_RIGHT：右侧那一列值统一靠右（真机反馈「WSL 发行版没和下面
+        // 两个数字对齐」——以前只有端口/间隔是右对齐的）。
+        {&setDistro_,false,true},{&setWebuiPort_,false,true},{&setPollSec_,false,true}};
+    int id=kNativeFieldBase;
+    for(const auto& entry:entries) {
+        auto* native=new NativeField;
+        native->Create(panel_,id,entry.password,entry.right);
+        if(!native->Created()) { delete native;continue; }
+        native->SetFontAndDpi(static_cast<UINT>(monitor_.geometry.dpi));
+        // 原生控件的占位提示：自绘层的 hint 会被控件盖住，改用系统的 cue banner。
+        if(entry.field==&search_) native->SetCue(L"搜索模型或供应商");
+        // 发行版留空 = 用 WSL 默认发行版（helper 传 -d ""）：给个占位，免得空框让人以为坏了。
+        else if(entry.field==&setDistro_) native->SetCue(L"默认发行版（留空）");
+        else if(!entry.field->placeholder.empty())
+            native->SetCue(Widen(entry.field->placeholder));
+        nativeBindings_.push_back({entry.field,native});
+        ++id;
+    }
+    if(log_) log_->Info("ui","native fields created: "+std::to_string(nativeBindings_.size()));
+}
+NativeField* Application::NativeFor(const TextField* field) const {
+    if(!field) return nullptr;
+    for(const auto& binding:nativeBindings_) if(binding.field==field) return binding.edit;
+    return nullptr;
+}
+void Application::FocusNativeField(TextField* field) {
+    if(auto* native=NativeFor(field)) native->Focus();
+}
+void Application::SyncNativeFields(const PanelLayout& layout) {
+    if(nativeBindings_.empty()) return;
+    // 原生 EDIT 是**真正显示文字的那一层**：自绘字段的 value 被它整个盖住，所以镜像里的文本
+    // 必须推下去。之前只在创建时设过一次空文本，于是设置页三行（WSL 发行版 / WebUI 端口 /
+    // 刷新间隔）一直显示为空框（真机反馈"设置界面上边几个输入框啥也看不见"）；添加页
+    // 清空表单后残留的旧文本也是同一个原因。正在编辑的字段以控件为准（推文本会打断 IME）。
+    // API Key 的「眼睛」：原生控件默认 ES_PASSWORD，切到明文必须真的改控件的掩码字符
+    // （否则自绘层"已显示"、控件还是一片圆点，看起来像点了没反应）。
+    for(auto& binding:nativeBindings_)
+        if(binding.edit&&binding.field==&addKey_) binding.edit->SetPasswordVisible(addKeyRevealed_);
+    // v1.29：摆放只依赖"页 / 子页 / 滚动 / 客户区 / DPI / 浮层态"。这些都没变时整段跳过——
+    // 每帧重建可见字段 map 并逐个 Place 实测要 2-6ms，而绝大多数帧（轮询、悬停、忙碌条）
+    // 布局根本没动。签名只做整数运算，比建 map 便宜一个量级。
+    {
+        unsigned long long signature=0x9E3779B97F4A7C15ull;
+        const auto mix=[&signature](long long value) {
+            signature^=static_cast<unsigned long long>(value)+0x9E3779B97F4A7C15ull
+                +(signature<<6)+(signature>>2);
+        };
+        RECT client{};
+        if(panel_) GetClientRect(panel_,&client);
+        mix(activePage_);mix(addSub_);mix(fbFormOpen_?1:0);mix(fbSelectOpen_?1:0);
+        mix(fbModelSelectOpen_?1:0);mix(addSelectOpen_?1:0);
+        mix(static_cast<int>(pending_));mix(static_cast<int>(WindowDpi()));
+        mix(client.right);mix(client.bottom);
+        mix(static_cast<long long>(pageScroll_*4.0f));mix(static_cast<long long>(listScroll_*4.0f));
+        // 浮层（Toast / 状态中心）的出现/消失也要触发这一帧的重摆：重叠的字段会被藏起来。
+        mix(layout.toast.right>layout.toast.left?1:0);
+        mix(layout.statusCard.right>layout.statusCard.left?1:0);
+        mix(static_cast<long long>(fallbackScroll_*4.0f));
+        if(signature==lastNativeLayoutSignature_) return;
+        lastNativeLayoutSignature_=signature;
+    }
+    // 先算出"这一帧哪些字段可见、放在哪"，再逐个摆放一次。早先的实现先全部隐藏再逐个显示，
+    // 每次 SetWindowPos/ShowWindow 都会让父窗口重绘 → 重绘里又调这里 → 125fps 自激。
+    std::map<TextField*,RECT> visibleFields;
+    const bool panelVisible=panel_&&IsWindowVisible(panel_);
+    // 下拉列表（来源供应商 / 模型 ▾ / 添加页供应商）是自绘浮层，而原生 EDIT 是子窗口、
+    // 永远画在父窗口之上：不隐藏的话列表会被输入框盖住，点列表也会点到输入框上
+    // （真机反馈"下拉里能看到输入框、选不到模型"）。
+    // v1.33：设置页「关闭按钮」下拉也是自绘浮层，漏在判定外时输入框会盖住选项。
+    const bool overlayOpen=fbSelectOpen_||fbModelSelectOpen_||addSelectOpen_||settingsSelectOpen_;
+    const bool blocked=pending_!=Pending::None||overlayOpen;
+    const bool offline=!hermesState_.error.empty()||hermesState_.wsl=="down";
+    if(panelVisible&&!blocked&&!offline) {
+        // 内缩量按窗口 DPI（与绘制同源）：monitor_ 在拖动跨屏期间是旧显示器的倍率。
+        const auto dpi=WindowDpi();
+        // 原生控件是**子窗口**，不吃 D2D 的裁剪区：页内滚动后它会盖到页头、底部动作栏或
+        // 底栏导航上（D2D 那层被裁掉了，子窗口不会）。只摆"整块都在当前页视口里"的字段；
+        // 半截滚出视口的字段由自绘层照常显示（文字在原生控件底下，被遮住的部分本来也看不见）。
+        const bool hasViewport=layout.pageViewport.right>layout.pageViewport.left
+            &&layout.pageViewport.bottom>layout.pageViewport.top;
+        // Toast / 状态中心卡片也是 D2D 画的浮层，会被子窗口（原生输入框）盖住：
+        // 浮层出现时把与它重叠的字段藏起来（自绘层的框与值还在，视觉无缝；
+        // 焦点字段不藏，否则正在输入的内容会掉）。浮层矩形为空时自动不生效。
+        const auto intersects=[&](const RECT& box,const D2D1_RECT_F& rect) {
+            return rect.right>rect.left&&rect.bottom>rect.top
+                &&box.left<static_cast<LONG>(rect.right)&&static_cast<LONG>(rect.left)<box.right
+                &&box.top<static_cast<LONG>(rect.bottom)&&static_cast<LONG>(rect.top)<box.bottom;
+        };
+        const auto underOverlay=[&](const RECT& box) {
+            return intersects(box,layout.toast)||intersects(box,layout.statusCard);
+        };
+        const auto insideViewport=[&](const RECT& box) {
+            if(!hasViewport) return true;
+            constexpr LONG slack=1;   // 半像素舍入
+            return box.left>=static_cast<LONG>(layout.pageViewport.left)-slack
+                &&box.right<=static_cast<LONG>(layout.pageViewport.right)+slack
+                &&box.top>=static_cast<LONG>(layout.pageViewport.top)-slack
+                &&box.bottom<=static_cast<LONG>(layout.pageViewport.bottom)+slack;
+        };
+        if(activePage_==0&&layout.search.right>layout.search.left) {
+            // 左边留出放大镜；右边让开 ✕ 清空按钮与「刷新同步」按钮（两者都在搜索框右端）。
+            // （真机反馈：✕ / 同步按钮被原生输入框盖住，点不到、文字也看不到）。
+            const auto leftInset=static_cast<LONG>(ScaleDip(30,dpi));
+            // 右侧要让开 ✕（search.right-114..-94）与「刷新同步」按钮。原来给 100 DIP，只让到
+            // ✕ 的中间，清空按钮被输入框盖住大半——真机上只剩紧贴边框的一条":"。
+            const auto rightInset=static_cast<LONG>(ScaleDip(118,dpi));
+            visibleFields[&search_]=RECT{static_cast<LONG>(layout.search.left)+leftInset,
+                static_cast<LONG>(layout.search.top)+static_cast<LONG>(ScaleDip(3,dpi)),
+                static_cast<LONG>(layout.search.right)-rightInset,
+                static_cast<LONG>(layout.search.bottom)-static_cast<LONG>(ScaleDip(3,dpi))};
+        }
+        for(const auto& field:layout.fields) {
+            TextField* target=nullptr;
+            if(activePage_==1) target=FormFieldAt(field.index);
+            else if(activePage_==2) target=AddFieldAt(field.index);
+            else if(activePage_==4) {
+                switch(field.index) {
+                case 0: target=&setDistro_;break;
+                case 1: target=&setWebuiPort_;break;
+                case 2: target=&setPollSec_;break;
+                default: break;
+                }
+            }
+            if(!target||!NativeFor(target)) continue;
+            const auto insetX=static_cast<float>(ScaleDip(9,dpi));
+            const auto insetY=static_cast<float>(ScaleDip(3,dpi));
+            // 密码字段右内侧有「眼睛」按钮（26 DIP + 右内边距 5 DIP）：输入框要让开，
+            // 否则按钮被原生控件盖住，只剩贴着右边框的一条边（真机看到的"一个 > 符号"）。
+            const LONG rightInset=static_cast<LONG>(insetX)
+                +(field.kind==1?static_cast<LONG>(ScaleDip(24,dpi)):0);
+            RECT box{static_cast<LONG>(field.box.left+insetX),static_cast<LONG>(field.box.top+insetY),
+                static_cast<LONG>(field.box.right)-rightInset,
+                static_cast<LONG>(field.box.bottom-insetY)};
+            if(box.right<=box.left+4||box.bottom<=box.top) continue;
+            if(!insideViewport(box)) continue;
+            if(target!=focusedField_&&underOverlay(box)) continue;
+            visibleFields[target]=box;
+        }
+    }
+    for(auto& binding:nativeBindings_) {
+        const auto found=visibleFields.find(binding.field);
+        if(found==visibleFields.end()) binding.edit->Place(RECT{},false);
+        else binding.edit->Place(found->second,true);
+    }
+    // 文本必须在**摆好并显示之后**再推：控件隐藏期间 SetWindowTextW 是不生效的
+    // （窗口不可见时系统不更新控件文本），先推后显示会得到"字段是空的"。
+    for(auto& binding:nativeBindings_) {
+        if(!binding.edit||binding.field==focusedField_) continue;
+        binding.edit->SetText(binding.field->Text());
+    }
+}
+
+void Application::SyncBusyBar(const PanelLayout& layout) {
+    const bool busy=workerBusy_.load()||probeRunning_.load()||allProbeBusy_.load()
+        ||syncAllBusy_.load();
+    const bool show=busy&&panel_&&IsWindowVisible(panel_)&&pending_==Pending::None
+        &&layout.content.right>layout.content.left;
+    if(!show) {
+        busyBar_.Place(RECT{},false);
+        spinGlyph_.Place(RECT{},false);
+        spinGlyphShown_=false;
+        if(busyBarTimerArmed_) { KillTimer(panel_,kSpinTimer);busyBarTimerArmed_=false; }
+        return;
+    }
+    if(!busyBarTimerArmed_&&panel_) { busyBarTimerArmed_=true;SetTimer(panel_,kSpinTimer,kSpinIntervalMs,nullptr); }
+    const auto dpi=WindowDpi();
+    RECT bar{static_cast<LONG>(layout.content.left),
+        static_cast<LONG>(layout.lampRow.top),
+        static_cast<LONG>(layout.content.right),
+        static_cast<LONG>(layout.lampRow.top+ScaleDip(3,dpi))};
+    const auto toColour=[](const D2D1_COLOR_F& colour) {
+        return RGB(static_cast<BYTE>(std::lround(colour.r*255.0f)),
+            static_cast<BYTE>(std::lround(colour.g*255.0f)),
+            static_cast<BYTE>(std::lround(colour.b*255.0f)));
+    };
+    // 底色必须取忙碌条所在那一行的颜色（lampRow = surf）：取 ink 会在状态行顶部
+    // 压出一条比周围更深的暗带（真机能看到一条深色横条）。
+    busyBar_.SetColours(toColour(palette_.surf),toColour(palette_.accent));
+    // 「刷新同步」按钮的旋转图标：位置与主面板里那枚图标**逐像素重合** ——
+    // 它在 layout.syncModels（搜索框右端那个按钮）内：距左边 9 DIP、画 12 DIP、垂直居中。
+    // 注意别用 layout.sync（那是顶部灯行右侧的"时间戳同步章"，完全不同的东西；
+    // 之前写错成 layout.sync，图标就跑到顶部 10:07 旁边去了）。
+    // 不用子窗口画的原因：主面板整窗重绘 10–170ms，拿它当动画时钟只会"不转、只在抖"。
+    if(layout.syncModels.right>layout.syncModels.left) {
+        const auto dpiScale=static_cast<float>(dpi)/96.0f;
+        const auto glyph=12.0f*dpiScale;
+        const auto left=layout.syncModels.left+9.0f*dpiScale;
+        const auto centreY=(layout.syncModels.top+layout.syncModels.bottom)/2.0f;
+        RECT glyphRect{static_cast<LONG>(std::lround(left)),
+            static_cast<LONG>(std::lround(centreY-glyph/2.0f)),
+            static_cast<LONG>(std::lround(left+glyph)),
+            static_cast<LONG>(std::lround(centreY+glyph/2.0f))};
+        spinGlyph_.SetColours(toColour(palette_.accentStrong),toColour(palette_.surf));
+        spinGlyph_.Place(glyphRect,true);
+        spinGlyphShown_=true;
+    }
+    busyBar_.Place(bar,true);
+}
+void Application::HandleNativeFieldEvent(int id,int event) {
+    TextField* field=nullptr;
+    const int index=id-kNativeFieldBase;
+    if(index>=0&&index<static_cast<int>(nativeBindings_.size()))
+        field=nativeBindings_[static_cast<std::size_t>(index)].field;
+    if(!field) return;
+    using Event=NativeField::Event;
+    const auto kind=static_cast<Event>(event);
+    if(kind==Event::Focus) {
+        // 原生控件拿到焦点：只同步 focusedField_（文本由 EN_CHANGE 维护，不再用镜像覆盖控件）。
+        if(focusedField_!=field) {
+            if(focusedField_) focusedField_->Blur();
+            focusedField_=field;
+            field->Focus();
+            caretOn_=true;
+            UpdateCaretTimer();
+            InvalidateAll();
+        }
+        return;
+    }
+    if(kind==Event::Blur) {
+        // 文本同步与提交都在 BlurField 里（CommitFocusedField），这里只判是不是同一个字段。
+        if(focusedField_==field) BlurField();
+        return;
+    }
+    if(kind==Event::Pressed) {
+        // 鼠标点进控件：控件已经持有键盘焦点时点击不会产生 WM_SETFOCUS，只靠 Focus 事件
+        // 就学不到"用户又开始编辑了"，随后的输入会在失焦时被静默丢弃（真机：同一字段第二次
+        // 编辑永远不提交）。这里只把焦点指回来——**不做 field->Focus()**，那会 EM_SETSEL 全选，
+        // 把用户刚点出来的插入点冲掉。
+        if(focusedField_!=field) {
+            if(focusedField_) CommitFocusedField();   // 上一个字段还标着编辑：先写回，不抢焦点
+            focusedField_=field;
+            caretOn_=true;
+            UpdateCaretTimer();
+            InvalidateAll();
+        }
+        return;
+    }
+    if(kind==Event::Change) {
+        // EN_CHANGE 在每次按键后到达：立刻镜像，否则"点了探测/保存但还没失焦"时读到旧文本。
+        if(auto* native=NativeFor(field)) {
+            const auto text=Narrow(native->Text());
+            native->RefreshCache();      // 控件里的才是真的：缓存跟上，后续镜像推送才不会回写旧值
+            if(field->TextUtf8()!=text) field->SetTextUtf8(text);
+        }
+        return;
+    }
+    if(kind==Event::ArrowUp||kind==Event::ArrowDown) {
+        // 搜索框的 ↑↓ = 移动列表光标（自绘字段时代由 HandleFieldKey 转发）。
+        if(activePage_==0) HandleListKey(kind==Event::ArrowUp?VK_UP:VK_DOWN);
+        return;
+    }
+    if(kind==Event::Enter||kind==Event::Escape||kind==Event::TabForward||kind==Event::TabBackward) {
+        // 与自绘字段的键盘路径对齐：模型页的搜索框回车 = 切换选中行；其余单行字段回车/转义 = 失焦。
+        if(activePage_==0&&kind==Event::Enter) { HandleListKey(VK_RETURN);return; }
+        if(kind==Event::Escape&&field==&search_) { ClearSearch();return; }
+        if(kind==Event::Escape) {
+            if(fbSelectOpen_) { fbSelectOpen_=false;InvalidateAll();return; }
+            if(fbFormOpen_) { CloseForm();return; }
+        }
+        if(kind==Event::TabForward) { MoveFocus(1);return; }
+        if(kind==Event::TabBackward) { MoveFocus(-1);return; }
+        if(focusedField_==field) {
+            field->SetTextUtf8(Narrow(NativeFor(field)->Text()));
+            BlurField();
+        }
+        return;
+    }
+}
 void Application::ApplyState(const char* reason,State previous) {
     if(log_&&previous!=state_) log_->Info("state",std::string(reason)+" "+std::to_string(static_cast<int>(previous))
         +"->"+std::to_string(static_cast<int>(state_)));
-    if(VisibleFor(previous)!=VisibleFor(state_)) geometry_.Visibility(state_);
-    // 动效触发（移植自余额面板）：贴条展开 → 面板内容淡入+上滑；收起 → 贴条淡入。
-    // 面板按纪律立即隐藏（不做延迟隐藏），所以收起方向只有贴条做动画。
-    if(previous==State::Collapsed&&state_==State::Expanded) StartPanelMotion(true);
+    const bool visibilityChanged=VisibleFor(previous)!=VisibleFor(state_);
+    const bool enteringCollapsed=visibilityChanged&&state_==State::Collapsed;
+    if(visibilityChanged&&!enteringCollapsed) geometry_.Visibility(state_);
+    if(enteringCollapsed) {
+        // 收起路径（真机 2026-10-20/21：每次收起贴条都"闪一下+玻璃变色"）：
+        // ① 面板先藏、贴条保持隐藏 —— 抓屏要的就是"面板不在"的那一帧；
+        // ② **不再重抓玻璃快照**：快照本来拍的就是面板没展开时的桌面，收起后桌面恢复原样，
+        //    复用即可。以前每次收起重抓（CaptureBackdrop 对可见窗口要 hide→DwmFlush→抓→show），
+        //    那一步既是肉眼可见的闪烁，也是玻璃染上面板残影的原因；而同步等合成器（DwmFlush）
+        //    还会把消息循环顶住 —— a-edge 门禁整轮失败就是它（实测 2026-10-21）。
+        // ③ 需要新快照的场合各自显式失效：拖动落点（CommitStripDrop）、换显示器/DPI。
+        ShowWindow(panel_,SW_HIDE);
+        ShowWindow(strip_,SW_HIDE);
+        if(model_.edge==Edge::None) {
+            const auto widget=WidgetSize(model_.widget,Edge::Left,monitor_.geometry.dpi);
+            const auto& work=monitor_.geometry.work;
+            // 与几何层的 Clamp 同一防颠倒语义（work 比 widget 还窄时贴住左上角）。
+            const int x=std::clamp(model_.floating.x,work.x,std::max(work.x,work.right()-widget.width));
+            const int y=std::clamp(model_.floating.y,work.y,std::max(work.y,work.bottom()-widget.height));
+            SetWindowPos(strip_,nullptr,x,y,widget.width,widget.height,SWP_NOACTIVATE|SWP_NOZORDER);
+        }
+    }
+    // 动效触发：收起 → 贴条淡入（面板按纪律立即隐藏，收起方向只有贴条做动画）。
+    // 展开方向**不做任何动效**（用户 2026-10-21 要求："展开能不能不要动画和效果了"）：
+    // 不位移也不淡入，展开即完整显示。切页的内容淡入是另一回事，仍由 StartPanelMotion() 触发。
     if(previous!=State::Collapsed&&state_==State::Collapsed) StartStripMotion();
-    if(previous==State::Hidden&&state_!=State::Hidden&&state_!=State::Collapsed) StartPanelMotion(true);
     // 外部窗口状态（Aero Snap / Win+↑ 最大化 / 系统调整）可能让实际矩形偏离模型；状态迁移时
     // 先把模型落到窗口，再校验。否则托盘/热键路径会抛 INV1（无 catch → 进程直接退出）。
     const auto expected=ComputeRect(model_,monitor_.geometry);
@@ -596,33 +912,25 @@ void Application::ApplyState(const char* reason,State previous) {
         ||(expected.strip&&GeometryController::Read(strip_)!=*expected.strip))
         geometry_.Place(model_,monitor_.geometry,state_,"reconcile");
     geometry_.Validate(model_,monitor_.geometry,state_);
-    UpdateWidgetTimer();
     // DESIGN v1.7：可见性变化 → 轮询节奏跟着变（收起 60s / 隐藏停）；重新可见立即刷新一次，
     // 保证从贴条/托盘回到面板时看到的就是当前状态。刷新走 30ms 一次性定时器**延后触发**：
     // StartRefresh 会在 UI 线程 join 上一轮 worker（可能正卡在 wsl.exe 上百毫秒），在点击
     // 处理里同步调它会让「点贴条展开」体感卡顿甚至超时（a-pullout/a-edge 门禁抓到）。
-    if(VisibleFor(previous)!=VisibleFor(state_)) {
+    if(visibilityChanged) {
         UpdatePollTimer();
         if(state_!=State::Hidden) SetTimer(panel_,kPollNowTimer,30,nullptr);
     }
     if(state_==State::Collapsed) {
-        // 贴条重新出现：玻璃背景可能已经变了（换了窗口/壁纸/显示器），重抓一次。
-        if(VisibleFor(previous)!=VisibleFor(state_)) stripContext_.surface.InvalidateBackdrop();
-        RenderStrip();
+        // 贴条重新出现：先按缓存快照画好第一帧（贴条此刻仍隐藏，画在隐藏窗口上），再显示——
+        // 不再在收起时重抓快照（见 enteringCollapsed 的注释：重抓才是"闪一下+变色"的来源）。
+        if(enteringCollapsed) {
+            RenderStrip();
+            ShowWindow(strip_,SW_SHOWNOACTIVATE);
+            InvalidateRect(strip_,nullptr,FALSE);
+        } else RenderStrip();
     }
     HideHoverCard();   // 状态/几何变了：卡片内容和位置都作废，下次悬停重新计算
     (void)reason;
-}
-void Application::UpdateWidgetTimer() {
-    if(!panel_) return;
-    KillTimer(panel_,kWidgetTimer);
-    // 只有「信标 + 有链路不正常」才呼吸：这是挂件唯一的动画，含义是"需要你处理"。
-    // 全部正常时挂件完全静止（不再每 120ms 重绘，审计的 CPU 空转检查也依赖这条）。
-    const bool fault=hermesState_.wsl=="down"||!hermesState_.webui.reachable
-        ||!hermesState_.gateway.reachable;
-    const bool animate=state_==State::Collapsed&&model_.widget==WidgetStyle::Beacon
-        &&hermesState_.wsl!=""&&fault;
-    if(animate) SetTimer(panel_,kWidgetTimer,120,nullptr);
 }
 bool Application::HitStripShape(POINT client) const {
     // 分层窗口的透明角落不应吃鼠标：用与绘制同一份几何做命中（区域只用于测试，不设到窗口）。
@@ -653,26 +961,9 @@ bool Application::HitStripShape(POINT client) const {
     };
     HRGN region=nullptr;
     switch(model_.widget) {
-    case WidgetStyle::Beacon: {
-        // 三段独立灯段：三段矩形取并集（缝里是真正的桌面，不该吃鼠标）。
-        const int gap=metrics.gap;
-        const int block=(ch-gap*2)/3;
-        for(int index=0;index<3;++index) {
-            const int top=index*(block+gap);
-            HRGN part=polygon({{0,top+1},{cw,top+1},{cw,top+block-1},{0,top+block-1}});
-            if(!region) region=part;
-            else { CombineRgn(region,region,part,RGN_OR);DeleteObject(part); }
-        }
-        break;
-    }
     case WidgetStyle::Tag:
         region=polygon({{1,1},{cw-1,1},{cw-1,ch-1},{1,ch-1}});
         break;
-    case WidgetStyle::Flag: {
-        const int tail=metrics.tail;
-        region=polygon({{1,1},{cw-1,1},{cw-1,ch-tail},{cw/2,ch-1},{1,ch-tail}});
-        break;
-    }
     case WidgetStyle::Capsule: {
         // 旧胶囊：桌面侧全圆角，贴边侧平直（窗口的贴边侧也在屏幕上，那里要能吃鼠标）。
         const int radius=std::min(cw,ch)/2;
@@ -708,6 +999,12 @@ void Application::RenderStrip() {
             view.backdrop.width=stripContext_.surface.BackdropWidth();
             view.backdrop.height=stripContext_.surface.BackdropHeight();
             view.backdrop.generation=stripContext_.surface.BackdropGeneration();
+            // 这一帧没有玻璃快照 = 板子会画成不透明的实色（真机表现为"闪一下"）。抓屏失败或
+            // 快照被清掉时不再静默：只有拖动中的帧允许没有快照。
+            if(log_&&view.backdrop.width<=0)
+                log_->Warn("paint","strip frame without a glass snapshot (state="
+                    +std::to_string(static_cast<int>(state_))+" edge="
+                    +std::to_string(static_cast<int>(model_.edge))+")");
         }
         // 玻璃快照只在代次变化时记一行：真机上"抓没抓到、抓到了什么"必须能从日志判断
         // （真机 2026-10-20 报"玻璃像噪点"，就是靠这行定位到快照缺失的）。
@@ -781,6 +1078,8 @@ void Application::DockNearest() {
     }
     state_=NextState(state_,Event::DropDocked,edge);
     geometry_.Place(model_,monitor_.geometry,state_,"dock");
+    // 贴条矩形变了（浮起→贴边）：玻璃快照作废，重抓（收起路径已不再每次重抓）。
+    stripContext_.surface.InvalidateBackdrop();
     ApplyState("dock",previous);
     PersistSettings();
 }
@@ -819,7 +1118,12 @@ void Application::PointerEnteredStrip() {
     ++stripMoves_;
     HideHoverCard();
     if(dragging_) return;
-    if(state_!=State::Collapsed || model_.edge==Edge::None) return;
+    if(state_!=State::Collapsed || model_.edge==Edge::None) {
+        if(log_) log_->Info("ui","strip-click ignored state="+std::to_string(static_cast<int>(state_))
+            +" edge="+std::to_string(static_cast<int>(model_.edge))+" visible="
+            +std::to_string(IsWindowVisible(strip_)!=0));
+        return;
+    }
     const auto previous=state_;
     state_=NextState(state_,Event::EnterStrip,model_.edge);
     ApplyState("strip-click",previous);
@@ -859,10 +1163,10 @@ void Application::KeepMotionTimer() {
     // SetTimer 失败就别把标志置上：否则之后不再重试，动画会停在中间值。
     motionTimer_=SetTimer(panel_,kMotionTimer,kMotionTickMs,nullptr)!=0;
 }
-void Application::StartPanelMotion(bool enter) {
+void Application::StartPanelMotion() {
+    // 只剩"切页内容淡入"这一个用途（展开入场已按用户要求移除，见 DESIGN v1.11）。
     if(!AnimationsEnabled()) { panelMotionStart_=0;return; }
     panelMotionStart_=GetTickCount64();
-    panelMotionEnter_=enter;
     KeepMotionTimer();
 }
 void Application::StartCardMotion() {
@@ -966,9 +1270,33 @@ void Application::GraceExpired() {
     state_=NextState(state_,Event::LeaveGrace,model_.edge);
     ApplyState("hover-collapse",previous);
 }
+UINT Application::WindowDpi() const {
+    // 布局/命中/原生输入框的倍率必须和**绘制**用同一个 DPI：Surface::Paint 取
+    // GetDpiForWindow(panel_)。monitor_.geometry.dpi 只在 ApplyDpiChange / CommitDrop 里更新，
+    // 系统移动循环期间还停在上一个显示器上——拖动跨屏时若拿它算布局，搜索框会被按旧倍率
+    // 摆到框外（真机：占位「搜索模型或供应商」跑到输入框下面且字号大一圈）。
+    if(panel_) {
+        const UINT dpi=GetDpiForWindow(panel_);
+        if(dpi) return dpi;
+    }
+    const auto dpi=static_cast<UINT>(monitor_.geometry.dpi);
+    return dpi?dpi:96;
+}
+
+void Application::RefreshNativeFieldMetrics() {
+    // v1.26：跨显示器（DPI 变化）时原生 EDIT 的字号要重建，否则 125%→100% 后文字明显偏大/偏小。
+    // 用窗口自己的 DPI：拖动跨屏时系统移动循环会先换窗口 DPI，monitor_ 要到松手才更新。
+    const auto dpi=WindowDpi();
+    for(auto& binding:nativeBindings_)
+        if(binding.edit) binding.edit->SetFontAndDpi(dpi);
+}
+
 void Application::ApplyDpiChange(const RECT& suggested) {
-    // 拖拽/拉伸期间窗口几何归交互循环；落点由 CommitDrop / CommitPanelResize 统一结算。
-    if(dragging_||resizing_) return;
+    // 拖动/拉伸期间窗口几何归交互循环；但**字体倍率**必须立刻跟上窗口 DPI：
+    // 窗口已经在另一台显示器上（GetDpiForWindow 已变），EDIT 还按旧 DPI 的字号画，
+    // 拖动跨屏时占位文字就会比框大一圈、位置也对不上。
+    RefreshNativeFieldMetrics();
+    if(dragging_||resizing_) { if(panel_) InvalidateRect(panel_,nullptr,FALSE);return; }
     const auto resolved=MonitorFromRect(&suggested,MONITOR_DEFAULTTONEAREST);
     monitor_=ReadMonitor(resolved);
     if(model_.edge==Edge::None) model_.floating={suggested.left,suggested.top};
@@ -976,6 +1304,8 @@ void Application::ApplyDpiChange(const RECT& suggested) {
     // Both windows are notified for one DPI change; skip when the model outcome is already applied.
     if(GeometryController::Read(panel_)==expected.panel&&
         (!expected.strip||GeometryController::Read(strip_)==*expected.strip)) return;
+    // 换屏=换桌面：玻璃快照必须重抓（收起路径已不再每次重抓，见 ApplyState 的注释）。
+    stripContext_.surface.InvalidateBackdrop();
     const auto previous=state_;
     geometry_.Place(model_,monitor_.geometry,state_,"dpi-changed");
     ApplyState("dpi-changed",previous);
@@ -991,12 +1321,15 @@ void Application::RefreshTopology(const char* reason) {
         if(model_.edge==Edge::None) {
             model_.floating=ClampFloating({rect.x,rect.y},TierSize(model_,primary.geometry.dpi),primary.geometry.work);
         }
+        // 桌面/工作区变了：玻璃快照作废，重抓（收起路径已不再每次重抓）。
+        stripContext_.surface.InvalidateBackdrop();
         geometry_.Place(model_,monitor_.geometry,state_,reason);
         ApplyState(reason,state_);
         return;
     }
     if(model_.edge==Edge::None) return;
     monitor_=ReadMonitor(resolved);
+    stripContext_.surface.InvalidateBackdrop();
     geometry_.Place(model_,monitor_.geometry,state_,reason);
     ApplyState(reason,state_);
 }
@@ -1005,6 +1338,7 @@ void Application::BeginSystemDrag() {
     if(dragging_ || state_==State::Hidden) return;
     dragging_=true;
     panelDragViewValid_=false;
+    dragLayoutDpi_=0;dragLayoutWidth_=0;dragLayoutHeight_=0;   // 首帧按当前 DPI 重摆原生输入框
     const auto startRect=GeometryController::Read(panel_);
     dragStartOrigin_={startRect.x,startRect.y};
     if(dragPressValid_) {
@@ -1081,7 +1415,7 @@ void Application::CommitDrop() {
     if(wakeCount_==0) InvalidateRect(panel_,nullptr,FALSE);
 }
 bool Application::CanResizeHeight() const {
-    // 只有浮动完整档可拉高：贴边/收起/隐藏的几何属于停靠状态，紧凑档是固定 152 的小视图。
+    // 只有浮动状态可拉高：贴边/收起/隐藏的几何属于停靠状态，尺寸由档位给出。
     return panel_&&state_==State::Floating&&model_.edge==Edge::None&&model_.tier==Tier::Full
         &&pending_==Pending::None&&!dragging_;
 }
@@ -1253,7 +1587,13 @@ void Application::CommitStripDrop() {
     const auto previous=state_;
     state_=State::Collapsed;
     geometry_.Place(model_,monitor_.geometry,state_,"strip-drop");
-    stripContext_.surface.InvalidateBackdrop();   // 位置变了：玻璃背景必须重抓
+    // 位置变了：玻璃背景必须重抓。落点后贴条可见，若直接重抓会走"隐藏→抓屏→恢复"
+    // 的肉眼闪烁（与收起路径同一类问题）：先藏 → 抓屏+画帧 → 再显示。
+    ShowWindow(strip_,SW_HIDE);
+    stripContext_.surface.InvalidateBackdrop();
+    stripContext_.surface.EnsureBackdrop(strip_);
+    RenderStrip();
+    ShowWindow(strip_,SW_SHOWNOACTIVATE);
     ApplyState("strip-drop",previous);
     PersistSettings();
     InvalidateAll();
@@ -1269,7 +1609,12 @@ void Application::PositionHoverCard() {
     if(!hoverCard_) return;
     const auto dpi=monitor_.geometry.dpi;
     const auto view=CurrentView();
-    const int width=ScaleDip(252,dpi);
+    // 宽度**按内容自适应**：以前固定 252 DIP，长模型名一律截断（真机反馈"模型名称要显示完全"）。
+    // 下界 252（短名字保持原来的观感）、上界 520：常见的 "custom:供应商/很长的模型 id"
+    // 大约 400–500 DIP，340 的上限在真机上仍会截断。再宽由 HoverCardRect 夹进工作区。
+    const auto modelLine="\xE5\xBD\x93\xE5\x89\x8D\xEF\xBC\x9A"+view.hoverCard.model;
+    const int wantedDip=static_cast<int>(EstimateTextWidth(modelLine,12.0f))+28;
+    const int width=ScaleDip(std::clamp(wantedDip,252,520),dpi);
     // 高度跟着内容走：62（头+模型行）+ 每行 20 + note 20 + 底部 10。删掉 hint 后不再留空。
     const int contentDip=62+20*static_cast<int>(view.hoverCard.rows.size())
         +(view.hoverCard.note.empty()?0:20)+10;
@@ -1306,8 +1651,10 @@ void Application::HideHoverCard() {
 }
 void Application::RenderHoverCard() {
     if(!cardVisible_||!hoverCard_) return;
-    // 数据变化可能让 note 出现/消失：渲染前重新按当前内容定位/定尺（高度随行数动态算）。
-    PositionHoverCard();
+    // 入场动画期间**不重新定位**：PositionHoverCard 内部要 CurrentView()（重建整份视图）
+    // 再 SetWindowPos，而 120ms 的淡入里内容根本不会变 —— 每帧重算只会让动画掉帧，
+    // 表现为"弹出时文字一顿一顿的"。动画结束后再定尺（内容变化由调用方显式触发）。
+    if(!cardMotionStart_) PositionHoverCard();
     try {
         auto view=CurrentView();
         hoverCardContext_.surface.PaintHoverCard(hoverCard_,view,palette_);
@@ -1326,7 +1673,11 @@ LRESULT Application::HitTest(POINT screen) {
     // 真机上"面板拖动很卡"的根因（实测 36.7% CPU）。拖动/拉伸期间窗口已经抓在手里，
     // 直接按标题栏处理，不做任何布局。
     if(dragging_||resizing_) return HTCAPTION;
-    if(state_!=State::Hidden) {
+    // 判 Hidden 用的是**几何状态**，但真正决定用户能否拖动的是窗口可见性。两者曾经脱节过
+    // （最小化后按热键隐藏：窗口被系统恢复出来而 state_ 仍是 Hidden），后果是整条标题栏
+    // 恒返回 HTCLIENT、面板再也拖不动。这里按"可见就按可见处理"，状态机出岔子也不至于
+    // 把拖动功能整个关掉。
+    if(state_!=State::Hidden||IsWindowVisible(panel_)) {
         // Buttons inside the title bar must receive the click, the rest of the bar drags the window.
         const auto layout=ComputeLayout(CurrentView(),static_cast<float>(bounds.right),
             static_cast<float>(bounds.bottom),static_cast<float>(dpi)/96.0f);
@@ -1433,6 +1784,7 @@ PanelViewModel Application::CurrentView() {
     input.lightTheme=palette_.light;
     input.activePage=activePage_;
     input.hoverControl=hoverControl_;
+    input.hoverIndex=tooltipHoverIndex_;
     input.pinned=stored_.topmost;
     input.motion=MotionView();
     {
@@ -1445,13 +1797,12 @@ PanelViewModel Application::CurrentView() {
             if(elapsed>=duration) return 1.0f;
             return ease(static_cast<float>(elapsed)/static_cast<float>(duration));
         };
-        const auto panel=progress(panelMotionStart_,kPanelMotionMs);
-        input.motion.panelAlpha=panel;
-        input.motion.panelOffsetDip=panelMotionEnter_?(1.0f-panel)*8.0f:0.0f;
+        // 只剩切页的内容淡入（展开入场已移除）：不透明度吃进度，位移恒为 0（走视图默认值）。
+        input.motion.panelAlpha=progress(panelMotionStart_,kPanelMotionMs);
         // 退场淡出优先：卡片逻辑上已隐藏（cardVisible_=false），窗口还会多留 80ms 把 alpha 画到 0。
         if(cardExitStart_) input.motion.cardAlpha=1.0f-progress(cardExitStart_,kCardExitMs);
         else input.motion.cardAlpha=progress(cardMotionStart_,kCardMotionMs);
-        input.motion.cardOffsetDip=(1.0f-progress(cardMotionStart_,kCardMotionMs))*4.0f;
+        input.motion.cardOffsetDip=0.0f;   // 位移入场已移除（见 DrawHoverCard：亚像素平移会让文字发虚）
         input.motion.stripAlpha=progress(stripMotionStart_,kStripEnterMs);
         // 胶囊贴边度：目标态向 0/1 过渡（1=贴边直角、0=浮起椭圆）。动画中逐帧插值。
         {
@@ -1500,8 +1851,22 @@ PanelViewModel Application::CurrentView() {
         }
     }
     view.busy=workerBusy_.load();
-    view.syncSpinAngle=syncSpinAngle_;
-    view.busySweep=busySweep_;
+    // 同步章图标已经搬到独立子窗口（SpinGlyph，单帧 <0.2ms），不再由主面板重绘驱动：
+    // 主面板整窗重绘在本机实测 10–170ms，把它当动画时钟只会得到"不转、只在抖"。
+    // 这里只把窗口视图里那个位置留空（Icon 由子窗口自己画）。
+    view.syncSpinAngle=spinGlyph_.Angle();
+    if(view.busy) {
+        // 忙碌条相位改为**按时间计算**（0..1 单向循环）：以前靠 50ms 定时器每次 +12° 累加，
+        // 定时器被整窗重绘挤晚时相位就停住、攒够了一次跳过去——真机看到的"卡一下再动"。
+        const auto now=GetTickCount64();
+        if(!busySweepRunning_) { busySweepRunning_=true;busySweepStart_=now; }
+        constexpr double kBusySweepPeriodMs=1600.0;
+        view.busySweep=static_cast<float>(std::fmod(
+            static_cast<double>(now-busySweepStart_)/kBusySweepPeriodMs,1.0));
+    } else {
+        busySweepRunning_=false;
+        view.busySweep=0.0f;
+    }
     view.syncCheck=syncCheckShown_;
     view.pointerX=pointerX_;view.pointerY=pointerY_;view.pointerInside=pointerInside_;
     view.focusControl=focusControl_;
@@ -1519,7 +1884,7 @@ PanelViewModel Application::CurrentView() {
     }
     if(pending_==Pending::ProviderMenu) {
         // 旧 openProviderMenu(name)：一张"信息 + 动作"的卡。旧版是底部 action sheet（动作各占一个
-        // 按钮），原生版用已有的模态承载：正文给信息，确定 = 第一项主操作（探测模型并追加），
+        // 按钮），原生版用已有的模态承载：正文给信息，确定 = 第一项主操作（v1.18 起为「扫描并追加」），
         // 其余动作从「添加」页/托盘可达。差异记在 PROGRESS。
         const auto found=std::find_if(hermesState_.providers.begin(),hermesState_.providers.end(),
             [&](const ProviderView& provider) { return provider.name==pendingProvider_; });
@@ -1540,9 +1905,20 @@ PanelViewModel Application::CurrentView() {
             view.modal.facts.push_back(Narrow(L"\u6A21\u578B\uFF1A")
                 +std::to_string(found->models.size())+" "+Narrow(L"\u4E2A")
                 +(found->modelsDiscovered?Narrow(L"\uFF08\u5DF2\u63A2\u6D4B\u8FC7\uFF09"):std::string{}));
-            view.modal.confirmLabel="\xE6\x8E\xA2\xE6\xB5\x8B\xE6\xA8\xA1\xE5\x9E\x8B\xE5\xB9\xB6"
-                "\xE8\xBF\xBD\xE5\x8A\xA0";
+            view.modal.confirmLabel="\xE6\x89\xAB\xE6\x8F\x8F\xE5\xB9\xB6"
+                "\xE5\x90\x8C\xE6\xAD\xA5";
         }
+    }
+    if(pending_==Pending::SyncAll) {
+        // 一键刷新同步：只读探测每个供应商，再把配置里的模型列表同步成最新（写前自动备份）。
+        view.modal.title=Narrow(L"刷新并同步全部供应商的模型列表？");
+        view.modal.body=Narrow(L"逐个供应商只读探测，然后同步写回；新增的写入、已下线的删除。");
+        view.modal.facts.clear();
+        view.modal.facts.push_back(std::to_string(hermesState_.providers.size())
+            +Narrow(L" 个供应商；写入前自动备份 config.yaml"));
+        view.modal.confirmLabel=Narrow(L"同步");
+        view.modal.cancelLabel=Narrow(L"取消");
+        view.modal.danger=false;
     }
     if(pending_==Pending::DeleteProvider) {
         // 删除供应商的危险确认（旧 confirmBox('删除供应商？') + 说明写盘影响）
@@ -1644,12 +2020,11 @@ PanelViewModel Application::CurrentView() {
         page.source=fbSource_;
         page.sourceScroll=selectScroll_;
         page.model=fbModel_.TextUtf8();
-        page.provider=fbProvider_.TextUtf8();
-        page.baseUrl=fbUrl_.TextUtf8();
-        page.keyEnv=fbKeyEnv_.TextUtf8();
-        page.key=fbKey_.TextUtf8();
+
         page.error=fbError_;
         page.busy=workerBusy_.load();
+        page.modelSelectOpen=fbModelSelectOpen_;
+        page.modelOptions=FallbackModelOptions();
         AttachFallbackPage(view,page);
         // 逐条探测进度：按钮文案显示 检测中 n/N，当前行显示 …（每条最多 30s，没进度会以为卡死）。
         const bool probeRunning=probeRunning_.load();
@@ -1698,24 +2073,29 @@ PanelViewModel Application::CurrentView() {
         page.sub=addSub_;
         page.mode=addMode_;
         page.name=addName_.TextUtf8();
-        page.keyEnv=addKeyEnv_.TextUtf8();
+        // v1.18：Key 变量名不再由用户填，这里只把助手会推导出的名字作为提示显示。
+        page.keyEnv=DeriveKeyEnv(addName_.TextUtf8());
         page.url=addUrl_.TextUtf8();
         page.key=addKey_.TextUtf8();
-        page.modelsText=addModels_.TextUtf8();
-        page.modelsNew=addNewModels_.TextUtf8();
         page.dangerName=addDanger_.TextUtf8();
+        // 删除页下拉的选中下标（按名字回查）：dump/门禁靠它断言"选中的是哪一个"。
+        page.provider=0;
+        for(std::size_t index=0;index<hermesState_.providers.size();++index)
+            if(hermesState_.providers[index].name==page.dangerName)
+                page.provider=static_cast<int>(index);
         page.keyRevealed=addKeyRevealed_;
-        page.probeBefore=addProbeBefore_;
         page.setMainAfter=addSetMainAfter_;
         page.purgeEnv=addPurgeEnv_;
         page.dropFallbacks=addDropFallbacks_;
-        page.provider=addProvider_;
         page.providerScroll=selectScroll_;
         page.selectOpen=addSelectOpen_;
         page.selectField=addSelectField_;
         page.error=addError_;
         page.info=addInfo_;
         page.chips=addChips_;
+        page.chipSelected=addChipSelected_;
+        page.modelScroll=addModelScroll_;
+        page.hoverIndex=tooltipHoverIndex_;
         page.busy=workerBusy_.load();
         AttachAddPage(view,page);
     } else if(activePage_==3) {
@@ -1774,8 +2154,12 @@ PanelViewModel Application::CurrentView() {
     const auto shownEdge=previewEdge_?static_cast<Edge>(previewEdge_):model_.edge;
     view.widgetEdge=static_cast<int>(shownEdge);
     view.widgetVertical=shownEdge==Edge::Left||shownEdge==Edge::Right;
-    view.widgetPhase=widgetPhase_;
     view.focusedFormField=FormFieldIndexOf(focusedField_);
+    // v1.21（真机反馈"输入框应该有光标"）：把插入符位置一起交给渲染层。此前只有搜索框画插入符，
+    // 表单字段只有一圈高亮，用户看不出光标在哪。
+    view.focusedFormCaret=focusedField_?focusedField_->caret:-1;
+    view.focusedFormMultiline=focusedField_?focusedField_->multiline:false;
+    view.focusedFormNative=NativeFor(focusedField_)!=nullptr;
     if(activePage_==0) {
         ModelsPageInput page;
         page.state=&hermesState_;
@@ -1805,19 +2189,27 @@ PanelViewModel Application::CurrentView() {
             }
         }
         view.searchHasText=!search_.Text().empty();
+        view.syncBusy=syncAllBusy_.load();
+        view.syncDone=syncAllDone_.load();
+        view.syncTotal=syncAllTotal_.load();
         // The scroll offset is clamped against the real viewport, so the wheel/drag and the renderer
         // always agree on where the list is (the clamp needs the layout, hence the client rect here).
         RECT client{};
         if(panel_&&GetClientRect(panel_,&client)&&client.bottom>client.top) {
+            // 与绘制同源的倍率（WindowDpi）：跨屏拖动时 monitor_ 还是旧显示器。
             const auto laid=ComputeLayout(view,static_cast<float>(client.right),
-                static_cast<float>(client.bottom),static_cast<float>(monitor_.geometry.dpi)/96.0f);
+                static_cast<float>(client.bottom),static_cast<float>(WindowDpi())/96.0f);
             view.listScroll=laid.listScroll;
             if(laid.listScroll!=listScroll_) listScroll_=laid.listScroll;
         }
     }
     // 悬停气泡的文案查找放在最后：页面级提示（如回退链每行的探测说明）是在各页 attach 时
     // 才进 tooltips 表的，早于它查会漏掉这些条目。
-    if(tooltipVisible_&&tooltipHover_!=0) {
+    // 模态打开时不显示提示：提示现在是最后绘制的浮层，不挡住模态（DESIGN v1.12）。
+    // 下拉展开时同样不显示：气泡画在最上层，会正好盖住列表里靠近指针的那一项
+    // （真机实测：设置页「关闭按钮」下拉的「退出程序」被"点一下编辑"整块挡住，看不见也点不准）。
+    auto anySelectOpen=fbSelectOpen_||fbModelSelectOpen_||addSelectOpen_||settingsSelectOpen_;
+    if(tooltipVisible_&&tooltipHover_!=0&&pending_==Pending::None&&!anySelectOpen) {
         for(const auto& tip:view.tooltips)
             if(tip.control==tooltipHover_&&(tip.index<0||tip.index==tooltipHoverIndex_)) {
                 view.tooltip.visible=true;view.tooltip.text=tip.text;break;
@@ -2031,17 +2423,23 @@ void Application::BuildTrayMenu() {
 void Application::CloseForm() {
     fbFormOpen_=false;
     fbSelectOpen_=false;
+    fbModelSelectOpen_=false;
+    selectScroll_=0;
     fbError_.clear();
-    if(focusedField_==&fbModel_||focusedField_==&fbProvider_||focusedField_==&fbUrl_
-        ||focusedField_==&fbKeyEnv_||focusedField_==&fbKey_) BlurField();
+    if(focusedField_==&fbModel_) BlurField();
     InvalidateAll();
 }
 // ---- 模型页的输入：一次命中测试同时服务点击与悬停（列表行/星标/组头/过滤段/滚动条）----
 // ---- H2c the self-drawn text fields: one focused field at a time; keyboard, IME and clipboard all
 // enter through here. The models-page search box is the first host (DESIGN #10/#36).
 void Application::InvalidateAll() {
+    // v1.30：视觉状态变了，悬停布局缓存作废（下一次悬停重建一次即可）。
+    hoverLayoutValid_=false;
     // 窗口高度是用户固定的，不再按页面内容 fit：切页只重排正文，底栏与窗口尺寸不动。
     if(panel_) InvalidateRect(panel_,nullptr,FALSE);
+    // v1.26：原生输入框的底色/字色由 WM_CTLCOLOREDIT 现取调色板——换主题后必须让它们重绘。
+    for(auto& binding:nativeBindings_)
+        if(binding.edit&&binding.edit->Handle()) InvalidateRect(binding.edit->Handle(),nullptr,TRUE);
     if(state_==State::Collapsed) RenderStrip();
     else if(strip_) InvalidateRect(strip_,nullptr,FALSE);
     if(cardVisible_) RenderHoverCard();
@@ -2073,6 +2471,19 @@ LRESULT Application::HandleWindowFailure(HWND window,UINT message,const std::exc
     PostMessageW(control_,WM_CLOSE,0,0);
     return 0;
 }
+void Application::ReAddTrayAfterExplorerRestart() {
+    // Explorer 重启后旧图标句柄失效：先删一次（不存在也无妨），再重新注册并刷新提示。
+    ++trayReadds_;
+    NOTIFYICONDATAW stale{};
+    stale.cbSize=sizeof(stale);
+    stale.hWnd=control_;
+    stale.uID=kTrayId;
+    Shell_NotifyIconW(NIM_DELETE,&stale);
+    trayRegistered_=false;
+    if(AddTray()) UpdateTrayStatus();
+    if(log_) log_->Info("tray","re-added after explorer restart (readds="
+        +std::to_string(trayReadds_)+")");
+}
 void Application::ReportControlFailure(const std::exception& error) {
     // 托盘菜单/热键在 ControlProc 里同步执行，那里没有面板 WindowProc 的 try/catch。
     // 不接住的话异常会穿出 DispatchMessage，由未处理异常过滤器兜底（表现为“突然消失”）。
@@ -2083,21 +2494,19 @@ void Application::ReportControlFailure(const std::exception& error) {
 LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wparam,LPARAM lparam) {
     const bool card=window==hoverCard_;
     if(taskbarCreated_&&message==taskbarCreated_) {
-        // Explorer 重启后旧图标句柄失效：先删一次（不存在也无妨），再重新注册并刷新提示。
-        ++trayReadds_;
-        NOTIFYICONDATAW stale{};
-        stale.cbSize=sizeof(stale);
-        stale.hWnd=control_;
-        stale.uID=kTrayId;
-        Shell_NotifyIconW(NIM_DELETE,&stale);
-        trayRegistered_=false;
-        if(AddTray()) UpdateTrayStatus();
+        ReAddTrayAfterExplorerRestart();
         return 0;
     }
     auto& surface=card?hoverCardContext_.surface:(strip?stripContext_.surface:panelContext_.surface);
     switch(message) {
     case WM_PAINT: {
         PAINTSTRUCT paint{};BeginPaint(window,&paint);
+        if(!card&&!strip) ++paintFrames_;
+        // 忙碌期间量一帧面板重绘的耗时：忙碌条"卡一下"要么是 UI 线程被别处挡住（kSpinTimer
+        // 的间隔探针会记 gap），要么就是这一帧画得太慢。两条日志一起才能定性（真机 2026-10-21）。
+        LARGE_INTEGER paintFreq{},paintStart{},paintDone{};
+        const bool timing=!card&&!strip&&workerBusy_.load();
+        if(timing) { QueryPerformanceFrequency(&paintFreq);QueryPerformanceCounter(&paintStart); }
         // The search field is handed to the renderer even when it is not focused: an unfocused box must
         // still show its own text (the TextField's `focused` flag drives the caret and the glow).
         try {
@@ -2108,23 +2517,98 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
                 // 系统移动循环里每一帧都完整重建视图（含列表布局）会明显拖慢拖动
                 // （真机实测面板拖动 14% CPU 且跟手变差）；拖动期间内容不变，直接复用。
                 surface.Paint(window,false,panelDragView_,palette_,&search_);
+                // 跨显示器拖动会换窗口 DPI（WM_DPICHANGED 在拖动中被推迟，绘制倍率却已经变了）：
+                // 原生输入框与忙碌条必须按同一倍率重摆一次，否则占位文字会留在旧坐标、
+                // 字号还按旧 DPI 画——真机看到的"搜索模型或供应商跑出输入框"。
+                RECT client{};
+                GetClientRect(window,&client);
+                const auto dpi=WindowDpi();
+                if(dpi!=dragLayoutDpi_||client.right!=dragLayoutWidth_
+                    ||client.bottom!=dragLayoutHeight_) {
+                    dragLayoutDpi_=dpi;dragLayoutWidth_=client.right;dragLayoutHeight_=client.bottom;
+                    const auto laid=ComputeLayout(panelDragView_,static_cast<float>(client.right),
+                        static_cast<float>(client.bottom),static_cast<float>(dpi)/96.0f);
+                    SyncNativeFields(laid);
+                    SyncBusyBar(laid);
+                }
                 EndPaint(window,&paint);
                 return 0;
             }
+            LARGE_INTEGER sub1{},sub2{},subFreq{};
+            if(timing) { QueryPerformanceFrequency(&subFreq);QueryPerformanceCounter(&sub1); }
             auto view=CurrentView();
+            LARGE_INTEGER sub3{}; if(timing) QueryPerformanceCounter(&sub2);
             if(card) {
                 surface.PaintHoverCard(window,view,palette_);
             } else if(strip) {
                 // 贴条走分层窗口：形状由 D2D 抗锯齿绘制；没有提示气泡，也不需要面板输入布局。
                 surface.PaintStrip(window,view,palette_);
             } else {
-                LayoutForInput();
-                view.tooltip=tooltipView_;
+                // 复用这一帧已经建好的 view：LayoutForInput() 内部会再 CurrentView() 一次，
+                // 等于每帧把 60+ 条 tooltip 文案和整棵列表模型建两遍（实测 layout 阶段 0–3ms/帧）。
+                const auto laid=LayoutForInput(view);
+                if(timing) QueryPerformanceCounter(&sub3);
                 if(dragging_) { panelDragView_=view;panelDragViewValid_=true; }
                 surface.Paint(window,false,std::move(view),palette_,&search_);
+                // v1.23：原生输入框跟着这一帧的布局走（滚动/切页/缩放后位置都对）。
+                LARGE_INTEGER phFreq{},ph0{},ph1{},ph2{};
+                QueryPerformanceFrequency(&phFreq);
+                QueryPerformanceCounter(&ph0);
+                SyncNativeFields(laid);
+                QueryPerformanceCounter(&ph1);
+                SyncBusyBar(laid);
+                QueryPerformanceCounter(&ph2);
+                if(phFreq.QuadPart>0) {
+                    const auto toMs=[&](const LARGE_INTEGER& a,const LARGE_INTEGER& b) {
+                        return static_cast<double>(b.QuadPart-a.QuadPart)*1000.0
+                            /static_cast<double>(phFreq.QuadPart);
+                    };
+                    lastSyncNativeMs_=toMs(ph0,ph1);
+                    lastSyncBusyMs_=toMs(ph1,ph2);
+                }
+            }
+            if(timing&&subFreq.QuadPart>0) {
+                const auto msOf=[](const LARGE_INTEGER& a,const LARGE_INTEGER& b,long long f) {
+                    return static_cast<double>(b.QuadPart-a.QuadPart)*1000.0/static_cast<double>(f);
+                };
+                LARGE_INTEGER sub4{};QueryPerformanceCounter(&sub4);
+                paintSubMs_[0]=msOf(sub1,sub2,subFreq.QuadPart);   // CurrentView
+                paintSubMs_[1]=msOf(sub2,sub3,subFreq.QuadPart);   // LayoutForInput
+                paintSubMs_[2]=msOf(sub3,sub4,subFreq.QuadPart);   // surface.Paint
             }
         } catch(...) { EndPaint(window,&paint);throw; }
-        EndPaint(window,&paint);return 0;
+        LARGE_INTEGER endFreq{},end0{},end1{};
+        QueryPerformanceFrequency(&endFreq);
+        QueryPerformanceCounter(&end0);
+        EndPaint(window,&paint);
+        QueryPerformanceCounter(&end1);
+        if(timing&&endFreq.QuadPart>0)
+            lastEndPaintMs_=static_cast<double>(end1.QuadPart-end0.QuadPart)*1000.0
+                /static_cast<double>(endFreq.QuadPart);
+        if(timing) {
+            QueryPerformanceCounter(&paintDone);
+            const auto now=GetTickCount64();
+            if(paintFreq.QuadPart>0&&now-lastPaintLog_>500) {
+                const auto ms=static_cast<double>(paintDone.QuadPart-paintStart.QuadPart)*1000.0
+                    /static_cast<double>(paintFreq.QuadPart);
+                if(log_&&ms>=25.0) log_->Info("ui","paint phases begin="
+                    +std::to_string(static_cast<int>(panelContext_.surface.LastBeginMs()))
+                    +"ms draw="+std::to_string(static_cast<int>(panelContext_.surface.LastDrawMs()))
+                    +"ms end="+std::to_string(static_cast<int>(panelContext_.surface.LastEndMs()))
+                    +"ms target="+(panelContext_.surface.TargetKind()==2?"software":"hardware")
+                    +" syncNative="+std::to_string(static_cast<int>(lastSyncNativeMs_))
+                    +"ms syncBusy="+std::to_string(static_cast<int>(lastSyncBusyMs_))
+                    +"ms endPaint="+std::to_string(static_cast<int>(lastEndPaintMs_))+"ms");
+                if(ms>=25.0) {
+                    lastPaintLog_=now;
+                    if(log_) log_->Info("ui","busy paint "+std::to_string(static_cast<int>(ms))+"ms (view "
+                        +std::to_string(static_cast<int>(paintSubMs_[0]))+" + layout "
+                        +std::to_string(static_cast<int>(paintSubMs_[1]))+" + draw "
+                        +std::to_string(static_cast<int>(paintSubMs_[2]))+")");
+                }
+            }
+        }
+        return 0;
     }
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEMOVE:
@@ -2153,16 +2637,21 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
         if(modalScrollDrag_) { ScrollModalFrom(static_cast<float>(GET_X_LPARAM(lparam)));return 0; }
         if(scrollDrag_) { ScrollFromThumb(static_cast<float>(GET_Y_LPARAM(lparam)));return 0; }
         if(pageScrollDrag_) { PageScrollFromThumb(static_cast<float>(GET_Y_LPARAM(lparam)));return 0; }
+        // 合成悬停保护窗内不吃真实移动（门禁的 hover → 立刻被系统真实指针覆盖是历史偶发失败源）。
+        if(syntheticHover_&&GetTickCount64()<syntheticHoverUntil_) return 0;
+        syntheticHover_=false;
         TrackHover(window,static_cast<float>(GET_X_LPARAM(lparam)),static_cast<float>(GET_Y_LPARAM(lparam)));
         return 0;
     case WM_LBUTTONUP:
         if(strip) {
             // 拖动过 → 吸附到最近边缘（保持贴条，不展开）；没拖动 → 这一次就是单击展开。
+            // up 是"点击展开"的关键一步：把"收到 up 但状态不对"也记进事件环，
+            // 门禁失败时能一眼分辨"up 没到"还是"up 到了但被忽略"（真机/门禁 2026-10-21）。
+            LogEvent(stripDragging_?"strip-up-drag":(stripPressed_?"strip-up-click":"strip-up-stale"));
             if(stripDragging_) { CommitStripDrop();return 0; }
             if(stripPressed_) {
                 stripPressed_=false;
                 if(GetCapture()==strip_) ReleaseCapture();
-                LogEvent("strip-click");
                 PointerEnteredStrip();
             }
             return 0;
@@ -2175,6 +2664,9 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
     case WM_CAPTURECHANGED:
         if(resizing_) CommitPanelResize();
         else if(strip&&stripPressed_) {
+            // 抓屏（CaptureBackdrop 的 hide/show）会顺带丢掉 capture：这里把"点击被谁吃掉"
+            // 记进事件环，门禁失败时可判定（真机/门禁 2026-10-21）。
+            LogEvent(stripDragging_?"capture-lost-drag":"capture-lost-press");
             if(stripDragging_) CommitStripDrop();
             else { stripPressed_=false;stripDragging_=false; }
         }
@@ -2192,7 +2684,7 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             // A control under the cursor acts on press: the same handler the tray menu uses.
             RECT client{};
             GetClientRect(window,&client);
-            const auto scale=static_cast<float>(monitor_.geometry.dpi)/96.0f;
+            const auto scale=static_cast<float>(WindowDpi())/96.0f;
             const auto view=CurrentView();
             const auto layout=ComputeLayout(view,static_cast<float>(client.right),
                 static_cast<float>(client.bottom),scale);
@@ -2248,7 +2740,9 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
                 return 0;
             }
             // 页内滚动条（设置/添加/备份）：轨道在正文右缘之外，先于页面点击处理。
-            if(layout.pageScrollVisible) {
+            if(layout.pageScrollVisible&&ControlAt(layout,x,y)==ControlId::None) {
+                // v1.25：控件优先于滚动条。搜索框右端的 ✕/刷新同步 正好压在页内滚动条上，
+                // 之前点它们会变成"拖滚动条"（真机反馈"按钮穿透/点不到"）。
                 const auto& track=layout.pageScrollTrack;
                 if(x>=track.left-2.0f&&x<track.right+2.0f&&y>=track.top&&y<track.bottom) {
                     const auto& thumb=layout.pageScrollThumb;
@@ -2286,6 +2780,11 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
         }
         break;
     case WM_MOUSELEAVE:
+        if(!strip&&syntheticHover_) {
+            // 合成悬停期间系统补发的离开消息不是用户动作：忽略一次（真实移动会重新 TrackHover）。
+            syntheticHover_=false;
+            return 0;
+        }
         if(!strip) {
             PointerLeftPanel({GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)});
             pointerInside_=false;
@@ -2328,6 +2827,37 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             }
         }
         break;
+    case WM_COMMAND: {
+        // 原生输入框的 EN_CHANGE：把控件文本实时写回镜像（既有逻辑都读 TextField::TextUtf8）。
+        const int id=LOWORD(wparam);
+        if(HIWORD(wparam)==EN_CHANGE&&id>=1) {
+            HandleNativeFieldEvent(id,static_cast<int>(NativeField::Event::Change));
+            return 0;
+        }
+        break;
+    }
+    case WM_CTLCOLOREDIT: {
+        // 原生输入框的背景与自绘框同色（主题切换后立刻生效）。
+        auto dc=reinterpret_cast<HDC>(wparam);
+        const auto toColour=[](const D2D1_COLOR_F& colour) {
+            return RGB(static_cast<BYTE>(std::lround(colour.r*255.0f)),
+                static_cast<BYTE>(std::lround(colour.g*255.0f)),
+                static_cast<BYTE>(std::lround(colour.b*255.0f)));
+        };
+        SetTextColor(dc,toColour(palette_.text));
+        SetBkColor(dc,toColour(palette_.raise));
+        // 刷子按颜色缓存：每条消息都新建/删除会漏句柄（旧刷子往往还选在某个子控件 DC 里，
+        // DeleteObject 失败）。只在颜色真的变化时换一次。
+        static HBRUSH brush=nullptr;
+        static COLORREF brushColour=CLR_INVALID;
+        const auto wanted=toColour(palette_.raise);
+        if(!brush||wanted!=brushColour) {
+            if(brush) DeleteObject(brush);
+            brush=CreateSolidBrush(wanted);
+            brushColour=wanted;
+        }
+        return reinterpret_cast<LRESULT>(brush);
+    }
     case WM_SETCURSOR:
         if(strip) {
             SetCursor(LoadCursorW(nullptr,stripPressed_?IDC_SIZEALL:IDC_HAND));
@@ -2402,6 +2932,10 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             ClearFocus();
             return 0;
         }
+        // 「/」聚焦搜索框（DESIGN §4.3 #10 与搜索框提示「/ 聚焦」承诺的行为）走的是 HandleFieldKey
+        // 里的 **WM_CHAR '/'** 分支：那里聚焦的同时把这一击吞掉，查询框保持空。
+        // 曾经这里也加过一条 WM_KEYDOWN VK_OEM_2 分支，结果是 keydown 先把焦点交给原生 EDIT，
+        // 紧跟的 WM_CHAR 就落进 EDIT → 搜索框一聚焦就多一个斜杠（h-ime 门禁 3/3 复现）。
         if(!strip&&HandleFieldKey(message,wparam,lparam)) return 0;
         break;
     case WM_IME_COMPOSITION:
@@ -2413,15 +2947,15 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
         if(wparam==kMotionTimer&&!strip) { MotionTick();return 0; }
         if(strip&&wparam==kStripCardTimer) { ShowHoverCard();return 0; }
         if(wparam==kTrayGraceTimer&&!strip) { GraceExpired();return 0; }
-        if(wparam==kCaretTimer&&!strip) { caretOn_=!caretOn_;panelContext_.surface.SetCaretOn(caretOn_);InvalidateRect(panel_,nullptr,FALSE);return 0; }
-        if(wparam==kPollNowTimer&&!strip) { KillTimer(panel_,kPollNowTimer);StartRefresh();return 0; }
-        if(wparam==kPollTimer&&!strip) { StartRefresh();return 0; }
-        if(wparam==kWidgetTimer&&!strip) {
-            // 声波/光环的呼吸：只重绘收起态的挂件窗口，不碰面板。
-            widgetPhase_+=0.22f;
-            if(strip_) RenderStrip();
+        if(wparam==kCaretTimer&&!strip) {
+            // 原生输入框自己画光标：这里既不闪也不重绘（否则会带着整块面板一起重画）。
+            if(NativeFor(focusedField_)) return 0;
+            caretOn_=!caretOn_;panelContext_.surface.SetCaretOn(caretOn_);
+            InvalidateRect(panel_,nullptr,FALSE);
             return 0;
         }
+        if(wparam==kPollNowTimer&&!strip) { KillTimer(panel_,kPollNowTimer);StartRefresh();return 0; }
+        if(wparam==kPollTimer&&!strip) { StartRefresh(true);return 0; }
         if(wparam==kLatencyTimer&&!strip) {
             // 只在面板可见且 WSL 绿灯时探测（文档约定）：看不见面板时不发无谓请求。
             if(IsWindowVisible(panel_)&&hermesState_.wsl=="up") StartLatencyProbe();
@@ -2445,16 +2979,44 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
             return 0;
         }
         if(wparam==kSpinTimer&&!strip) {
-            // 刷新进行中：同步章图标绕中心旋转（真机反馈：不要「读取 WSL 配置…」的文字）；
-            // 顶部忙碌条同步流动（busySweep 独立相位，快慢一致 50ms/拍）。
-            busySweep_=std::fmod(busySweep_+12.0f,720.0f);
-            if(workerBusy_.load()) { syncSpinAngle_+=30.0f;InvalidateRect(panel_,nullptr,FALSE); }
+            // 刷新进行中：同步章图标绕中心旋转；顶部忙碌条的位置由 CurrentView 按时间算，
+            // 这里只负责"多久重绘一次"。顺带做 UI 停顿探针：两拍之间隔得太久说明 UI 线程被
+            // 别的东西挡住了（真机报"忙碌条偶尔卡一下"必须能从日志判断是渲染慢还是线程被占）。
+            const auto now=GetTickCount64();
+            if(lastSpinTick_!=0&&workerBusy_.load()) {
+                const auto gap=now-lastSpinTick_;
+                if(gap>200&&log_) log_->Info("ui","busy tick gap "+std::to_string(gap)+"ms");
+            }
+            lastSpinTick_=now;
+            const bool busy=workerBusy_.load()||allProbeBusy_.load()||probeRunning_.load()
+                ||syncAllBusy_.load();
+            if(busy) {
+                // 忙碌条在独立子窗口里重绘（单帧 0.05ms），每拍都刷即可。
+                // 同步章的角度由 CurrentView 按时间算（这里不再累加，否则定时器变慢就"卡住"）。
+                busyBar_.Invalidate();
+                // 旋转图标在独立的 SpinGlyph 子窗口里转（单帧 <0.2ms，30fps 随便刷），
+                // 主面板**不参与**——整窗重绘 10–170ms，拿它当动画时钟必然"不转、只在抖"。
+                spinGlyph_.Invalidate();
+                // 同步进度「n/N」是主面板上的文字：只有**同步**（有真实进度要显示）才重绘主面板，
+                // 而且按 2 拍（≈66ms）限流，避免把 UI 线程占满。
+                // 静默轮询（refreshQuiet_）完全不重绘（motion 门禁："an unchanged poll must not
+                // repaint the whole panel"）。
+                if(syncAllBusy_.load()&&!refreshQuiet_) {
+                    if(++spinPanelTick_>=2) { spinPanelTick_=0;InvalidateRect(panel_,nullptr,FALSE); }
+                }
+            }
             else {
-                // 刷新刚结束：对勾显示 800ms 再恢复静态刷新图标。
+                // 所有工作都结束了：停表。对勾只为**手动刷新**显示 800ms——
+                // 轮询（quiet）不显示，否则每 20s 都会为了一个勾重绘整窗（v1.28）。
                 KillTimer(panel_,kSpinTimer);
-                syncCheckShown_=true;
-                InvalidateRect(panel_,nullptr,FALSE);
-                SetTimer(panel_,kCheckTimer,800,nullptr);
+                busyBarTimerArmed_=false;
+                if(refreshQuiet_) {
+                    if(syncCheckShown_) { syncCheckShown_=false;InvalidateRect(panel_,nullptr,FALSE); }
+                } else {
+                    syncCheckShown_=true;
+                    InvalidateRect(panel_,nullptr,FALSE);
+                    SetTimer(panel_,kCheckTimer,800,nullptr);
+                }
             }
             return 0;
         }
@@ -2483,10 +3045,33 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
     case kProbeProgressMessage:
         if(!strip&&panel_) InvalidateRect(panel_,nullptr,FALSE);
         return 0;
+    case kProbeAllMessage:
+        if(!strip) { ApplyProbeAll();if(lparam) {} return 0; }
+        break;
     case kProbeRowMessage:
         if(!strip&&lparam) { HandleProbeRow(reinterpret_cast<ProbeRow*>(lparam));return 0; }
         break;
+    case kSyncAllMessage:
+        if(!strip) {
+            // wparam=1 才是整批结束（要重读状态、交代网关重启）；0 只是"一个供应商同步完了"，
+            // 重绘一帧让按钮上的 n/N 动起来。
+            if(wparam) HandleSyncAllDone();
+            else InvalidateAll();
+            return 0;
+        }
+        break;
+    case kNativeFieldMessage:
+        if(!strip) { HandleNativeFieldEvent(static_cast<int>(wparam),static_cast<int>(lparam));return 0; }
+        break;
     case WM_MOUSEWHEEL:
+        // v1.21：添加页的模型列表有溢出时先滚它（用户要求"列表要能滑动"）。
+        if(!strip&&activePage_==2&&addSub_==0&&addChips_.size()>5) {
+            const int maxFirst=static_cast<int>(addChips_.size())-5;
+            const int step=GET_WHEEL_DELTA_WPARAM(wparam)>0?-1:1;
+            addModelScroll_=std::clamp(addModelScroll_+step,0,maxFirst);
+            InvalidateAll();
+            return 0;
+        }
         // 展开中的下拉列表先吃滚轮（供应商 / 来源列表比可视行数长）：滚列表，不滚页面。
         if(!strip&&((activePage_==1&&fbSelectOpen_)||(activePage_==2&&addSelectOpen_))) {
             const auto laid=LayoutForInput();
