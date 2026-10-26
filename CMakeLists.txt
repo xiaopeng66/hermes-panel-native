@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(HermesModelPanelNative VERSION 1.1.5 LANGUAGES CXX)
+project(HermesModelPanelNative VERSION 1.1.6 LANGUAGES CXX)
 enable_language(RC)   # assets/hermes.rc：把 logo 编进 exe（Explorer/任务栏/窗口类都用它）
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

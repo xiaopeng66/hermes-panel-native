@@ -1297,11 +1297,20 @@ void PanelRenderer::FallbackPage(ID2D1RenderTarget* target,const PanelLayout& la
     }
     target->PopAxisAlignedClip();
     if(layout.fbMaxScroll>0.5f) {
-        const float width=layout.fbScrollTrack.right-layout.fbScrollTrack.left;
-        brush_->SetColor(palette.line);
-        target->FillRoundedRectangle(D2D1::RoundedRect(layout.fbScrollTrack,width,width),brush_.Get());
-        brush_->SetColor(palette.line2);
-        target->FillRoundedRectangle(D2D1::RoundedRect(layout.fbScrollThumb,width,width),brush_.Get());
+        // 与模型页列表 / 页内滚动条**同一套**：只画拇指（没有轨道底色）、同色（line2，悬停 line）、
+        // 悬停加粗到 8 DIP。以前这里有轨道 + 拇指都画，看着比别的页面粗一圈、位置也偏里。
+        const bool hot=view.pointerInside
+            &&view.pointerX>=layout.fbScrollTrack.left-Dip(2.0f,scale_)
+            &&view.pointerX<=layout.fbScrollTrack.right+Dip(2.0f,scale_)
+            &&view.pointerY>=layout.fbScrollTrack.top&&view.pointerY<=layout.fbScrollTrack.bottom;
+        auto thumb=layout.fbScrollThumb;
+        if(hot) {
+            const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
+            thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
+        }
+        brush_->SetColor(hot?palette.line:palette.line2);
+        target->FillRoundedRectangle(D2D1::RoundedRect(thumb,
+            widgets::kScrollBarWidth*scale_/2.0f,widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
     }
     // .addline: the dashed "追加一条" line under the ladder.
     {

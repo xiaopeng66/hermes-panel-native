@@ -828,7 +828,7 @@ void Application::SyncBusyBar(const PanelLayout& layout,const D2D1_RECT_F& pageH
             static_cast<LONG>(std::lround(glyphCell.top)),
             static_cast<LONG>(std::lround(glyphCell.right)),
             static_cast<LONG>(std::lround(glyphCell.bottom))};
-        spinGlyph_.SetColours(toColour(palette_.accentStrong),toColour(palette_.surf));
+        spinGlyph_.SetColours(toColour(palette_.accentStrong));
         spinGlyph_.Place(glyphRect,true);
         spinGlyphShown_=true;
     } else if(spinGlyphShown_) {

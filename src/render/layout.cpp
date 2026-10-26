@@ -837,7 +837,9 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             const float barWidth=dip(kScrollBar);
 
-            layout.fbScrollTrack=Box(layout.ladder.right-barWidth-dip(1),
+            // 位置与模型页列表、页内滚动条统一：都在 content 右边界之外 2 DIP 的同一条竖线上
+            // （以前画在阶梯盒内部右缘，厚度一样但位置偏里，看着像另一套控件）。
+            layout.fbScrollTrack=Box(layout.content.right+dip(2.0f),
                 layout.ladder.top,barWidth,layout.ladder.bottom-layout.ladder.top);
 
             const float viewportHeight=layout.ladder.bottom-layout.ladder.top;
