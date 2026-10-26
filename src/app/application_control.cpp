@@ -386,7 +386,16 @@ Json Application::Dump() const {
         {"hover",{{"control",view.hoverControl},{"amount",view.motion.hoverAmount},
             {"previous",view.motion.hoverPrevious}}},
         // 同步章角度（排查"不转/抖动"用）：按时间算，正常应随每次 dump 递增。
-        {"spin",{{"angle",view.syncSpinAngle},{"busy",view.busy}}},
+        // glyph 是那枚独立子窗口：它只属于模型页的「刷新同步」按钮，别的页面必须不显示
+        // （2026-10-26 真机：回退链跑逐条探测时它压在页头「检测中 n/N」上）。
+        {"spin",{{"angle",view.syncSpinAngle},{"busy",view.busy},
+            {"glyphShown",spinGlyphShown_},
+            {"glyphRect",[this] {
+                RECT window{};
+                if(spinGlyphShown_&&spinGlyph_.Handle()) GetWindowRect(spinGlyph_.Handle(),&window);
+                return Json::array({window.left,window.top,window.right-window.left,
+                    window.bottom-window.top});
+            }()}}},
         // v1.24：忙碌条是独立子窗口——门禁断言"忙碌期间它持续重绘且单帧很便宜"。
         {"syncAll",{{"busy",syncAllBusy_.load()},{"done",syncAllDone_.load()},
             {"total",syncAllTotal_.load()},{"changed",syncAllChanged_.load()}}},

@@ -162,16 +162,21 @@ int wmain(int argc,wchar_t** argv) {
         controls=client.Request({{"command","controls"}});
         ClickPoint(client,controls["fbProbe"]);
         bool sawProgress=false;
+        bool glyphLeaked=false;
         for(int attempt=0;attempt<80&&!sawProgress;++attempt) {
             const auto value=client.Request({{"command","dump"}});
             const auto label=value["fallback"]["probeLabel"].get<std::string>();
             bool pending=false;
             for(const auto& row:value["fallback"]["rows"])
                 if(row["probePending"].get<bool>()) pending=true;
+            // 那枚「刷新同步」的旋转图标只属于模型页：它的盒子挂在搜索框上、与页面无关地算出来，
+            // 别的页面同一坐标正好落着页头动作按钮 —— 真机实测它压在「检测中 1/2」文字上。
+            if(value["spin"]["glyphShown"].get<bool>()) glyphLeaked=true;
             sawProgress=label.find("\xE6\xA3\x80\xE6\xB5\x8B\xE4\xB8\xAD")!=std::string::npos&&pending;
             if(!sawProgress) Sleep(20);
         }
         DeleteFileW((home+L"\\probe_slow").c_str());
+        h::Require(!glyphLeaked,"the models-page spin glyph must not show on the fallback page");
         h::Require(sawProgress,"the probe button shows 检测中 n/N and the active row shows …");
         std::cout<<"PASS 逐条探测 shows live progress (检测中 n/N + …)\n";
         // 测完一条就显示（真机反馈：不能等整条链跑完）：第一条已出结果、第二条还没测完的中间态

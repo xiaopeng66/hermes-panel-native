@@ -36,22 +36,6 @@ void TestIdentityHue() {
             +std::to_string(item.hue));
     }
 }
-// TEMP 诊断：备份页/添加页的正文起点（用完删除）
-void PrintPageLayout() {
-    for(const int page:{2,3,4}) {
-        PanelViewModel view;
-        view.activePage=page;
-        view.backup.title="备份";
-        view.backup.filters.push_back({"全部",30,true});
-        view.add.title="添加";
-        const auto layout=ComputeLayout(view,480.0f,793.0f,1.25f);
-        std::cout<<"page "<<page<<" content.top="<<layout.content.top<<" pageHead.top="<<layout.pageHead.top
-                 <<" filters.top="<<layout.filters.top<<" list.top="<<layout.list.top
-                 <<" subTabs.top="<<layout.subTabs.top<<" pageViewport.top="<<layout.pageViewport.top
-                 <<" (DIP: "<<layout.filters.top/1.25f<<")"<<std::endl;
-    }
-}
-
 // 「这个供应商能不能删」：规则只有一份（ProviderDeletable），视图的禁用态与提交时的守卫共用它。
 void TestProviderDeletable() {
     HermesState state;
@@ -138,7 +122,6 @@ int main() {
     TestIdentityHue();
     TestModernThemes();
     TestProviderDeletable();
-    PrintPageLayout();
     // ---- 图标表：30 个，名字与旧 icons.js 一致，几何在 24x24 内 ----
     Check(IconCount()==30,"the icon table holds the 30 icons the old renderer inlined");
     const char* expected[30]={"search","x","star","refresh-cw","chevron-right","chevron-down","chevron-up",

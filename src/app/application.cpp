@@ -802,7 +802,10 @@ void Application::SyncBusyBar(const PanelLayout& layout) {
     // 注意别用 layout.sync（那是顶部灯行右侧的"时间戳同步章"，完全不同的东西；
     // 之前写错成 layout.sync，图标就跑到顶部 10:07 旁边去了）。
     // 不用子窗口画的原因：主面板整窗重绘 10–170ms，拿它当动画时钟只会"不转、只在抖"。
-    if(layout.syncModels.right>layout.syncModels.left) {
+    // **只在模型页画**：layout.syncModels 挂在 layout.search 上、与页面无关地算出来，别的页面
+    // 同一坐标正好落着页头动作按钮 —— 真机实测：回退链跑「逐条探测」时图标压在「检测中 1/2」
+    // 文字上（备份页的「刷新」同理）。图标是按钮内的装饰，按钮不在就不画。
+    if(activePage_==0&&layout.syncModels.right>layout.syncModels.left) {
         const auto dpiScale=static_cast<float>(dpi)/96.0f;
         const auto glyph=12.0f*dpiScale;
         const auto left=layout.syncModels.left+9.0f*dpiScale;
@@ -814,6 +817,10 @@ void Application::SyncBusyBar(const PanelLayout& layout) {
         spinGlyph_.SetColours(toColour(palette_.accentStrong),toColour(palette_.surf));
         spinGlyph_.Place(glyphRect,true);
         spinGlyphShown_=true;
+    } else if(spinGlyphShown_) {
+        // 不画的这条分支必须显式收起：切到别的页面时它不会自己消失，会留在上一页放好的位置上。
+        spinGlyph_.Place(RECT{},false);
+        spinGlyphShown_=false;
     }
     busyBar_.Place(bar,true);
 }
