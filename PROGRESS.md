@@ -4262,3 +4262,10 @@ app.manifest / rc 固定字段 / rc 字符串四处必须一致，否则打包�
 - 旧 `%LOCALAPPDATA%\HermesModelPanelNative` 不再被写入（mtime 停在切换前），已整体移到
   `E:\AI\Zcode\backups\HermesModelPanelNative-data-preportable-20261026\`，数据现在只在 exe 旁边一份。
 - README / DESIGN 的数据位置说明同步更新；GitHub v1.0.0 的 exe 资产已覆盖为新构建并回读校验一致。
+
+**补充（同日）**：安装位置改回项目内的 `dist-live\`（便携整体目录：exe + data 同层）。此前
+覆盖安装装到了 `%LOCALAPPDATA%\Programs\HermesModelPanelNative`（C 盘标准用户目录），用户指出
+"便携版在 C 盘"——整体 Move 到 `E:\AI\Zcode\projects\hermes-panel-native\dist-live\`，桌面快捷
+方式同步改指向，settings SHA-256 迁移前后一致（e7c5dcc2…），C 盘目录已不存在。注意：便携
+文件夹**必须整体拷贝**（含 data\），单拷 exe 到新位置会以全新设置启动（旧数据在 backups 里，
+不会被自动找回）。
