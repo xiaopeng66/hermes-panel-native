@@ -8,6 +8,7 @@
 #include "control_plane.h"
 #include "control_pipe.h"
 #include "data/log.h"
+#include "data/paths.h"
 #include "data/settings.h"
 
 namespace {
@@ -109,6 +110,26 @@ LRESULT CALLBACK ControlProc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
 }
 
+std::wstring ExecutableDirectory() {
+    wchar_t path[MAX_PATH]{};
+    const auto length=GetModuleFileNameW(nullptr,path,MAX_PATH);
+    if(length==0||length>=MAX_PATH) return {};
+    return hermes::DirectoryOfPath(path);
+}
+bool DirectoryWritable(const std::wstring& directory) {
+    if(directory.empty()) return false;
+    if(!hermes::EnsureDirectory(directory)) return false;
+    wchar_t probe[MAX_PATH]{};
+    swprintf_s(probe,L"%s\\.write-%lu",directory.c_str(),GetCurrentProcessId());
+    HANDLE file=CreateFileW(probe,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_TEMPORARY,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return false;
+    CloseHandle(file);
+    DeleteFileW(probe);
+    return true;
+}
+// 便携优先（用户要求，与 balance 项目同一套）：数据全部放 <exe 所在目录>\data，
+// 复制整个文件夹就带走了设置/档案/日志。只有只读位置（例如 Program Files 下的安装）
+// 才回退到 %LOCALAPPDATA%\HermesModelPanelNative；--data-dir（门禁夹具）永远优先。
 std::wstring DataDirectory(int argc, wchar_t** argv, bool* explicitDirectory = nullptr) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::wstring(argv[i]) == L"--data-dir") {
@@ -116,9 +137,43 @@ std::wstring DataDirectory(int argc, wchar_t** argv, bool* explicitDirectory = n
             return argv[i + 1];
         }
     }
+    const auto portable=ExecutableDirectory()+L"\\data";
+    if(DirectoryWritable(portable)) return portable;
     wchar_t buffer[MAX_PATH]{};
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH) == 0) return L".";
     return std::wstring(buffer) + L"\\HermesModelPanelNative";
+}
+// 一次性搬家：便携目录里还没有 settings.json 时，把旧的 %LOCALAPPDATA%\HermesModelPanelNative
+// 里的设置与档案**复制**过来（只复制、不删除——旧目录原样留着，回退旧版本也还能用）。
+// 日志不搬：单个 5 MB 的流水没有价值，新目录会自己重新写。
+void MigrateLegacyDataDirectory(const std::wstring& target) {
+    if(target.empty()) return;
+    if(GetFileAttributesW((target+L"\\settings.json").c_str())!=INVALID_FILE_ATTRIBUTES) return;
+    wchar_t localAppData[MAX_PATH]{};
+    if(GetEnvironmentVariableW(L"LOCALAPPDATA",localAppData,MAX_PATH)==0) return;
+    const std::wstring legacy=std::wstring(localAppData)+L"\\HermesModelPanelNative";
+    if(GetFileAttributesW((legacy+L"\\settings.json").c_str())==INVALID_FILE_ATTRIBUTES) return;
+    hermes::EnsureDirectory(target);
+    size_t copied=0;
+    for(const auto* name:{L"settings.json",L"profiles.json"}) {
+        const auto from=legacy+L"\\"+name;
+        const auto to=target+L"\\"+name;
+        if(GetFileAttributesW(from.c_str())==INVALID_FILE_ATTRIBUTES) continue;
+        if(CopyFileW(from.c_str(),to.c_str(),FALSE)) ++copied;
+    }
+    if(copied>0) {
+        const auto note=target+L"\\portable-migration.txt";
+        HANDLE file=CreateFileW(note.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file!=INVALID_HANDLE_VALUE) {
+            char text[200]{};
+            const int length=sprintf_s(text,
+                "Copied %zu file(s) from %%LOCALAPPDATA%%\\HermesModelPanelNative (settings/profiles); the old folder was not modified.\n",
+                copied);
+            DWORD written=0;
+            if(length>0) WriteFile(file,text,static_cast<DWORD>(length),&written,nullptr);
+            CloseHandle(file);
+        }
+    }
 }
 std::wstring InstanceName() {
     std::wstring id = L"default";
@@ -201,7 +256,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     auto** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     bool explicitDataDirectory = false;
     std::wstring dataDirectory = DataDirectory(argumentCount, arguments, &explicitDataDirectory);
-    static_cast<void>(explicitDataDirectory);
+    // explicitDataDirectory：--data-dir 指定的目录是夹具自己的，不做便携迁移。
     // 门禁夹具的旧设置目录（默认 %APPDATA%\HermesModelPanel，只读）：--legacy-dir 只在带控制面的
     // 构建里生效，发布版永远按默认目录找。
     std::wstring legacyDirectory;
@@ -211,6 +266,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 #endif
     if (arguments) LocalFree(arguments);
+    // 便携目录首次启动：把旧 %LOCALAPPDATA% 里的设置/档案复制过来。门禁夹具用 --data-dir
+    // 指定自己的目录，绝不把真机设置搬进夹具。
+    if(!explicitDataDirectory) MigrateLegacyDataDirectory(dataDirectory);
     hermes::SettingsStore settings{dataDirectory + L"\\settings.json"};
     hermes::Log log{dataDirectory + L"\\logs\\app.log"};
     if (!legacyDirectory.empty()) app.SetLegacyDirectory(legacyDirectory);

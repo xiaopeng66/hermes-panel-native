@@ -17,7 +17,7 @@ hermes-panel-native.exe（C++/Win32，单进程）
 ├─ 外壳（继承 balance-panel-native，已过 A1–A7 门禁）
 │   ├─ 双窗模型：面板窗 + 贴边挂件窗（14/30 DIP，tag/capsule，见 §4.8 #34）；吸附/悬停展开/拖拽/DPI/拓扑
 │   ├─ 托盘（显示隐藏/最近切换/刷新/打开 WebUI/重启网关/贴边/置顶/自启/退出）、热键 Ctrl+Alt+H
-│   ├─ 设置持久化（%LOCALAPPDATA%\HermesModelPanelNative）、主题（深/浅/跟随系统）、日志（脱敏）
+│   ├─ 设置持久化（便携：<exe>\data；只读位置回退 %LOCALAPPDATA%\HermesModelPanelNative）、主题（深/浅/跟随系统）、日志（脱敏）
 │   └─ 控制面（仅 Debug）：dump / place / controls / hit … 供验收脚本使用
 ├─ 控件层（新写）：灯/徽标/分段控件/输入框(含 IME)/密码框/多行/开关/下拉/列表与滚动/梯级列表/
 │              模态/Toast/忙碌条/发丝线/渐变铭牌/图标（按 icons.js 的 30 个 Lucide 图标逐个矢量重绘）
@@ -31,7 +31,7 @@ hermes-panel-native.exe（C++/Win32，单进程）
 - **INV-H2 助手契约不变**：verb、参数白名单、JSON 输出形状与原版一致；原生侧只转发与解析。
 - **INV-H3 信息与观感对齐旧版**：§4 的逐项对照表是验收清单；文案、顺序、状态语义、配色一律照旧。
 - **INV-H4 旧版可回退**：Electron 版与 `%APPDATA%\HermesModelPanel` 保持可用、不被修改；新面板数据在
-  `%LOCALAPPDATA%\HermesModelPanelNative`，旧设置一次性迁移（只读旧文件）。
+  便携目录 `<exe>\data`；旧 `%LOCALAPPDATA%\HermesModelPanelNative` 的设置一次性**复制**（不删除）过来。
 - **INV-H5 隔离开测**：测试用假助手脚本 + 假 WebUI + 隔离数据目录；不触碰真实 WSL 配置。
 - **INV-H6 描边即观感**：界面只有"状态灯/当前模型铭牌"允许彩色与发光；其余保持安静（原设计语言）。
 

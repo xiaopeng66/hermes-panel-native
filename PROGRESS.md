@@ -4241,3 +4241,24 @@ app.manifest / rc 固定字段 / rc 字符串四处必须一致，否则打包�
 
 验收：menu_test 35/35（三态显隐、贴边收起/解除、置顶、四档刷新间隔、七套主题、关闭动作、刷新、
 两个服务动作、关于对话框正文）；五页几何 audit 仍为 0。
+
+### G103 数据改为便携（放 exe 所在目录），用户要求（2026-10-26）
+
+用户："我要像 balance 项目一样，数据都在 exe 所在文件夹，你改一下，然后重新覆盖。"
+
+**改法**（与 `projects/balance-panel-native` 同一套约定）：
+- `main.cpp` 新增 `ExecutableDirectory()` / `DirectoryWritable()`，`DataDirectory()` 顺序改为
+  `--data-dir`（夹具） → **`<exe 所在目录>\data`（可写就用它）** → `%LOCALAPPDATA%\HermesModelPanelNative`
+  （只读位置如 Program Files 才回退）。可写性用"建一个临时探针文件再删"判断，不用猜。
+- 一次性搬家 `MigrateLegacyDataDirectory()`：便携目录里还没有 `settings.json` 时，把旧的
+  `%LOCALAPPDATA%\HermesModelPanelNative\settings.json` 与 `profiles.json` **复制**过来（只复制、
+  不删除，旧目录原样留着），并在数据目录旁写一张 `portable-migration.txt` 说明来源。
+  日志不搬（5 MB/个的流水没有搬运价值）。带 `--data-dir` 的夹具构建**不做**迁移（绝不把真机设置搬进夹具）。
+- 打开数据目录（托盘）与关于对话框显示的都是 `settings_->Path()` 的目录，自动跟着走，无需另改。
+
+**实测**（覆盖安装到 `%LOCALAPPDATA%\Programs\HermesModelPanelNative` 后）：
+- `<exe>\data\` 出现 `settings.json`（SHA-256 与旧目录**完全一致**）、`profiles.json`、`logs\app.log`、
+  `portable-migration.txt`；窗口位置/贴边状态/主题/收藏全部沿用（geometry 日志与迁移前一致）。
+- 旧 `%LOCALAPPDATA%\HermesModelPanelNative` 不再被写入（mtime 停在切换前），已整体移到
+  `E:\AI\Zcode\backups\HermesModelPanelNative-data-preportable-20261026\`，数据现在只在 exe 旁边一份。
+- README / DESIGN 的数据位置说明同步更新；GitHub v1.0.0 的 exe 资产已覆盖为新构建并回读校验一致。

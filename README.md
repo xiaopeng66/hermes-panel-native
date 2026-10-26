@@ -19,7 +19,9 @@ WSL 里 Hermes 的模型与供应商管理悬浮窗：C++20 + 纯 Win32 + Direct
 - **备份页**：每次写入前自动备份 `config.yaml` 与 `.env`，可筛选并一键恢复。
 - **设置页**：WSL 发行版、WebUI 端口、刷新间隔、写入前 diff、自动重启网关、置顶、关闭行为、主题、呼出热键。
 
-设置与日志存放在 `%LOCALAPPDATA%\HermesModelPanelNative\`。
+数据（设置 / 档案 / 日志）默认放在 **exe 所在目录的 `data\` 子文件夹**（便携）：复制整个文件夹
+就带走全部设置。只有程序被放在只读位置（如 `Program Files`）时才回退到
+`%LOCALAPPDATA%\HermesModelPanelNative\`；首次启动会把旧目录里的设置**复制**（不删除）过来。
 
 ## 已知限制
 
