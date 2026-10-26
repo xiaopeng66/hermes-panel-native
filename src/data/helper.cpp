@@ -281,6 +281,10 @@ HelperReply HelperBridge::Call(const std::string& requestLine,unsigned timeoutMs
             }
             if(decoded.empty()) decoded=text.substr(0,200);
         }
+        // 诊断信息要能被日志安全承载：整段载荷没人看，还会把日志冲散（真机见过 11.8 KB 的
+        // WSL 升级横幅 + 助手回复被整段带进日志）。只留开头一段，长度与下面的兜底分支一致。
+        constexpr std::size_t kMaxDecoded=200;
+        if(decoded.size()>kMaxDecoded) decoded=decoded.substr(0,kMaxDecoded)+"...";
         // 诊断：把原始字节的前 80 个十六进制字符也带上（解析失败时才知道对面到底说了什么）。
         std::string hex;
         for(std::size_t index=0;index<text.size()&&index<24;++index) {

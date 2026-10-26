@@ -87,6 +87,42 @@ std::string Log::Redact(std::string text) {
     }
     return text;
 }
+std::string Log::Sanitize(const std::string& text) {
+    // 日志是 UTF-8 文本文件，但写进去的东西有一部分来自子进程：wsl.exe 与读助手在异常时会吐
+    // UTF-16 或其它编码的原始字节。直接落盘就会出现乱码，更要命的是载荷里的 0x0A/0x00 会把一行
+    // 切成好几段——真机日志实测混进 5445 行二进制，其中一条 11.8 KB 的载荷把后面整段冲散，
+    // 想按行读日志的排查工具全部失效。
+    // 规则：可打印 ASCII 与合法 UTF-8（含中文）原样保留；`\t` 保留（不破坏行结构）；其余
+    // 全部转成 \xNN 转义 —— 日志始终是单行合法 UTF-8，载荷也仍然可以逐字节还原。
+    std::string output;
+    output.reserve(text.size());
+    for(std::size_t index=0;index<text.size();) {
+        const auto byte=static_cast<unsigned char>(text[index]);
+        if(byte=='\t'||(byte>=0x20&&byte<0x7F)) { output+=static_cast<char>(byte);++index;continue; }
+        std::size_t length=0;
+        if(byte>=0xC2&&byte<=0xDF) length=2;
+        else if(byte>=0xE0&&byte<=0xEF) length=3;
+        else if(byte>=0xF0&&byte<=0xF4) length=4;
+        bool valid=length!=0&&index+length<=text.size();
+        if(valid) {
+            for(std::size_t offset=1;offset<length;++offset) {
+                if((static_cast<unsigned char>(text[index+offset])&0xC0)!=0x80) { valid=false;break; }
+            }
+            if(valid) {
+                // RFC 3629：挡掉过长编码、UTF-16 代理区与超出 U+10FFFF 的码位。
+                const auto second=static_cast<unsigned char>(text[index+1]);
+                if(length==3) valid=!(byte==0xE0&&second<0xA0)&&!(byte==0xED&&second>=0xA0);
+                if(length==4) valid=!(byte==0xF0&&second<0x90)&&!(byte==0xF4&&second>=0x90);
+            }
+        }
+        if(valid) { output.append(text,index,length);index+=length;continue; }
+        char escape[8]{};
+        std::snprintf(escape,sizeof(escape),"\\x%02X",byte);
+        output+=escape;
+        ++index;
+    }
+    return output;
+}
 void Log::Append(const char* level,const std::string& channel,const std::string& message) {
     {
         WIN32_FILE_ATTRIBUTE_DATA info{};
@@ -100,7 +136,8 @@ void Log::Append(const char* level,const std::string& channel,const std::string&
     }
     std::ofstream output(path_,std::ios::app|std::ios::binary);
     if(!output) return;
-    output<<Timestamp()<<" ["<<level<<"] "<<channel<<": "<<Redact(message)<<'\n';
+    // 先遮敏感值、再转义编码：两步都在这个唯一的收口处，任何调用方都不可能把坏字节写进日志。
+    output<<Timestamp()<<" ["<<level<<"] "<<channel<<": "<<Sanitize(Redact(message))<<'\n';
     ++lines_;
 }
 void Log::Info(const std::string& channel,const std::string& message) { Append("info",channel,message); }

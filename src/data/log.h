@@ -14,6 +14,8 @@ public:
     void Error(const std::string& channel,const std::string& message);
     void Geometry(const std::string& message) { Info("geometry",message); }
     static std::string Redact(std::string text);
+    // 把非 UTF-8 / 控制字节转成 \xNN 转义：日志永远是单行合法 UTF-8（见 log.cpp 的注释）。
+    static std::string Sanitize(const std::string& text);
     unsigned Lines() const { return lines_; }
     const std::wstring& Path() const { return path_; }
 private:

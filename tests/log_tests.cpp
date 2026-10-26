@@ -1,7 +1,9 @@
 #include "data/log.h"
 #include <windows.h>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -34,6 +36,26 @@ int main() {
     };
     for(const auto& test:cases) Check(hermes::Log::Redact(test.input)==test.expected,test.name);
 
+    // 编码清洗：子进程（wsl.exe / 读助手）异常时吐的原始字节必须被转义，日志只能是单行合法 UTF-8。
+    struct SanitizeCase { const char* name;std::string input;std::string expected; };
+    const std::vector<SanitizeCase> sanitizeCases{
+        {"plain text untouched","geometry write panel dock","geometry write panel dock"},
+        {"utf8 chinese kept","WSL \xE6\xAD\xA3\xE5\x9C\xA8\xE6\x89\xA7\xE8\xA1\x8C\xE5\x8D\x87\xE7\xBA\xA7",
+            "WSL \xE6\xAD\xA3\xE5\x9C\xA8\xE6\x89\xA7\xE8\xA1\x8C\xE5\x8D\x87\xE7\xBA\xA7"},
+        {"tab kept","a\tb","a\tb"},
+        {"newline escaped","a\nb","a\\x0Ab"},
+        {"carriage return escaped","a\rb","a\\x0Db"},
+        {"nul escaped",std::string("a\0b",3),"a\\x00b"},
+        {"utf-16le payload escaped",std::string("W\x00S\x00L\x00",6),
+            "W\\x00S\\x00L\\x00"},
+        {"lone continuation byte escaped",std::string("\x80\x81"),"\\x80\\x81"},
+        {"overlong three byte escaped",std::string("\xE0\x80\xAF"),"\\xE0\\x80\\xAF"},
+        {"surrogate half escaped",std::string("\xED\xA0\x80"),"\\xED\\xA0\\x80"},
+        {"truncated four byte escaped",std::string("\xF0\x9F\x98"),"\\xF0\\x9F\\x98"},
+    };
+    for(const auto& test:sanitizeCases)
+        Check(hermes::Log::Sanitize(test.input)==test.expected,test.name);
+
     wchar_t directory[MAX_PATH]{};
     GetTempPathW(MAX_PATH,directory);
     const std::wstring path=std::wstring(directory)+L"hermes-panel-log-test.log";
@@ -57,6 +79,29 @@ int main() {
         Check(lines.size()>2&&lines[2].find("[error] site: http 401")!=std::string::npos,"error line format");
     }
     DeleteFileW(path.c_str());
+    // 落盘后的日志必须仍是"一行一条 + 合法 UTF-8"：把 wsl.exe 那种 UTF-16 原始字节喂进去，
+    // 文件里既不能出现控制字节（0x0A 会把一行切成两行），也不能留下非法的裸字节。
+    {
+        const std::wstring poisoned=std::wstring(directory)+L"hermes-panel-log-poison.log";
+        DeleteFileW(poisoned.c_str());
+        {
+            hermes::Log log(poisoned);
+            log.Info("data",std::string("helper error: reply is not JSON (12B) ")
+                +std::string("W\x00S\x00L\x00\x0A\x00\xE6\xAD\xA3",10));
+        }
+        std::ifstream input(poisoned,std::ios::binary);
+        const std::string body((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+        const auto newlines=static_cast<int>(std::count(body.begin(),body.end(),'\n'));
+        Check(newlines==1,"poisoned payload stays on one line");
+        bool hasControl=false;
+        for(const char raw:body) {
+            const auto value=static_cast<unsigned char>(raw);
+            if(value<0x20&&value!='\n'&&value!='\t') { hasControl=true;break; }
+        }
+        Check(!hasControl,"poisoned payload leaves no control bytes behind");
+        Check(body.find("W\\x00S\\x00L\\x00")!=std::string::npos,"payload is escaped, not dropped");
+        DeleteFileW(poisoned.c_str());
+    }
     // 日志轮转：文件超过 5 MB 时把旧内容挪到 .1，新日志从空开始（只保留一份旧日志）。
     {
         const std::wstring rotated=std::wstring(directory)+L"hermes-panel-log-rotate.log";

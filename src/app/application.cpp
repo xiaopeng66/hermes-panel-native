@@ -162,7 +162,12 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     SyncTopmostStyle();
     MigrateLegacySettings();
     RegisterHotkeys();
-    if(!AddTray()) return false;
+    if(!AddTray()) {
+        // 没有托盘图标这个面板就等于失联（菜单、呼出、退出全在托盘上）。以前这里只 return false，
+        // 进程以退出码 10 静默结束：用户看到"面板没启动"，日志里连一行都没有。
+        if(log_) log_->Error("tray","no tray icon: refusing to start");
+        return false;
+    }
     UpdatePollTimer();
     UpdateLatencyTimer();
     RefreshData();
@@ -271,6 +276,12 @@ bool Application::AddTray() {
     data.uCallbackMessage=kTrayMessage;data.hIcon=trayIcon_;
     wcsncpy_s(data.szTip,trayTip_.c_str(),_TRUNCATE);
     trayRegistered_=Shell_NotifyIconW(NIM_ADD,&data)!=FALSE;
+    // 托盘是面板唯一的常驻入口，注册成败必须留下痕迹：以前这条路径一个字都不写，发布版既没法
+    // 从日志确认图标在不在（Debug 版还能用控制面查 dump.tray.registered），失败时更是完全静默。
+    if(log_) {
+        if(trayRegistered_) log_->Info("tray","registered (id="+std::to_string(kTrayId)+")");
+        else log_->Warn("tray","registration failed ("+std::to_string(GetLastError())+")");
+    }
     return trayRegistered_;
 }
 COLORREF Application::TrayColour() const {
