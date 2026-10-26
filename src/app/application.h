@@ -519,6 +519,9 @@ private:
     // v1.29：原生字段摆放的布局签名（页/子页/滚动/尺寸/DPI/浮层态）
     unsigned long long lastNativeLayoutSignature_=0;
     bool refreshQuiet_=false;   // v1.28：本次刷新是否由轮询发起
+    // 当前这轮"忙"是不是同步章自己的手动刷新+探活：只有它才点亮右上角那枚图标/成功后打勾。
+    // 其它动作（逐条探测、备份刷新、保存…）一律不算——用户："根本不是一个功能"。
+    bool refreshOwnsBusy_=false;
     bool statePainted_=false;   // v1.28：首帧必须画，之后靠签名判定
     unsigned long long paintFrames_=0;   // 门禁用：数一共画了多少帧            // 最近一帧忙碌期面板重绘耗时（ms）
     double paintSubMs_[3]={0,0,0};          // 该帧的 CurrentView / LayoutForInput / 绘制 分解

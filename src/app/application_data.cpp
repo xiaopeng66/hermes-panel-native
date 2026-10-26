@@ -181,6 +181,8 @@ void Application::StartRefresh(bool quiet) {
     // Single-flight, like the old panel's tickRunning guard: a poll landing on top of a manual refresh
     // is dropped instead of queueing a second WSL round trip.
     if(workerBusy_.exchange(true)||stopping_.load()) return;
+    // 真的起跑了才算"这轮忙是同步章自己的手动刷新"：被丢弃的刷新不能抢所有权。
+    refreshOwnsBusy_=!quiet;
     // The previous job has finished (it clears the busy flag as it leaves), so its thread object can be
     // reaped here: assigning to a still-joinable std::thread calls std::terminate.
     if(worker_.joinable()) worker_.join();
@@ -393,6 +395,8 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
     // 删除/移除/移动/恢复没有 dry_run 分支，它们各自有危险确认模态（删除、移除、恢复）或可逆（移动）。
     const bool wantsPreview=stored_.previewDiff&&!args.contains("dry_run")&&SupportsDryRun(verb);
     if(wantsPreview) args["dry_run"]=true;
+    // 别的动作起跑 = 这轮忙不属于同步章（它自己的图标别点亮、结束也别打勾）。
+    refreshOwnsBusy_=false;
     if(workerBusy_.exchange(true)) {
         // 用户点出来的动作（托盘菜单/面板按钮）**排队**而不是丢掉：正在飞的调用落地后按顺序执行。
         // 同一动作（verb + 参数一致）合并，只留最新的一份；不同动作都保留。自动轮询仍然直接丢弃

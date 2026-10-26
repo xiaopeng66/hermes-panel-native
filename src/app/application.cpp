@@ -806,7 +806,8 @@ void Application::SyncBusyBar(const PanelLayout& layout,const D2D1_RECT_F& pageH
     // 不用子窗口画的原因：主面板整窗重绘 10–170ms，拿它当动画时钟只会"不转、只在抖"。
     D2D1_RECT_F glyphCell{};
     bool glyphWanted=false;
-    if(activePage_==0&&layout.syncModels.right>layout.syncModels.left) {
+    //   模型页 + 正在同步（SyncAllModels）⇒ 搜索框右端的「刷新同步」
+    if(activePage_==0&&syncAllBusy_.load()&&layout.syncModels.right>layout.syncModels.left) {
         const auto dpiScale=static_cast<float>(dpi)/96.0f;
         const auto glyph=12.0f*dpiScale;
         const auto left=layout.syncModels.left+9.0f*dpiScale;
@@ -1882,6 +1883,7 @@ PanelViewModel Application::CurrentView() {
         }
     }
     view.busy=workerBusy_.load();
+    view.refreshBusy=workerBusy_.load()&&refreshOwnsBusy_;
     // 同步章图标已经搬到独立子窗口（SpinGlyph，单帧 <0.2ms），不再由主面板重绘驱动：
     // 主面板整窗重绘在本机实测 10–170ms，把它当动画时钟只会得到"不转、只在抖"。
     // 这里只把窗口视图里那个位置留空（Icon 由子窗口自己画）。
@@ -3041,13 +3043,16 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
                 // 轮询（quiet）不显示，否则每 20s 都会为了一个勾重绘整窗（v1.28）。
                 KillTimer(panel_,kSpinTimer);
                 busyBarTimerArmed_=false;
-                if(refreshQuiet_) {
+                // 对勾只属于**同步章自己的手动刷新**：逐条探测/备份刷新结束不该在这里打勾
+                // （用户真机反馈："根本不是一个功能"）。refreshOwnsBusy_ 在这一帧用掉后清掉。
+                if(refreshQuiet_||!refreshOwnsBusy_) {
                     if(syncCheckShown_) { syncCheckShown_=false;InvalidateRect(panel_,nullptr,FALSE); }
                 } else {
                     syncCheckShown_=true;
                     InvalidateRect(panel_,nullptr,FALSE);
                     SetTimer(panel_,kCheckTimer,800,nullptr);
                 }
+                refreshOwnsBusy_=false;
             }
             return 0;
         }

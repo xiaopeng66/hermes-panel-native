@@ -1989,14 +1989,13 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
             const auto start=sync->right-4.0f*scale_-width-iconBox-5.0f*scale_;
             const D2D1_RECT_F iconRect(start,sync->top+(sync->bottom-sync->top-iconBox)/2,start+iconBox,
                 sync->top+(sync->bottom-sync->top+iconBox)/2);
-            if(view.busy) {
-                // 刷新进行中：这一格**留给独立的 SpinGlyph 子窗口**（它自己按时间转，单帧 <0.2ms）。
-                // 主面板整窗重绘 10–170ms，在这里画旋转只会"不转、只在抖"（真机实测）。
-                // 不画任何东西：底下的 surf 底色由主面板已经铺好，子窗口正好盖住这一格。
-                (void)iconRect;
-            } else if(view.syncCheck) {
+            if(view.syncCheck) {
                 // 刷新成功：对勾短暂显示后恢复（绿色，与 ok 语义一致）。
                 Icon(target,iconRect,IconId::Check,palette.ok,1.7f);
+            } else if(view.refreshBusy) {
+                // 它**自己的**刷新+探活在跑：图标换成 accent 色（这一格没有子窗口，不要留空——
+                // 以前按 view.busy 留空，结果点逐条探测/备份刷新时这个 ↻ 凭空消失，看着像被点了）。
+                Icon(target,iconRect,IconId::RefreshCw,palette.accentStrong,1.7f);
             } else {
                 Icon(target,iconRect,IconId::RefreshCw,palette.faint,1.7f);
             }

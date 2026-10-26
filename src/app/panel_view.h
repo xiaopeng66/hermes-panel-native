@@ -209,6 +209,9 @@ struct PanelViewModel {
     float syncSpinAngle=0.0f;
     float busySweep=0.0f;               // 顶部不定进度条的流动相位（度，0..720 循环）
     bool syncCheck=false;
+    // 同步章（右上角的刷新+探活）**自己的**动作在跑：只有它才把图标换成 accent 色，
+    // 别的动作（逐条探测/备份刷新…）不许借用这个戳的任何状态（用户："根本不是一个功能"）。
+    bool refreshBusy=false;
     // G1 贴边挂件：样式、贴边方向与动画相位（收起态绘制用）。
     std::string widgetStyle="capsule";   // 只剩铭牌/胶囊两套（设置层会给出真实值）
     int widgetEdge=0;                  // 0 none / 1 left / 2 right / 3 top / 4 bottom
