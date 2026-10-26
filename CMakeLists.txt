@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(HermesModelPanelNative VERSION 1.1.8 LANGUAGES CXX)
+project(HermesModelPanelNative VERSION 1.0.0 LANGUAGES CXX)
 enable_language(RC)   # assets/hermes.rc：把 logo 编进 exe（Explorer/任务栏/窗口类都用它）
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -15,7 +15,7 @@ add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WIN
 add_executable(hermes-panel-native WIN32 assets/hermes.rc src/app/main.cpp src/app/application.cpp src/app/application_data.cpp src/app/application_pages.cpp src/app/application_input.cpp src/app/application_control.cpp src/app/control_pipe.cpp src/app/panel_view.cpp src/data/settings.cpp src/data/log.cpp src/core/geometry_controller.cpp src/core/state.cpp src/render/icons.cpp src/render/widgets.cpp src/render/textfield.cpp src/ui/native_field.cpp src/ui/busy_bar.cpp src/ui/spin_glyph.cpp src/render/surface.cpp src/data/helper.cpp src/data/state.cpp src/data/probe.cpp src/data/http.cpp src/data/latency.cpp src/data/profiles.cpp src/data/unc_snapshot.cpp src/render/panel.cpp src/render/theme.cpp src/render/layout.cpp)
 # 界面全自绘，没有任何 WebView2/内容运行时（H2a 的剥离）：exe 是自包含的，不链接也不需要随附 DLL。
 target_include_directories(hermes-panel-native PRIVATE third_party src)
-target_link_libraries(hermes-panel-native PRIVATE hermes-geometry user32 shell32 shcore dwmapi d2d1 dwrite ole32 winhttp crypt32 imm32)
+target_link_libraries(hermes-panel-native PRIVATE hermes-geometry user32 shell32 shcore dwmapi d2d1 dwrite ole32 winhttp crypt32 imm32 version)
 target_link_options(hermes-panel-native PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/app/app.manifest")
 target_link_options(hermes-panel-native PRIVATE "/MAP:$<TARGET_FILE_DIR:hermes-panel-native>/app.map" "/MAPINFO:EXPORTS")
 # DESIGN §8: the control plane (named pipe + COPYDATA commands) exists in debug builds only, so a

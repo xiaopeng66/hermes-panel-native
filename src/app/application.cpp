@@ -23,7 +23,7 @@
 namespace hermes {
 const std::vector<MenuEntry>& MenuEntries() {
     static const std::vector<MenuEntry> entries{
-        {static_cast<unsigned>(MenuCommand::ToggleVisibility),"hide",L"显示/隐藏面板"},
+        {static_cast<unsigned>(MenuCommand::ToggleVisibility),"hide",L"显示/展开/隐藏面板"},
         {static_cast<unsigned>(MenuCommand::Refresh),"refresh",L"刷新状态"},
         {static_cast<unsigned>(MenuCommand::ProbeAllModels),"probe-all",L"探测全部供应商模型（只读）"},
         {static_cast<unsigned>(MenuCommand::OpenWebUI),"open-webui",L"打开 WebUI"},
@@ -40,8 +40,23 @@ const std::vector<MenuEntry>& MenuEntries() {
         {static_cast<unsigned>(MenuCommand::Quit),"quit",L"退出"}};
     return entries;
 }
-NativeMonitor ReadMonitor(HMONITOR monitor) {
-    MONITORINFOEXW info{};info.cbSize=sizeof(info);
+// exe 自己的版本号（读 VERSIONINFO，不在代码里再抄一份）：关于对话框显示的就是文件属性里那一条。
+std::wstring ExecutableVersion() {
+    wchar_t path[MAX_PATH]{};
+    if(!GetModuleFileNameW(nullptr,path,MAX_PATH)) return {};
+    const DWORD size=GetFileVersionInfoSizeW(path,nullptr);
+    if(!size) return {};
+    std::vector<BYTE> data(size);
+    if(!GetFileVersionInfoW(path,0,size,data.data())) return {};
+    VS_FIXEDFILEINFO* info=nullptr;
+    UINT length=0;
+    if(!VerQueryValueW(data.data(),L"\\",reinterpret_cast<void**>(&info),&length)||!info) return {};
+    return std::to_wstring(HIWORD(info->dwFileVersionMS))+L"."
+        +std::to_wstring(LOWORD(info->dwFileVersionMS))+L"."
+        +std::to_wstring(HIWORD(info->dwFileVersionLS))+L"."
+        +std::to_wstring(LOWORD(info->dwFileVersionLS));
+}
+NativeMonitor ReadMonitor(HMONITOR monitor) {    MONITORINFOEXW info{};info.cbSize=sizeof(info);
     if(!monitor || !GetMonitorInfoW(monitor,&info)) throw std::runtime_error("Monitor information unavailable");
     UINT x=96,y=96;
     if(FAILED(GetDpiForMonitor(monitor,MDT_EFFECTIVE_DPI,&x,&y))) throw std::runtime_error("Monitor DPI unavailable");
@@ -369,18 +384,24 @@ void Application::RemoveTray() {
     if(trayIcon_) { DestroyIcon(trayIcon_);trayIcon_=nullptr; }
 }
 HMENU Application::BuildMenu() const {
-    // 结构逐条对齐旧 main.js buildTrayMenu()（用户报「分类混乱」就是这里：旧版是四组 + 分隔线，
-    // 组内顺序固定；勾选项用 checkbox/radio 的语义）。所有来自 std::string（UTF-8）的文案都必须
-    // 过 Widen()：以前用 std::wstring(begin,end) 逐字节加宽，中文在托盘菜单里就是乱码。
+    // 分类（2026-10-26 重排，用户要求"分类合理"）：
+    //   ① 面板：显隐 / 当前 / 切换 / 贴边 / 置顶  ② 服务：刷新 + 三个服务动作
+    //   ③ 外观与行为：主题 / 关闭按钮 / 自启 / 刷新间隔  ④ 系统：数据目录 / 关于 / 退出
+    // 勾选项一律表示**当前状态**，文案表示**点击后的动作**（与 Windows 菜单惯例一致）；
+    // 显隐项按状态写"隐藏面板 / 展开面板 / 显示面板"，不再用「显示 / 隐藏」这种二义写法。
+    // 所有来自 std::string（UTF-8）的文案都必须过 Widen()：逐字节加宽会在托盘菜单里显示乱码。
     HMENU menu=CreatePopupMenu();
     if(!menu) return nullptr;
-    const bool visible=state_!=State::Hidden;
     const bool docked=model_.edge!=Edge::None;
     // 枚举 → 菜单 ID（旧版的 id 是固定数字：1001 显示/隐藏 … 1099 退出）。
     const auto label=[](MenuCommand command) { return static_cast<UINT_PTR>(command); };
-    // 组 1：显示/隐藏 + 当前模型（信息行）+ 切换到 ▸
+    // 组 1：显隐 + 当前模型（信息行）+ 切换到 ▸ + 窗口行为（贴边 / 置顶）
     {
-        const auto text=visible?L"\u663E\u793A / \u9690\u85CF":L"\u663E\u793A";
+        // 三种状态三种动作：隐藏→显示（贴边时直接展开成面板）、贴条→展开、面板→隐藏。
+        const wchar_t* text=state_==State::Hidden
+            ?L"\u663E\u793A\u9762\u677F"                                  // 显示面板
+            :(state_==State::Collapsed?L"\u5C55\u5F00\u9762\u677F"        // 展开面板
+                :L"\u9690\u85CF\u9762\u677F");                            // 隐藏面板
         AppendMenuW(menu,MF_STRING,label(MenuCommand::ToggleVisibility),text);
     }
     {
@@ -427,6 +448,11 @@ HMENU Application::BuildMenu() const {
                 L"\uFF08\u5148\u5728\u9762\u677F\u91CC\u5207\u4E00\u6B21\uFF0C\u6216\u52A0\u6536\u85CF\uFF09");
         AppendMenuW(menu,MF_STRING|MF_POPUP,reinterpret_cast<UINT_PTR>(submenu),L"\u5207\u6362\u5230");
     }
+    // 窗口行为跟面板放在同一组（以前挤在"主题/关闭按钮"那一组里，属于分类混乱）。
+    AppendMenuW(menu,MF_STRING|(docked?MF_CHECKED:0),label(MenuCommand::Dock),
+        L"\u8D34\u8FB9\u6536\u8D77");                                       // 贴边收起
+    AppendMenuW(menu,MF_STRING|(stored_.topmost?MF_CHECKED:0),label(MenuCommand::AlwaysOnTop),
+        L"\u59CB\u7EC8\u7F6E\u9876");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     // 组 2：刷新与三个服务动作（旧：立即刷新 / 打开 WebUI / 重启网关 / 重启 WebUI 服务）
     AppendMenuW(menu,MF_STRING,label(MenuCommand::Refresh),L"\u7ACB\u5373\u5237\u65B0");
@@ -438,11 +464,7 @@ HMENU Application::BuildMenu() const {
     }
     AppendMenuW(menu,MF_STRING,label(MenuCommand::RestartWebUi),L"\u91CD\u542F WebUI \u670D\u52A1");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-    // 组 3：贴边（旧版是一个切换项「贴边收回 / 滑出」）、置顶、主题、关闭按钮、开机自启
-    AppendMenuW(menu,MF_STRING|(docked?MF_CHECKED:0),label(MenuCommand::Dock),
-        docked?L"\u6ED1\u51FA":L"\u8D34\u8FB9\u6536\u56DE");
-    AppendMenuW(menu,MF_STRING|(stored_.topmost?MF_CHECKED:0),label(MenuCommand::AlwaysOnTop),
-        L"\u59CB\u7EC8\u7F6E\u9876");
+    // 组 3：外观与行为（主题 / 关闭按钮 / 开机自启 / 刷新间隔）
     {
         HMENU theme=CreatePopupMenu();
         AppendMenuW(theme,MF_STRING|(stored_.theme=="dark"?MF_CHECKED:0),
@@ -472,9 +494,8 @@ HMENU Application::BuildMenu() const {
     }
     AppendMenuW(menu,MF_STRING|(AutoStartEnabled()?MF_CHECKED:0),label(MenuCommand::AutoStart),
         L"\u5F00\u673A\u81EA\u542F");
-    AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-    // 单独成组放在最后，免得和旧版那三组混在一起（这就是用户看到的「分类混乱」）。
     {
+        // 刷新间隔属于"行为"，跟主题/关闭按钮同一组（以前单独成组夹在中间，看着像第四个分类）。
         HMENU poll=CreatePopupMenu();
         const auto addPoll=[&](MenuCommand command,int seconds) {
             AppendMenuW(poll,MF_STRING|(stored_.pollSeconds==seconds?MF_CHECKED:0),label(command),
@@ -494,9 +515,9 @@ HMENU Application::BuildMenu() const {
         }
         AppendMenuW(menu,MF_STRING|MF_POPUP,reinterpret_cast<UINT_PTR>(poll),L"\u5237\u65B0\u95F4\u9694");
     }
-    AppendMenuW(menu,MF_STRING,label(MenuCommand::OpenDataDir),L"\u6253\u5F00\u6570\u636E\u76EE\u5F55");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-    // 组 5：关于 + 退出
+    // 组 4：系统（数据目录 / 关于 / 退出）
+    AppendMenuW(menu,MF_STRING,label(MenuCommand::OpenDataDir),L"\u6253\u5F00\u6570\u636E\u76EE\u5F55");
     AppendMenuW(menu,MF_STRING,label(MenuCommand::About),L"\u5173\u4E8E");
     AppendMenuW(menu,MF_STRING,label(MenuCommand::Quit),L"\u9000\u51FA");
     return menu;
@@ -533,7 +554,22 @@ void Application::InvokeMenu(unsigned id) {
         return;
     }
     switch(static_cast<MenuCommand>(id)) {
-    case MenuCommand::ToggleVisibility: if(state_==State::Hidden) Show(); else Hide(); return;
+    case MenuCommand::ToggleVisibility:
+        // 三态语义（2026-10-26）：隐藏 → 显示成面板（贴边时直接展开，不能只亮出 30×136 的贴条
+        // 让人以为没反应）、贴条 → 展开、面板 → 隐藏。托盘左键 / 热键 / 菜单第一项共用这一条。
+        if(state_==State::Hidden) {
+            const auto previous=state_;
+            state_=NextState(state_,Event::Show,model_.edge);
+            if(model_.edge!=Edge::None) state_=NextState(state_,Event::EnterStrip,model_.edge);
+            ApplyState("show",previous);
+        } else if(state_==State::Collapsed) {
+            const auto previous=state_;
+            state_=NextState(state_,Event::EnterStrip,model_.edge);
+            ApplyState("expand",previous);
+        } else {
+            Hide();
+        }
+        return;
     // 旧版托盘只有一个「贴边收回 / 滑出」切换项（toggleSnap），所以同一个 ID 既是收起也是滑出。
     case MenuCommand::Dock: if(model_.edge!=Edge::None) Undock(); else DockNearest(); return;
     case MenuCommand::Undock: Undock(); return;
@@ -563,9 +599,12 @@ void Application::InvokeMenu(unsigned id) {
         const auto provider=ProviderLabelFor(hermesState_.model.provider);
         const auto model=hermesState_.model.model.empty()?std::string("\xE2\x80\x94"):hermesState_.model.model;
         const auto directory=settings_?DirectoryOfPath(settings_->Path()):std::wstring{};
+        const auto version=ExecutableVersion();
         const std::wstring body=
             L"Hermes \u6A21\u578B\u9762\u677F\uFF08\u539F\u751F\u7248\uFF09\n"
-            L"\u5F53\u524D\u6A21\u578B\uFF1A"+Widen((provider.empty()?std::string("\xE2\x80\x94"):provider)+" / "+model)+L"\n"
+            // 版本号取 exe 的 VERSIONINFO：安装包改名/换目录都不会和界面说的不一致。
+            +(version.empty()?L"":(L"\u7248\u672C\uFF1A"+version+L"\n"))
+            +L"\u5F53\u524D\u6A21\u578B\uFF1A"+Widen((provider.empty()?std::string("\xE2\x80\x94"):provider)+" / "+model)+L"\n"
             L"\u547C\u51FA\u70ED\u952E\uFF1A"+Widen(stored_.hotkey)+L"\n"
             L"\u6570\u636E\u76EE\u5F55\uFF1A"+directory+L"\n"
             L"WSL \u91CC\u7684 ~/.hermes/config.yaml \u4E0E .env \u53EA\u7531\u52A9\u624B\u811A\u672C\u5199\u5165\u3002";
@@ -1803,7 +1842,14 @@ bool Application::AutoStartEnabled() const {
     DWORD type=0;
     const auto status=RegQueryValueExW(key,L"HermesModelPanelNative",nullptr,&type,reinterpret_cast<BYTE*>(value),&size);
     RegCloseKey(key);
-    return status==ERROR_SUCCESS&&type==REG_SZ;
+    if(status!=ERROR_SUCCESS||type!=REG_SZ) return false;
+    // 必须**指向当前这个 exe** 才算开启：换目录/装新版后，注册表里残留的旧路径不该继续显示成
+    // "已开启"（否则勾是亮的、开机启动的却是旧版本）。去掉引号、忽略大小写比较。
+    std::wstring stored=value;
+    if(stored.size()>=2&&stored.front()==L'"'&&stored.back()==L'"') stored=stored.substr(1,stored.size()-2);
+    wchar_t self[MAX_PATH]{};
+    if(!GetModuleFileNameW(nullptr,self,MAX_PATH)) return false;
+    return _wcsicmp(stored.c_str(),self)==0;
 }
 void Application::SetAutoStart(bool enabled) {
     HKEY key=nullptr;
