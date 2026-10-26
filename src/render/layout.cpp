@@ -601,7 +601,9 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             item.kind=kind;item.group=group;item.row=row;item.text=text;
 
-            item.rect=Box(0,0,layout.list.right-layout.list.left,dip(itemHeight));
+            // 左边必须是列表自己的左边界：以前写 0，宽度又等于列表宽，于是整行从 x=0 开始画、
+            // 被裁剪区切掉左边 kPagePadX，右端就短了一截 —— 真机上卡片左边距 11 DIP、右边 22.5 DIP。
+            item.rect=Box(layout.list.left,0,layout.list.right-layout.list.left,dip(itemHeight));
 
             contentHeight+=dip(itemHeight);
 
