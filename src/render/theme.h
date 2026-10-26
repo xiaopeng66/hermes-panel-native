@@ -36,6 +36,10 @@ struct ThemePalette {
     D2D1_COLOR_F hair;            // --hx-hair mid-stop (the gradient fades to transparent at both ends)
     // edge sliver
     D2D1_COLOR_F stripTop,stripBottom,stripHoverTop,stripHoverBottom;
+    // 滚动条：轨道 = 凹槽（很淡），拇指 = 可抓的东西（明显），悬停再深一档。
+    // 反差点必须是「拇指 > 轨道」——弹窗里以前反过来（轨道 line、拇指 line2），
+    // 拇指只有 5–9% 墨，在白色卡片上几乎看不见，整条看着像一根分割线。
+    D2D1_COLOR_F scrollTrack,scrollThumb,scrollThumbHot;
     bool light=false;
     // 刻意**没有**拟态（emboss/渐变材质）那一套令牌：用户在预览里挑的是四套平面风格，
     // 拟态整套已弃用（见 DESIGN 修订记录）。控件描边与阴影由 widgets 的 skin 表达。

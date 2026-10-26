@@ -40,6 +40,11 @@ constexpr float kPillHeight=15.0f,kPillRadius=999.0f,kPillPadX=6.0f,kPillFont=9.
 constexpr float kCountPillHeight=15.0f,kCountPillRadius=4.0f,kCountPillPadX=4.5f;
 constexpr float kGroupNameFont=12.0f,kGroupCountFont=9.5f,kSectFont=10.5f,kEmptyFont=11.5f;
 constexpr float kScrollBarWidth=6.0f,kScrollBarHoverWidth=8.0f,kListFade=16.0f;
+// 滚动条：五处（模型列表 / 回退链 / 页内 / 弹窗横向 / 下拉）共用一份画法 ——
+// 轨道淡、拇指明显、悬停放粗加深。horizontal=true 时按"横条"处理（沿高度加粗）。
+void DrawScrollBar(ID2D1RenderTarget* target,ID2D1SolidColorBrush* brush,
+    const D2D1_RECT_F& track,const D2D1_RECT_F& thumb,bool horizontal,bool hot,
+    const ThemePalette& palette,float scale);
 
 // Interaction states (PLAN §4). The stylesheet only styles :hover and [disabled]; a pressed button
 // keeps its normal look (no scale-down) - the old panel had no :active rule either.

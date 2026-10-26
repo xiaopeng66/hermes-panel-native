@@ -130,6 +130,14 @@ ThemePalette ResolveTheme(const std::string& preference) {
     palette.stripBottom=Colour(n.stripBottom);
     palette.stripHoverTop=Colour(n.stripHoverTop);
     palette.stripHoverBottom=Colour(n.stripHoverBottom);
+    // 滚动条梯度：用**正文色系**的透明度台阶（而不是固定灰）——四套浅色/两套深色各自的
+    // 冷暖都会被带上（沙丘是暖灰、石板是冷灰），而"拇指明显、轨道很淡"的关系全局一致。
+    // 拇指按各自底色解到 ≈3:1（白卡片 48% 墨 ≈ #939393、深色卡片 36% 白 ≈ #676767），
+    // 任何底色上一眼能找到；轨道 8% 只提示"这里能滚"，不会被误读成一条分割线。
+    const unsigned scrollInk=palette.light?0x1A1A1A:0xFFFFFF;
+    palette.scrollTrack=Colour(scrollInk,0.08f);
+    palette.scrollThumb=Colour(scrollInk,palette.light?0.48f:0.36f);
+    palette.scrollThumbHot=Colour(scrollInk,palette.light?0.66f:0.55f);
     return palette;
 }
 ThemePalette BlendPalette(const ThemePalette& from,const ThemePalette& to,float t) {

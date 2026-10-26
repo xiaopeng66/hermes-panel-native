@@ -351,4 +351,27 @@ void DrawHeroBackdrop(ID2D1RenderTarget* target,const D2D1_RECT_F& box,float hue
     }
     (void)scale;
 }
+
+void DrawScrollBar(ID2D1RenderTarget* target,ID2D1SolidColorBrush* brush,
+    const D2D1_RECT_F& track,const D2D1_RECT_F& thumb,bool horizontal,bool hot,
+    const ThemePalette& palette,float scale) {
+    // 轨道是"凹槽"不是"条"：整条铺一遍很淡的底，告诉用户这里可滚；拇指才是可抓的东西。
+    // （弹窗横向滑条以前反过来：轨道 line 实色、拇指 line2 只有 5–9% 墨 —— 白卡片上拇指消失，
+    //   整条看着像正文下的一根分割线，用户直接报告"看不见"。）
+    if(track.right>track.left&&track.bottom>track.top) {
+        const float trackRadius=horizontal?(track.bottom-track.top)/2.0f:(track.right-track.left)/2.0f;
+        brush->SetColor(palette.scrollTrack);
+        target->FillRoundedRectangle(D2D1::RoundedRect(track,trackRadius,trackRadius),brush);
+    }
+    auto handle=thumb;
+    if(hot) {
+        // 悬停：沿"粗"的方向各胀 1 DIP（竖条是左右、横条是上下），总增量 2 DIP。
+        if(horizontal) { handle.top-=1.0f*scale;handle.bottom+=1.0f*scale; }
+        else { handle.left-=1.0f*scale;handle.right+=1.0f*scale; }
+    }
+    if(handle.right<=handle.left||handle.bottom<=handle.top) return;
+    const float radius=horizontal?(handle.bottom-handle.top)/2.0f:(handle.right-handle.left)/2.0f;
+    brush->SetColor(hot?palette.scrollThumbHot:palette.scrollThumb);
+    target->FillRoundedRectangle(D2D1::RoundedRect(handle,radius,radius),brush);
+}
 }

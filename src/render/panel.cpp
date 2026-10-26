@@ -1147,20 +1147,14 @@ void PanelRenderer::List(ID2D1RenderTarget* target,const PanelLayout& layout,con
     for(const auto& item:layout.items) if(item.sticky) drawItem(item);
     target->PopAxisAlignedClip();
     if(layout.scrollVisible) {
-        // 与回退链 / 页面滚动条同一套判定：指针落在槽上（±2 DIP）才加粗变深。
+        // 与回退链 / 页面 / 弹窗同一套判定与画法：指针落在槽上（±2 DIP）才加粗变深。
         // 以前用 hoverItem_.inList（指针在列表任意行上就算悬停），三条滑条的行为各不相同。
         const bool hot=view.pointerInside
             &&view.pointerX>=layout.scrollTrack.left-Dip(2.0f,scale_)
             &&view.pointerX<=layout.scrollTrack.right+Dip(2.0f,scale_)
             &&view.pointerY>=layout.scrollTrack.top&&view.pointerY<=layout.scrollTrack.bottom;
-        auto thumb=layout.scrollThumb;
-        if(hot) {
-            const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
-            thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
-        }
-        brush_->SetColor(hot?palette.line:palette.line2);
-        target->FillRoundedRectangle(D2D1::RoundedRect(thumb,widgets::kScrollBarWidth*scale_/2.0f,
-            widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
+        widgets::DrawScrollBar(target,brush_.Get(),layout.scrollTrack,layout.scrollThumb,false,hot,
+            palette,scale_);
     }
     PrepareFade(target,palette);
     // The gradient brush runs top->bottom in its own 0..1 space: place it over the last 16px of the list.
@@ -1346,20 +1340,14 @@ void PanelRenderer::FallbackPage(ID2D1RenderTarget* target,const PanelLayout& la
     }
     target->PopAxisAlignedClip();
     if(layout.fbMaxScroll>0.5f) {
-        // 与模型页列表 / 页内滚动条**同一套**：只画拇指（没有轨道底色）、同色（line2，悬停 line）、
-        // 悬停加粗到 8 DIP。以前这里有轨道 + 拇指都画，看着比别的页面粗一圈、位置也偏里。
+        // 与模型列表 / 页内 / 弹窗**同一套**画法（widgets::DrawScrollBar）：淡轨道 + 明显拇指，
+        // 悬停加粗变深。位置仍是 content.right+2（与其它页同一条竖线）。
         const bool hot=view.pointerInside
             &&view.pointerX>=layout.fbScrollTrack.left-Dip(2.0f,scale_)
             &&view.pointerX<=layout.fbScrollTrack.right+Dip(2.0f,scale_)
             &&view.pointerY>=layout.fbScrollTrack.top&&view.pointerY<=layout.fbScrollTrack.bottom;
-        auto thumb=layout.fbScrollThumb;
-        if(hot) {
-            const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
-            thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
-        }
-        brush_->SetColor(hot?palette.line:palette.line2);
-        target->FillRoundedRectangle(D2D1::RoundedRect(thumb,
-            widgets::kScrollBarWidth*scale_/2.0f,widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
+        widgets::DrawScrollBar(target,brush_.Get(),layout.fbScrollTrack,layout.fbScrollThumb,false,hot,
+            palette,scale_);
     }
     if(layout.fbMaxScroll>0.5f) {
         // 底部渐隐：与模型页列表同一套 16 DIP 的底色纱。没有它，滚动时最下面那行会被阶梯底边
@@ -1626,12 +1614,9 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             }
             target->PopAxisAlignedClip();
             if(layout.modelListThumb.right>layout.modelListBar.left) {
-                brush_->SetColor(Fade(palette.line2,0.55f));
-                target->FillRoundedRectangle(D2D1::RoundedRect(layout.modelListBar,
-                    Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
-                brush_->SetColor(Fade(palette.text,0.55f));
-                target->FillRoundedRectangle(D2D1::RoundedRect(layout.modelListThumb,
-                    Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
+                // 与各处滚动条同一套（淡轨道 + 明显拇指），3 DIP，贴着探测结果列表的内缘。
+                widgets::DrawScrollBar(target,brush_.Get(),layout.modelListBar,
+                    layout.modelListThumb,false,false,palette,scale_);
             }
         }
         for(const auto& control:layout.controls) {
@@ -1803,20 +1788,14 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
                 DWRITE_TEXT_ALIGNMENT_LEADING);
     }
     if(layout.pageScrollVisible) {
-        // 与模型页列表滑条同一套：同一条竖线（content.right+2）、同色（line2，浅色主题下
-        // raise2 几乎看不见）、悬停加粗到 8 DIP。
+        // 与模型列表 / 回退链 / 弹窗同一套（widgets::DrawScrollBar）：同一条竖线（content.right+2）、
+        // 淡轨道 + 明显拇指、悬停加粗到 8 DIP。
         const bool hot=view.pointerInside
             &&view.pointerX>=layout.pageScrollTrack.left-Dip(2.0f,scale_)
             &&view.pointerX<=layout.pageScrollTrack.right+Dip(2.0f,scale_)
             &&view.pointerY>=layout.pageScrollTrack.top&&view.pointerY<=layout.pageScrollTrack.bottom;
-        auto thumb=layout.pageScrollThumb;
-        if(hot) {
-            const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
-            thumb=D2D1::RectF(thumb.left-grow,thumb.top,thumb.right+grow,thumb.bottom);
-        }
-        brush_->SetColor(hot?palette.line:palette.line2);
-        target->FillRoundedRectangle(D2D1::RoundedRect(thumb,
-            widgets::kScrollBarWidth*scale_/2.0f,widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
+        widgets::DrawScrollBar(target,brush_.Get(),layout.pageScrollTrack,layout.pageScrollThumb,false,hot,
+            palette,scale_);
     }
 }
 void PanelRenderer::Modal(ID2D1RenderTarget* target,const PanelLayout& layout,const PanelViewModel& view,
@@ -1852,14 +1831,9 @@ void PanelRenderer::Modal(ID2D1RenderTarget* target,const PanelLayout& layout,co
         }
         target->PopAxisAlignedClip();
         if(layout.modalScrollVisible) {
-            brush_->SetColor(palette.line);
-            target->FillRoundedRectangle(D2D1::RoundedRect(layout.modalHScrollTrack,
-                layout.modalHScrollTrack.bottom-layout.modalHScrollTrack.top,
-                layout.modalHScrollTrack.bottom-layout.modalHScrollTrack.top),brush_.Get());
-            brush_->SetColor(palette.line2);
-            target->FillRoundedRectangle(D2D1::RoundedRect(layout.modalHScrollThumb,
-                layout.modalHScrollThumb.bottom-layout.modalHScrollThumb.top,
-                layout.modalHScrollThumb.bottom-layout.modalHScrollThumb.top),brush_.Get());
+            // 横向滑条：与页面竖条同一套配色（淡轨道 + 明显拇指），这里不再用"轨道实色 + 拇指 8% 墨"。
+            widgets::DrawScrollBar(target,brush_.Get(),layout.modalHScrollTrack,
+                layout.modalHScrollThumb,true,false,palette,scale_);
         }
     } else {
         TextWrapped(target,view.modal.body,layout.modalBody,caption_.Get(),palette.dim,
@@ -2216,13 +2190,10 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
                 active?palette.accentStrong:palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
         }
         // 条目多于可视行数时的滑块（真机：18 个供应商，后 10 个选不到）。
+        // 与主滑条同一套配色（淡轨道 + 明显拇指），只是更细（3 DIP，贴在下拉卡片内缘）。
         if(layout.selectTotal>layout.selectVisible&&layout.selectThumb.right>layout.selectThumb.left) {
-            brush_->SetColor(Fade(palette.line2,0.55f));
-            target->FillRoundedRectangle(D2D1::RoundedRect(layout.selectBar,
-                Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
-            brush_->SetColor(Fade(palette.text,0.55f));
-            target->FillRoundedRectangle(D2D1::RoundedRect(layout.selectThumb,
-                Dip(1.5f,scale_),Dip(1.5f,scale_)),brush_.Get());
+            widgets::DrawScrollBar(target,brush_.Get(),layout.selectBar,layout.selectThumb,false,false,
+                palette,scale_);
         }
     }
     // 键盘焦点环（审计 F-010）：画在页面之上、模态之下；命中与绘制共用同一份控件矩形。
