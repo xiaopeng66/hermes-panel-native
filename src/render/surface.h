@@ -35,6 +35,8 @@ public:
     int TargetKind() const { return targetKind_; }
     unsigned long long MeasureHits() const { return renderer_.MeasureHits(); }
     unsigned long long MeasureMisses() const { return renderer_.MeasureMisses(); }
+    // 上一帧页头动作按钮（备份页的「刷新」）图标格的真实落点：外壳据此摆旋转子窗口。
+    const D2D1_RECT_F& PageHeadActionIcon() const { return renderer_.PageHeadActionIcon(); }
     const std::vector<unsigned int>& BackdropPixels() const { return backdrop_; }
     int BackdropWidth() const { return backdropWidth_; }
     int BackdropHeight() const { return backdropHeight_; }

@@ -33,7 +33,7 @@ WSL 里 Hermes 的模型与供应商管理悬浮窗：C++20 + 纯 Win32 + Direct
 
 ## 贡献
 
-欢迎提 Issue 与 PR。改动请说明验证方式：仓库自带 `ctest` 门禁（`ctest --test-dir build -C Debug`）与全量审查（`python tools/full_audit.py`）。
+欢迎提 Issue 与 PR。
 
 ## 许可
 

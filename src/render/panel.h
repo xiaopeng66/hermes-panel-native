@@ -56,8 +56,12 @@ public:
     // v1.29：测量缓存的命中情况（控制面暴露，门禁据此断言缓存在效）。
     unsigned long long MeasureHits() const { return measureHits_; }
     unsigned long long MeasureMisses() const { return measureMisses_; }
+    // 页头动作按钮（备份页的「刷新」）这一帧的图标格；空矩形 = 这一帧没画动作按钮。
+    // 外壳用它把旋转子窗口摆到图标位置上（文案变了图标格会移动，只能取真实落点）。
+    const D2D1_RECT_F& PageHeadActionIcon() const { return pageHeadActionIcon_; }
 private:
     unsigned long long measureHits_=0,measureMisses_=0;
+    D2D1_RECT_F pageHeadActionIcon_{};   // 见 PageHeadActionIcon()：未画动作按钮时是空矩形
     void TextWrapped(ID2D1RenderTarget* target,const std::string& value,D2D1_RECT_F rect,
         IDWriteTextFormat* format,const D2D1_COLOR_F& colour,
         DWRITE_TEXT_ALIGNMENT alignment=DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -84,8 +88,12 @@ private:
         const ThemePalette& palette);
     void Offline(ID2D1RenderTarget* target,const PanelLayout& layout,const PanelViewModel& view,
         const ThemePalette& palette);
+    // iconCell 非空时回传"图标实际画在哪个格子"：图标格是跟着居中内容算的，文案一长就会移动，
+    // 所以外壳（要往这一格摆旋转子窗口的地方）不能自己猜坐标，只能拿渲染时的真实落点。
+    // iconPlaceholder=true 表示**留空不画**（忙碌时这一格交给旋转子窗口），但格子照样回传。
     void Button(ID2D1RenderTarget* target,D2D1_RECT_F rect,const std::string& label,IconId icon,
-        const widgets::ButtonSkin& skin,bool disabled);
+        const widgets::ButtonSkin& skin,bool disabled,D2D1_RECT_F* iconCell=nullptr,
+        bool iconPlaceholder=false);
     // ---- models page: search row, filter segments, the scrolling list (DESIGN §4.3 #9-#13) ----
     void SearchRow(ID2D1RenderTarget* target,const PanelLayout& layout,const PanelViewModel& view,
         const ThemePalette& palette,const TextField* field);
@@ -102,7 +110,7 @@ private:
         const ThemePalette& palette);
     void PageHead(ID2D1RenderTarget* target,const PanelLayout& layout,const std::string& title,
         const std::string& subtitle,const std::string& action,IconId actionIcon,bool actionHovered,
-        const ThemePalette& palette);
+        const ThemePalette& palette,bool actionBusy=false);
     // A form field (label above a box): text / password / select / switch, shared by the H5 forms.
     void Field(ID2D1RenderTarget* target,const PanelLayout::FieldBox& box,const std::string& label,
         const std::string& value,bool focused,bool masked,const char* hint,const ThemePalette& palette);

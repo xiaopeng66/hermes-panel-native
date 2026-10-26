@@ -4060,3 +4060,43 @@ mouse-up 清状态，再点贴条展开、长路径拖回 (49,460)。教训：�
 
 顺带清理：`tests/widget_tests.cpp` 里那段自称"TEMP…用完删除"的 `PrintPageLayout()` 诊断
 （每次跑门禁都往输出里打三行布局数字，没人解析）删掉了。
+
+### G95 备份页「刷新」加旋转指示 + 补空列表忙文案（2026-10-26，用户：备份页那个刷新为什么不转圈）
+
+**背景**：G94 把串页的旋转图标收回模型页后，备份页的「刷新」就没有任何局部指示了——只剩状态灯
+下面那条细进度线，而一次只读列表通常不到一秒，容易错过（用户就是这么发现的）。
+
+**改法**
+1. 备份页「刷新」在列表加载期间也转圈。图标格**由渲染层回传**（`Button(..., iconCell)` →
+   `PanelRenderer::PageHeadActionIcon()` → `Surface::PageHeadActionIcon()` → `SyncBusyBar`）：
+   忙碌时按钮文案从「刷新」变「扫描中…」，居中内容的宽度跟着变、图标格会移动，外壳自己猜
+   坐标必然错位（G94 的教训）。忙碌期间那一格留空（`Button` 的 `iconPlaceholder`），
+   子窗口独占 —— 与模型页「刷新同步」同一套做法。
+2. 补 `busyText`：备份页空列表加载时显示「正在读取备份…」。此前这个字段从未被赋值，渲染层的
+   `busy ? busyText : emptyText` 在加载那一瞬画的是**空白**（回答用户这个问题时顺手发现的缺口）。
+
+**门禁**：`h-backup` 新增一段 —— 夹具开关 `backup_slow`（900ms）放慢列表，点「刷新」后断言
+①子窗口出现且**圆心落在按钮矩形内**、②按钮文案含「扫描中」、③`busyText` 非空、
+④`backup-list` 重跑（证明按钮真的在干活）、⑤加载完子窗口收起。
+反向验证：把备份页分支改成不可能命中的页号重跑，门禁立刻报
+`the 刷新 button shows the spinner while the list loads` —— 断言不是空跑。
+
+### G96 移除测试门禁（2026-10-26，用户："以后我改的东西都不跑门禁，给我把门禁脚本和相关的规则都删掉"）
+
+按用户要求把整套测试门禁从仓库摘掉，不再是日常工作流的一部分。移走（不是硬删，可恢复）：
+
+- `tests/`（33 套 ctest：几何/状态/生命周期/页面/外壳/指针/IME/跨屏 DPI/托盘/动效/UNC 一致性…）
+- `tools/e2e.ps1`（门禁总入口）、`tools/full_audit.py`（全量审查）
+- 夹具与驱动：`tools/fake_wsl.cpp`、`tools/fake_hermes.cpp`、`tools/icons_check.cpp`、
+  `tools/unc_parity_drive.py`、`tools/unc_parity_drive.cmake`、`tools/coexist-check.ps1`、
+  `tools/read_helper_check.py`
+- `CMakeLists.txt` 里的 `include(CTest)` 与整段 `BUILD_TESTING`、`geometry-probe` 测试探针
+
+备份位置：`E:/AI/Zcode/backups/hermes-panel-native-gates-20261026/`（725 KB，原样保留）。
+恢复方式：把 `tests/` 与上面那些 tools 拷回原位置，再把 CMake 的目标与 add_test 段恢复。
+
+保留的：产品目标（`hermes-panel-native` / `hermes-geometry`）、打包脚本 `tools/package.ps1`、
+运行时依赖的 `tools/hermes-panel-read.py`、图标与截图类开发工具、以及工作区那条**写入路径门禁**
+（`.zcode/hooks/path-guard.py`）—— 那是防止文件写到工作区外的保护，不是测试，没动。
+
+README 的「贡献」一节不再要求跑 ctest / full_audit。

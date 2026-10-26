@@ -421,7 +421,8 @@ private:
     // 面板当前的绘制倍率所用 DPI（= GetDpiForWindow(panel_)）。布局、命中、原生输入框、
     // 忙碌条都必须用它，不能读 monitor_.geometry.dpi：拖动跨屏期间后者还是上一个显示器的。
     UINT WindowDpi() const;
-    void SyncBusyBar(const PanelLayout& layout);
+    // pageHeadIcon = 上一帧页头动作按钮图标格的落点（渲染层回传），备份页的旋转图标用它定位。
+    void SyncBusyBar(const PanelLayout& layout,const D2D1_RECT_F& pageHeadIcon);
     BusyBar busyBar_;
     SpinGlyph spinGlyph_;        // 同步章的旋转图标：独立子窗口，脱离主面板重绘
     bool spinGlyphShown_=false;

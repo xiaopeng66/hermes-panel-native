@@ -746,13 +746,14 @@ void PanelRenderer::Offline(ID2D1RenderTarget* target,const PanelLayout& layout,
         widgets::ButtonSkinOf(widgets::ButtonVariant::Primary,widgets::Visual::Normal,palette),false);
 }
 void PanelRenderer::Button(ID2D1RenderTarget* target,D2D1_RECT_F rect,const std::string& label,IconId icon,
-    const widgets::ButtonSkin& skin,bool disabled) {
+    const widgets::ButtonSkin& skin,bool disabled,D2D1_RECT_F* iconCell,bool iconPlaceholder) {
     // 文字必须**在按钮里居中**（真机反馈"按钮的文字也不居中"）：文字盒子的右边界要给到内容末端，
     // 不能给 rect.right —— 否则用 LEADING 排版时"可用宽度"比实际内容宽，文字看着偏左。
     const float alpha=disabled?widgets::kDisabledOpacity:1.0f;
     widgets::DrawButtonShape(target,brush_.Get(),rect,skin,scale_);
     const auto width=Measure(caption_.Get(),label).width;
     if(icon==IconId::None) {
+        if(iconCell) *iconCell=D2D1::RectF();
         // 无图标：直接按按钮盒居中（Text 的 CENTER 对齐 + 垂直居中）。
         Text(target,label,rect,caption_.Get(),Fade(skin.text,alpha),DWRITE_TEXT_ALIGNMENT_CENTER,true);
         return;
@@ -760,10 +761,13 @@ void PanelRenderer::Button(ID2D1RenderTarget* target,D2D1_RECT_F rect,const std:
     const auto iconBox=13.0f*scale_;
     const auto total=iconBox+widgets::kButtonIconGap*scale_+width;
     const auto start=rect.left+(rect.right-rect.left-total)/2.0f;
-    Icon(target,D2D1::RectF(start,rect.top+(rect.bottom-rect.top-iconBox)/2,start+iconBox,
-        rect.top+(rect.bottom-rect.top+iconBox)/2),icon,Fade(skin.text,alpha),1.7f);
+    const auto cell=D2D1::RectF(start,rect.top+(rect.bottom-rect.top-iconBox)/2,start+iconBox,
+        rect.top+(rect.bottom-rect.top+iconBox)/2);
+    if(iconCell) *iconCell=cell;
+    // 忙碌时这一格留空：旋转子窗口正好盖住它（与模型页「刷新同步」同一套做法）。
+    if(!iconPlaceholder) Icon(target,cell,icon,Fade(skin.text,alpha),1.7f);
     // 有图标：文字盒正好是它自己的宽度（LEADING 从图标右侧开始），左右都不留空。
-    const auto textLeft=start+iconBox+widgets::kButtonIconGap*scale_;
+    const auto textLeft=cell.right+widgets::kButtonIconGap*scale_;
     Text(target,label,D2D1::RectF(textLeft,rect.top,textLeft+width+1.0f*scale_,rect.bottom),
         caption_.Get(),Fade(skin.text,alpha),DWRITE_TEXT_ALIGNMENT_LEADING,true);
 }
@@ -1126,15 +1130,17 @@ void PanelRenderer::List(ID2D1RenderTarget* target,const PanelLayout& layout,con
 }
 void PanelRenderer::PageHead(ID2D1RenderTarget* target,const PanelLayout& layout,const std::string& title,
     const std::string& subtitle,const std::string& action,IconId actionIcon,bool actionHovered,
-    const ThemePalette& palette) {
+    const ThemePalette& palette,bool actionBusy) {
     // .ph: 12.5/500 title + 10.5 faint subtitle on the left, a ghost action button on the right.
     Text(target,title,layout.pageHeadTitle,label_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
     if(!subtitle.empty())
         Text(target,subtitle,layout.pageHeadSub,busy_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+    pageHeadActionIcon_=D2D1::RectF();
     if(!action.empty()&&layout.pageHeadAction.right>layout.pageHeadAction.left) {
         Button(target,layout.pageHeadAction,action,actionIcon,
             widgets::ButtonSkinOf(widgets::ButtonVariant::Ghost,
-                actionHovered?widgets::Visual::Hovered:widgets::Visual::Normal,palette),false);
+                actionHovered?widgets::Visual::Hovered:widgets::Visual::Normal,palette),false,
+            &pageHeadActionIcon_,actionBusy);
     }
 }
 void PanelRenderer::Field(ID2D1RenderTarget* target,const PanelLayout::FieldBox& field,
@@ -1420,7 +1426,7 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
         const auto subtitle=backupPage?view.backup.subtitle:std::string{};
         const auto action=backupPage?view.backup.refreshLabel:std::string{};
         PageHead(target,layout,title,subtitle,action,IconId::RefreshCw,hovered_(ControlId::BackupRefresh),
-            palette);
+            palette,backupPage&&view.backup.busy);
     }
     // 正文裁剪到视口（窗口档位固定，正文比它高时整页滚动 —— 旧 body.clamped .page 的等价物）
     target->PushAxisAlignedClip(layout.pageViewport,D2D1_ANTIALIAS_MODE_ALIASED);

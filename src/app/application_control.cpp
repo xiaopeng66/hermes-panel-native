@@ -343,6 +343,8 @@ Json Application::Dump() const {
                 return list;}()}}},
         {"backup",{{"title",view.backup.title},{"subtitle",view.backup.subtitle},
             {"filter",view.backup.filter},{"total",view.backup.total},{"busy",view.backup.busy},
+            // refreshLabel/busyText 由门禁断言：加载中按钮文案变「扫描中…」、空列表显示「正在读取…」。
+            {"refreshLabel",view.backup.refreshLabel},{"busyText",view.backup.busyText},
             {"emptyText",view.backup.emptyText},{"footNote",view.backup.footNote},
             {"filters",[&view]{Json list=Json::array();
                 for(const auto& seg:view.backup.filters) list.push_back({{"label",seg.label},

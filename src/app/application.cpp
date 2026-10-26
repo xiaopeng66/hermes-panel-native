@@ -771,7 +771,7 @@ void Application::SyncNativeFields(const PanelLayout& layout) {
     }
 }
 
-void Application::SyncBusyBar(const PanelLayout& layout) {
+void Application::SyncBusyBar(const PanelLayout& layout,const D2D1_RECT_F& pageHeadIcon) {
     const bool busy=workerBusy_.load()||probeRunning_.load()||allProbeBusy_.load()
         ||syncAllBusy_.load();
     const bool show=busy&&panel_&&IsWindowVisible(panel_)&&pending_==Pending::None
@@ -797,23 +797,36 @@ void Application::SyncBusyBar(const PanelLayout& layout) {
     // 底色必须取忙碌条所在那一行的颜色（lampRow = surf）：取 ink 会在状态行顶部
     // 压出一条比周围更深的暗带（真机能看到一条深色横条）。
     busyBar_.SetColours(toColour(palette_.surf),toColour(palette_.accent));
-    // 「刷新同步」按钮的旋转图标：位置与主面板里那枚图标**逐像素重合** ——
-    // 它在 layout.syncModels（搜索框右端那个按钮）内：距左边 9 DIP、画 12 DIP、垂直居中。
-    // 注意别用 layout.sync（那是顶部灯行右侧的"时间戳同步章"，完全不同的东西；
-    // 之前写错成 layout.sync，图标就跑到顶部 10:07 旁边去了）。
+    // 旋转图标只画在"它对应的按钮"里，位置一律取真实落点，绝不跨页复用坐标（G94 的教训：
+    // layout.syncModels 挂在 layout.search 上、与页面无关地算出来，别的页面同一坐标正好落着
+    // 页头动作按钮，圆环就压到了「检测中 1/2」文字上）。现在两张目标各自成立才画：
+    //   模型页 + 面板忙  ⇒ 搜索框右端的「刷新同步」（图标格固定：距左边 9 DIP、画 12 DIP）
+    //   备份页 + 列表加载 ⇒ 页头的「刷新」（图标格由渲染层回传：忙碌时文案换成「扫描中…」，
+    //                       居中内容的宽度跟着变，格子会移动，只能用它算出来的那个）
     // 不用子窗口画的原因：主面板整窗重绘 10–170ms，拿它当动画时钟只会"不转、只在抖"。
-    // **只在模型页画**：layout.syncModels 挂在 layout.search 上、与页面无关地算出来，别的页面
-    // 同一坐标正好落着页头动作按钮 —— 真机实测：回退链跑「逐条探测」时图标压在「检测中 1/2」
-    // 文字上（备份页的「刷新」同理）。图标是按钮内的装饰，按钮不在就不画。
+    D2D1_RECT_F glyphCell{};
+    bool glyphWanted=false;
     if(activePage_==0&&layout.syncModels.right>layout.syncModels.left) {
         const auto dpiScale=static_cast<float>(dpi)/96.0f;
         const auto glyph=12.0f*dpiScale;
         const auto left=layout.syncModels.left+9.0f*dpiScale;
         const auto centreY=(layout.syncModels.top+layout.syncModels.bottom)/2.0f;
-        RECT glyphRect{static_cast<LONG>(std::lround(left)),
-            static_cast<LONG>(std::lround(centreY-glyph/2.0f)),
-            static_cast<LONG>(std::lround(left+glyph)),
-            static_cast<LONG>(std::lround(centreY+glyph/2.0f))};
+        glyphCell=D2D1::RectF(left,centreY-glyph/2.0f,left+glyph,centreY+glyph/2.0f);
+        glyphWanted=true;
+    } else if(activePage_==3&&backupBusy_&&pageHeadIcon.right>pageHeadIcon.left) {
+        const auto dpiScale=static_cast<float>(dpi)/96.0f;
+        const auto glyph=12.0f*dpiScale;
+        const auto centreX=(pageHeadIcon.left+pageHeadIcon.right)/2.0f;
+        const auto centreY=(pageHeadIcon.top+pageHeadIcon.bottom)/2.0f;
+        glyphCell=D2D1::RectF(centreX-glyph/2.0f,centreY-glyph/2.0f,
+            centreX+glyph/2.0f,centreY+glyph/2.0f);
+        glyphWanted=true;
+    }
+    if(glyphWanted) {
+        RECT glyphRect{static_cast<LONG>(std::lround(glyphCell.left)),
+            static_cast<LONG>(std::lround(glyphCell.top)),
+            static_cast<LONG>(std::lround(glyphCell.right)),
+            static_cast<LONG>(std::lround(glyphCell.bottom))};
         spinGlyph_.SetColours(toColour(palette_.accentStrong),toColour(palette_.surf));
         spinGlyph_.Place(glyphRect,true);
         spinGlyphShown_=true;
@@ -2547,7 +2560,7 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
                     const auto laid=ComputeLayout(panelDragView_,static_cast<float>(client.right),
                         static_cast<float>(client.bottom),static_cast<float>(dpi)/96.0f);
                     SyncNativeFields(laid);
-                    SyncBusyBar(laid);
+                    SyncBusyBar(laid,surface.PageHeadActionIcon());
                 }
                 EndPaint(window,&paint);
                 return 0;
@@ -2574,7 +2587,7 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
                 QueryPerformanceCounter(&ph0);
                 SyncNativeFields(laid);
                 QueryPerformanceCounter(&ph1);
-                SyncBusyBar(laid);
+                SyncBusyBar(laid,surface.PageHeadActionIcon());
                 QueryPerformanceCounter(&ph2);
                 if(phFreq.QuadPart>0) {
                     const auto toMs=[&](const LARGE_INTEGER& a,const LARGE_INTEGER& b) {
