@@ -378,6 +378,8 @@ private:
     unsigned long long hoverLayoutKey_=0;
     bool hoverLayoutValid_=false;
     unsigned long long hoverLayoutHits_=0,hoverLayoutMisses_=0;
+    // 指针是否悬在任一条滚动条的槽上：槽不是控件，不单独跟踪就收不到重绘（滑条悬停不变粗）。
+    bool scrollHot_=false;
     void ModelsPageClick(float x,float y);
     void ModelsPageWheel(int delta);
     void ScrollFromThumb(float y);

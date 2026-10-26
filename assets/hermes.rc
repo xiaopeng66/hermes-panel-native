@@ -21,11 +21,11 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "FileDescription", "Hermes 模型面板（原生版）"
-            VALUE "FileVersion", "1.1.6.0"
+            VALUE "FileVersion", "1.1.7.0"
             VALUE "InternalName", "HermesModelPanelNative"
             VALUE "OriginalFilename", "HermesModelPanelNative.exe"
             VALUE "ProductName", "Hermes 模型面板"
-            VALUE "ProductVersion", "1.1.6.0"
+            VALUE "ProductVersion", "1.1.7.0"
         END
     END
     BLOCK "VarFileInfo"

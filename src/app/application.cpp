@@ -677,6 +677,11 @@ void Application::SyncNativeFields(const PanelLayout& layout) {
         mix(layout.toast.right>layout.toast.left?1:0);
         mix(layout.statusCard.right>layout.statusCard.left?1:0);
         mix(static_cast<long long>(fallbackScroll_*4.0f));
+        // 离线/恢复会改变"哪些原生字段该显示"（搜索框在离线页必须收起），但它不改页/滚动/浮层，
+        // 签名里漏掉它时布局摆放在离线切换那一帧被整段跳过 —— 搜索框就一直压在离线卡片上
+        // （真机：离线页左上角浮着一个白色输入框）。
+        mix(hermesState_.wsl=="down"?1:0);
+        mix(hermesState_.error.empty()?0:1);
         if(signature==lastNativeLayoutSignature_) return;
         lastNativeLayoutSignature_=signature;
     }
@@ -882,7 +887,13 @@ void Application::HandleNativeFieldEvent(int id,int event) {
         if(auto* native=NativeFor(field)) {
             const auto text=Narrow(native->Text());
             native->RefreshCache();      // 控件里的才是真的：缓存跟上，后续镜像推送才不会回写旧值
-            if(field->TextUtf8()!=text) field->SetTextUtf8(text);
+            if(field->TextUtf8()!=text) {
+                field->SetTextUtf8(text);
+                // 文本变了就要重画：搜索框的值决定列表（过滤后扁平视图、清除按钮、收藏/最近的计数），
+                // 原生 EDIT 只更新自己的客户端，D2D 那半边不会自动跟上 —— 以前打字后列表一直是旧帧，
+                // 直到鼠标移进面板触发一次悬停重绘（真机：搜索结果不出来）。
+                InvalidateAll();
+            }
         }
         return;
     }
@@ -2248,6 +2259,18 @@ PanelViewModel Application::CurrentView() {
                 view.tooltip.visible=true;view.tooltip.text=tip.text;break;
             }
     }
+    // 原生 EDIT 的占位（cue banner）要跟着视图走：创建时只设过一次，而添加页的
+    // 「名称 / Base URL / API Key」三处占位只存在于视图的 hint 里 —— 空框一直是全空的
+    // （真机：输入框看着像坏了，也看不出该填什么）。只在文案真的变化时下发一次。
+    if(activePage_==2) {
+        const auto setCue=[&](TextField* field,const std::string& hint) {
+            if(!field||field->placeholder==hint) return;
+            field->placeholder=hint;
+            if(auto* native=NativeFor(field)) native->SetCue(Widen(hint));
+        };
+        for(std::size_t index=0;index<view.add.fields.size()&&index<3;++index)
+            setCue(AddFieldAt(static_cast<int>(index)),view.add.fields[index].hint);
+    }
     return view;
 }
 namespace {
@@ -2821,6 +2844,8 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
         if(!strip) {
             PointerLeftPanel({GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)});
             pointerInside_=false;
+            // 离开时必须清掉滑条悬停态，否则下次从外面移回槽里时 scrollHotChanged 为假、不重绘。
+            scrollHot_=false;
             if(panel_) KillTimer(panel_,kTooltipTimer);
             tooltipVisible_=false;
             if(hoverControl_!=0) { hoverControl_=0;InvalidateRect(window,nullptr,FALSE); }

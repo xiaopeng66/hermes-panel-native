@@ -684,6 +684,26 @@ Json Application::Command(const Json& request) {
         controls["_list"]={{ "items",items},{"scroll",layout.listScroll},{"maxScroll",layout.listMaxScroll},
             {"scrollVisible",layout.scrollVisible},{"thumb",translate(layout.scrollThumb)},
             {"track",translate(layout.scrollTrack)},{"viewport",translate(layout.listViewport)}};
+        // 三条滚动条（模型列表 / 回退链阶梯 / 页面）的轨道与拇指：审计用同一把尺子量
+        // "所有界面的滑条粗细和位置"是否一致，不靠截图目测。
+        // hot 复刻渲染层的悬停判定（审计排查"滑条悬停不变粗"用）。
+        const auto hotAt=[&](const D2D1_RECT_F& track,bool shown) {
+            const float slack=2.0f*scale;   // 渲染层的 Dip(2)：判据比轨道宽 2 DIP
+            return shown&&view.pointerInside
+                &&view.pointerX>=track.left-slack&&view.pointerX<=track.right+slack
+                &&view.pointerY>=track.top&&view.pointerY<=track.bottom;
+        };
+        controls["_scrolls"]={
+            {"models",{{"track",translate(layout.scrollTrack)},{"thumb",translate(layout.scrollThumb)},
+                {"visible",layout.scrollVisible},{"maxScroll",layout.listMaxScroll},
+                {"hot",hotAt(layout.scrollTrack,layout.scrollVisible&&layout.listMaxScroll>0.0f)}}},
+            {"fallback",{{"track",translate(layout.fbScrollTrack)},{"thumb",translate(layout.fbScrollThumb)},
+                {"maxScroll",layout.fbMaxScroll},
+                {"hot",hotAt(layout.fbScrollTrack,layout.fbMaxScroll>0.5f)}}},
+            {"page",{{"track",translate(layout.pageScrollTrack)},{"thumb",translate(layout.pageScrollThumb)},
+                {"visible",layout.pageScrollVisible},{"maxScroll",layout.pageMaxScroll},
+                {"hot",hotAt(layout.pageScrollTrack,layout.pageScrollVisible)}}}};
+        controls["_pointer"]={{"inside",view.pointerInside},{"x",view.pointerX},{"y",view.pointerY}};
         Json filters=Json::array();
         for(const auto& segment:layout.segments) filters.push_back(translate(segment.rect));
         controls["_filters"]=filters;

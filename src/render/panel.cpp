@@ -178,6 +178,11 @@ void PanelRenderer::EnsureResources(ID2D1RenderTarget* target,IDWriteFactory* te
         make(ui,widgets::kEmptyFont,DWRITE_FONT_WEIGHT_NORMAL,emptyText_);
         emptyText_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         emptyText_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        // 倍率变了：文本格式全部重建，测量缓存里的键（格式指针 + 文本）随之失效——**必须清空**。
+        // 只 Reset 掉旧格式是不够的：新建的格式很可能落在同一个地址，键完全相同，
+        // Measure 会返回上一个倍率下的宽度。真机表现：125% 屏幕上正常，拖到 192% 竖屏后
+        // hero 的模型名被截成「mod…」（plate 按旧倍率的宽度算窄了）。
+        measureCache_.clear();
         scale_=scale;
     }
 }
@@ -740,8 +745,10 @@ void PanelRenderer::Offline(ID2D1RenderTarget* target,const PanelLayout& layout,
         IconId::WifiOff,palette.err,1.8f);
     Text(target,view.offlineReason.empty()?"WSL \xE4\xB8\x8D\xE5\x8F\xAF\xE8\xBE\xBE":view.offlineReason,
         layout.offlineTitle,label_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_CENTER,true);
-    Text(target,"\xE9\x9D\xA2\xE6\x9D\xBF\xE6\xAF\x8F\xE4\xB8\xAA\xE5\x88\xB7\xE6\x96\xB0\xE5\x91\xA8\xE6\x9C\x9F\xE4\xBC\x9A\xE8\x87\xAA\xE5\x8A\xA8\xE9\x87\x8D\xE8\xAF\x95\xE5\x94\xA4\xE9\x86\x92\xE5\xAE\x83\xEF\xBC\x9B\xE4\xB9\x9F\xE5\x8F\xAF\xE4\xBB\xA5\xE7\x8E\xB0\xE5\x9C\xA8\xE6\x89\x8B\xE5\x8A\xA8\xE5\x90\xAF\xE5\x8A\xA8\xE3\x80\x82",
-        layout.offlineBody,caption_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_CENTER,false);
+    // 正文必须换行：Text() 不管 verticalCentre 都是"单行 + 省略号"，离线页那句解释被截成
+    // 「……也可以现…」。盒子本来就是按两行（36 DIP）留的，改用 TextWrapped。
+    TextWrapped(target,"\xE9\x9D\xA2\xE6\x9D\xBF\xE6\xAF\x8F\xE4\xB8\xAA\xE5\x88\xB7\xE6\x96\xB0\xE5\x91\xA8\xE6\x9C\x9F\xE4\xBC\x9A\xE8\x87\xAA\xE5\x8A\xA8\xE9\x87\x8D\xE8\xAF\x95\xE5\x94\xA4\xE9\x86\x92\xE5\xAE\x83\xEF\xBC\x9B\xE4\xB9\x9F\xE5\x8F\xAF\xE4\xBB\xA5\xE7\x8E\xB0\xE5\x9C\xA8\xE6\x89\x8B\xE5\x8A\xA8\xE5\x90\xAF\xE5\x8A\xA8\xE3\x80\x82",
+        layout.offlineBody,caption_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_CENTER);
     Button(target,layout.offlineButton,"\xE5\x90\xAF\xE5\x8A\xA8 WSL",IconId::Power,
         widgets::ButtonSkinOf(widgets::ButtonVariant::Primary,widgets::Visual::Normal,palette),false);
 }
@@ -914,6 +921,12 @@ void PanelRenderer::GroupHead(ID2D1RenderTarget* target,const ListItem& item,
     }
     const float textTop=item.rect.top,textBottom=item.rect.bottom;
     const float menuLeft=widgets::MenuButtonRect(item.rect,scale_).left-widgets::kGroupHeadGap*scale_;
+    // 徽章的内边距是 DIP，必须先乘 scale 再和 Measure（像素）相加：以前 padX 直接乘 2 加进去，
+    // 高 DPI 下胶囊会比设计窄一截。
+    const auto pillPadX=Dip(widgets::kCountPillPadX,scale_);
+    const auto pillWidth=[&](const std::string& text) {
+        return Measure(count_.Get(),text).width+pillPadX*2.0f;
+    };
     const auto pill=[&](const std::string& text,const D2D1_COLOR_F& fill,const D2D1_COLOR_F& colour,
         IDWriteTextFormat* format,float padX,float radius) {
         const auto width=Measure(format,text).width+padX*2;
@@ -926,17 +939,27 @@ void PanelRenderer::GroupHead(ID2D1RenderTarget* target,const ListItem& item,
         x=box.right+widgets::kGroupHeadGap*scale_;
     };
     {
-        const auto nameWidth=std::max(0.0f,menuLeft-x);
-        Text(target,group.title,D2D1::RectF(x,textTop,x+nameWidth,textBottom),groupName_.Get(),skin.name,
+        // 尾部徽章（计数 / codex / 密钥警告）的宽度先占好位：标题只截断到它们前面。
+        // 以前标题按**完整**宽度推进 x（只夹到 menuLeft），长名字会把计数胶囊一直推到
+        // 「...」菜单按钮底下 —— 真机截图里胶囊和菜单点叠在一起。
+        const auto tailWidth=[&] {
+            float width=0.0f;
+            if(!group.countText.empty()) width+=pillWidth(group.countText)+widgets::kGroupHeadGap*scale_;
+            if(group.codex) width+=pillWidth("codex")+widgets::kGroupHeadGap*scale_;
+            if(group.keyWarn) width+=12.0f*scale_+widgets::kGroupHeadGap*scale_;
+            return width;
+        }();
+        const float titleRight=std::max(x,menuLeft-tailWidth);
+        Text(target,group.title,D2D1::RectF(x,textTop,titleRight,textBottom),groupName_.Get(),skin.name,
             DWRITE_TEXT_ALIGNMENT_LEADING,true);
         const auto measured=Measure(groupName_.Get(),group.title).width;
-        x=std::min(x+measured+widgets::kGroupHeadGap*scale_,menuLeft);
+        x=std::min(x+measured+widgets::kGroupHeadGap*scale_,titleRight);
     }
-    if(!group.countText.empty())
-        pill(group.countText,skin.countFill,skin.countText,count_.Get(),widgets::kCountPillPadX,
+    if(!group.countText.empty()&&x<menuLeft)
+        pill(group.countText,skin.countFill,skin.countText,count_.Get(),pillPadX,
             widgets::kCountPillRadius);
     if(group.codex&&x<menuLeft)
-        pill("codex",skin.tagFill,skin.tagText,count_.Get(),widgets::kCountPillPadX,
+        pill("codex",skin.tagFill,skin.tagText,count_.Get(),pillPadX,
             widgets::kCountPillRadius);
     if(group.keyWarn&&x<menuLeft) {
         const auto size=12.0f*scale_;
@@ -1074,6 +1097,19 @@ void PanelRenderer::List(ID2D1RenderTarget* target,const PanelLayout& layout,con
         layout.list.top),brush_.Get());
     target->PushAxisAlignedClip(D2D1::RectF(layout.list.left,layout.listViewport.top,layout.list.right,
         layout.listViewport.bottom),D2D1_ANTIALIAS_MODE_ALIASED);
+    // 展开组铺整块 surf 底：组头是 surf、行是透明的，于是「组头白 / 当前行淡紫 / 其它行页面灰」
+    // 把同一组切成三条不同的色带（真机截图里像三个叠在一起的碎块）。整组先铺底，行高亮再叠上去。
+    // 用 Pass 2 之后的矩形：吸顶组头已被移到视口顶，正好是要铺的可见上边界。
+    for(const auto& item:layout.items) {
+        if(item.kind!=ListItemKind::GroupHead||item.group<0) continue;
+        const int end=item.groupEnd;
+        if(end<=0||end>static_cast<int>(layout.items.size())) continue;
+        const float bottom=layout.items[static_cast<std::size_t>(end-1)].rect.bottom;
+        if(bottom<=item.rect.top) continue;
+        brush_->SetColor(palette.surf);
+        target->FillRectangle(D2D1::RectF(item.rect.left,item.rect.top,item.rect.right,bottom),
+            brush_.Get());
+    }
     // 两趟画：先所有非粘性项，再粘性组头/分组标题 —— 旧 CSS 里 .group-head 是 sticky 且 z-index:2，
     // 行滚到它下面时被它盖住；一趟画会让后来的行压住组头（真机反馈的"供应商和其模型列表重叠"）。
     const auto drawItem=[&](const ListItem& item) {
@@ -1111,7 +1147,12 @@ void PanelRenderer::List(ID2D1RenderTarget* target,const PanelLayout& layout,con
     for(const auto& item:layout.items) if(item.sticky) drawItem(item);
     target->PopAxisAlignedClip();
     if(layout.scrollVisible) {
-        const bool hot=hoverItem_.inList&&view.pointerInside;
+        // 与回退链 / 页面滚动条同一套判定：指针落在槽上（±2 DIP）才加粗变深。
+        // 以前用 hoverItem_.inList（指针在列表任意行上就算悬停），三条滑条的行为各不相同。
+        const bool hot=view.pointerInside
+            &&view.pointerX>=layout.scrollTrack.left-Dip(2.0f,scale_)
+            &&view.pointerX<=layout.scrollTrack.right+Dip(2.0f,scale_)
+            &&view.pointerY>=layout.scrollTrack.top&&view.pointerY<=layout.scrollTrack.bottom;
         auto thumb=layout.scrollThumb;
         if(hot) {
             const float grow=(widgets::kScrollBarHoverWidth-widgets::kScrollBarWidth)*scale_/2.0f;
@@ -1165,11 +1206,19 @@ void PanelRenderer::FieldWithCaret(ID2D1RenderTarget* target,const PanelLayout::
     const auto inset=Dip(9.0f,scale_);
     const auto textRect=D2D1::RectF(box.left+inset,box.top,box.right-inset,box.bottom);
     if(field.kind==3) {
-        // 下拉：右侧一个 chevron，文案是选中项
-        Text(target,value,textRect,body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
-        const auto box2=Dip(14.0f,scale_);
-        Icon(target,D2D1::RectF(box.right-inset-box2,(box.top+box.bottom)/2.0f-box2/2.0f,
-            box.right-inset,(box.top+box.bottom)/2.0f+box2/2.0f),IconId::ChevronDown,palette.faint,1.8f);
+        // 下拉：右侧一个 chevron，文案是选中项。未选中时画占位（以前直接 return，下拉是个空白框，
+        // 和旁边"空输入框有 cue"的观感对不上）；文字右边界要避开 chevron，否则长名字压在箭头上。
+        const auto chevron=Dip(14.0f,scale_);
+        const auto valueRect=D2D1::RectF(textRect.left,textRect.top,textRect.right-chevron-Dip(6.0f,scale_),
+            textRect.bottom);
+        if(value.empty()) {
+            Text(target,hint?hint:"",valueRect,caption_.Get(),palette.faint,
+                DWRITE_TEXT_ALIGNMENT_LEADING,true);
+        } else {
+            Text(target,value,valueRect,body_.Get(),palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
+        }
+        Icon(target,D2D1::RectF(box.right-inset-chevron,(box.top+box.bottom)/2.0f-chevron/2.0f,
+            box.right-inset,(box.top+box.bottom)/2.0f+chevron/2.0f),IconId::ChevronDown,palette.faint,1.8f);
         return;
     }
     if(value.empty()) {
@@ -1311,6 +1360,17 @@ void PanelRenderer::FallbackPage(ID2D1RenderTarget* target,const PanelLayout& la
         brush_->SetColor(hot?palette.line:palette.line2);
         target->FillRoundedRectangle(D2D1::RoundedRect(thumb,
             widgets::kScrollBarWidth*scale_/2.0f,widgets::kScrollBarWidth*scale_/2.0f),brush_.Get());
+    }
+    if(layout.fbMaxScroll>0.5f) {
+        // 底部渐隐：与模型页列表同一套 16 DIP 的底色纱。没有它，滚动时最下面那行会被阶梯底边
+        // 硬切成半截（真机截图里第 9 行只露一半、紧贴「追加一条」）。
+        PrepareFade(target,palette);
+        fade_->SetStartPoint(D2D1::Point2F(layout.ladder.left,
+            layout.ladder.bottom-widgets::kListFade*scale_));
+        fade_->SetEndPoint(D2D1::Point2F(layout.ladder.left,layout.ladder.bottom));
+        target->FillRectangle(D2D1::RectF(layout.ladder.left,
+            layout.ladder.bottom-widgets::kListFade*scale_,layout.ladder.right,layout.ladder.bottom),
+            fade_.Get());
     }
     // .addline: the dashed "追加一条" line under the ladder.
     {
@@ -1480,7 +1540,9 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             if(!source.note.empty()) {
                 const auto labelWidth=Measure(busy_.Get(),source.label).width;
                 const auto noteLeft=field.label.left+labelWidth+Dip(6,scale_);
-                if(noteLeft+Measure(count_.Get(),source.note).width<=field.label.right)
+                // 放不下就省略号截断，而不是整条不画：API Key 的提示会随供应商名变成
+                // 「写入 .env 的 MY_RELAY_…_API_KEY」，名字一长就整句消失（用户看不到写到哪）。
+                if(field.label.right-noteLeft>Dip(16,scale_))
                     Text(target,source.note,D2D1::RectF(noteLeft,field.label.top,field.label.right,
                         field.label.bottom),count_.Get(),palette.faint,DWRITE_TEXT_ALIGNMENT_LEADING,true);
             }
@@ -1637,8 +1699,19 @@ void PanelRenderer::AdminPages(ID2D1RenderTarget* target,const PanelLayout& layo
             // 热键框在"按组合键"状态亮起来（真机反馈：点了要有可见效果）：accent 描边 + 柔底。
             // 约定：字段 4 = 热键（视图层的顺序固定，见 panel_view.cpp 的 fields 组装）。
             const bool capturing=field.index==4&&page.hotkeyCapturing;
+            // 聚焦高亮：与添加/回退链页的 FieldWithCaret 同一套（accent-soft 柔底 + accent-line 描边）。
+            // 以前设置页只有"按组合键"那一格会亮，普通字段聚焦时看不出在编辑哪个框。
+            const bool focused=field.index==view.focusedFormField;
             auto fieldSkin=widgets::ButtonSkinOf(widgets::ButtonVariant::Normal,widgets::Visual::Normal,palette);
             if(capturing) { fieldSkin.fill=palette.accentSoft;fieldSkin.border=palette.accent; }
+            else if(focused) fieldSkin.border=palette.accentLine;
+            if(focused&&!capturing) {
+                brush_->SetColor(palette.accentSoft);
+                target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(field.box.left-3.0f*scale_,
+                    field.box.top-3.0f*scale_,field.box.right+3.0f*scale_,
+                    field.box.bottom+3.0f*scale_),widgets::kRadius*scale_,widgets::kRadius*scale_),
+                    brush_.Get());
+            }
             widgets::DrawButtonShape(target,brush_.Get(),field.box,fieldSkin,scale_);
             const bool dropdown=source.kind==3;
             // 左右内缩 9 DIP：与原生 EDIT 的摆放内缩一致。以前是 7 DIP，EDIT 盖不住自绘文字，

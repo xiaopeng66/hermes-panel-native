@@ -4155,3 +4155,43 @@ README 的「贡献」一节不再要求跑 ctest / full_audit。
 （`ladder.right-width-1`），而且**轨道和拇指都画**——位置偏里、看着更粗。
 修：回退链改成同一套（同一条竖线、只画拇指、同色 line2/悬停 line、悬停加粗）。
 实测（Debug 实例三页对比）：三页滑条的列完全一致（468/469..471，1px 差异是圆角抗锯齿）。
+
+### G100 十轮显示审查：九处显示缺陷（2026-10-26，用户："仔细全面检查软件的小毛病…迭代检查10次"）
+
+方法：Debug 隔离实例 + 控制面（`controls`/`audit`/`hover`/`key`/`strip-*`）+ 截图，夹具专挑长名字
+（供应商 49 字符、模型 74 字符、备份文件名 79 字符），porcelain/dark 双主题、120/192 DPI、空/离线/搜索/
+长组/贴条四边各跑一遍。逐轮修复：
+
+1. **展开的供应商组被切成三条色带**（组头 surf / 当前行 identity 7.5% / 其它行透出页面底色）。
+   修：`List()` 先按 `groupEnd` 给每个展开组铺整块 `palette.surf`，行高亮再叠上去；吸顶组头用
+   pass 2 之后的矩形，卡片上边界正好落在视口顶（长组截图验证不越界）。
+2. **内容区右缘比左缘宽 0.5 DIP**：`layout.content` 宽度多减了 `kStrokeInset=0.5`（全工程只此一处用），
+   100% 差半像素、192 DPI 差 1 像素。删掉该常量后五页左右边距实测全为 13.75 px@125% / 22 px@192。
+3. **搜索框打字后列表不重绘**：`dump` 说已过滤成 1 条，屏幕还是 9 组（原生 EDIT 只更新自己，
+   `Event::Change` 只镜像文本、没 Invalidate）。修：文本真的变化时 `InvalidateAll()`。
+4. **删除供应商页的下拉是空白框**（其它输入框都有 cue）：`FieldWithCaret` 的 kind==3 分支未画 placeholder，
+   且文字右边界压在 chevron 下。修：未选中时画 faint 占位、文字让开 chevron + 6 DIP。
+5. **离线页整块左移出窗口**：`centreX=layout.hero.right/2`，而离线页 hero 是空矩形 → 居中到 x=0，
+   audit 报 `offlineStart outside-horizontal`。修：取 `(content.left+content.right)/2`。
+6. **离线页左上角浮着原生搜索框**：摆放原生字段的签名缓存不含离线态，切离线那一帧整段被跳过；
+   另外离线页的搜索/筛选控件仍注册了命中区（点离线卡片上沿会聚焦看不见的搜索框）。
+   修：签名 mix 离线/错误标志；离线时不注册 SearchBox/SyncModels/SearchClear/三个 Filter 控件。
+7. **离线页正文被截成「……也可以现…」**：`Text(...,false)` 并不会换行（`Text` 永远单行+省略号），
+   盒子按两行留的。修：改 `TextWrapped`。
+8. **设置页输入框聚焦时没有任何高亮**（添加/回退链页都有 accent 边框）：设置页那套绘制只处理了自绘光标
+   和「按组合键」状态。修：聚焦时补 accent-soft 柔底 + accent-line 描边，与 `FieldWithCaret` 同款。
+9. **滑条悬停永不变粗**：`TrackHover` 只在「命中控件或列表行变化」时重绘，指针停在槽里（不是控件）
+   不触发重绘；模型列表那条还用 `hoverItem_.inList`（指针在任意行上都算悬停）。修：新增 `scrollHot_`
+   跟踪三条滑条的几何悬停（±2 DIP），一变就重绘；模型列表也改成同一套判定。实测 8→10 px、
+   `line2`→`line`。
+10. **192 DPI 下 hero 模型名截成「mod…」**：倍率变化时文本格式全部重建，但 `measureCache_`
+   没清——新格式很可能落在同一地址，键（格式指针+文本）相同，`Measure` 返回**上一个倍率**的宽度
+   （plate 按 125% 的宽度算窄）。修：重建格式时清空测量缓存。
+11. **添加页三个输入框永远没有占位**（名称/Base URL/API Key 本该是 `my-relay` / `https://api.example.com/v1`
+   / `sk-…`）：`TextField::placeholder` 从未被赋值，`CreateNativeFields` 读它设 cue 自然是空。
+    修：`CurrentView` 每帧把视图 hint 同步给原生字段（文案不变不下发），`placeholder` 终于有来源。
+12. 顺带：API Key 右侧「写入 .env 的 <KEY_ENV>」注释在名字变长时**整条不画**（放不下就静默丢弃），
+    改成省略号截断（至少能看到写到哪个变量）。
+
+验证：120 DPI 两主题七页截图 + 192 DPI 五页 `audit` 全 0 问题；五页边距对称；三条滑条列完全一致；
+搜索/长组/吸顶/空态/离线/贴条（铭牌·胶囊 × 左·右·下边）逐个截图核对。

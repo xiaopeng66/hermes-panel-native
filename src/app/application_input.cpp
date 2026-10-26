@@ -246,12 +246,25 @@ void Application::TrackHover(HWND window,float x,float y) {
     const bool listMoved=previous.kind!=current.kind||previous.group!=current.group
         ||previous.row!=current.row||previous.menu!=current.menu||previous.star!=current.star;
     pointerX_=x;pointerY_=y;pointerInside_=true;
+    // 滑条槽不是控件、也不是列表行：指针停在槽里时上面两个判定都不变 → 不重绘 →
+    // 「悬停变粗」永远看不到（从窗口外直接移到滑条上时尤其明显）。这里单独跟踪
+    // 三条滑条（模型列表 / 回退链 / 页面）的悬停态，一变就重画。
+    const auto overTrack=[&](const D2D1_RECT_F& track) {
+        const float slack=2.0f*(WindowDpi()/96.0f);
+        return track.right>track.left
+            &&x>=track.left-slack&&x<=track.right+slack
+            &&y>=track.top&&y<=track.bottom;
+    };
+    const bool scrollHot=overTrack(layout.scrollTrack)||overTrack(layout.fbScrollTrack)
+        ||overTrack(layout.pageScrollTrack);
+    const bool scrollHotChanged=scrollHot!=scrollHot_;
+    scrollHot_=scrollHot;
     // 注意：早先只有"命中控件变了"才重排提示定时器。于是**同一控件上 hover 两次**时，
     // 第一次已把 hoverControl_ 设成它、定时器却没走完（被 WM_MOUSELEAVE 或重绘挤掉），
     // 第二次进来 id==hoverControl_ → 不重启定时器 → 提示永远不弹（门禁偶发
     // "hovering lampWsl shows no tooltip"、hover=null 的根因）。
     if(id!=hoverControl_||listMoved||hitIndex!=tooltipHoverIndex_||
-        (id!=0&&!tooltipVisible_&&panel_)) {
+        (id!=0&&!tooltipVisible_&&panel_)||scrollHotChanged) {
         // 悬停过渡（移植自余额面板）：记录上一个控件，90ms 内交叉淡出/淡入。
         if(id!=hoverControl_&&AnimationsEnabled()) {
             hoverPrevious_=hoverControl_;

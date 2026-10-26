@@ -35,10 +35,6 @@ constexpr float kHeroHeight=64.0f,kHeroPadX=11.0f,kHeroGap=10.0f,kHeroLampMargin
 
 constexpr float kPagePadX=11.0f;
 
-// 描边内缩量（见 content 的注释）：控件贴窗口边时不让半像素被裁。
-
-constexpr float kStrokeInset=0.5f;
-
 constexpr float kNavHeight=47.0f;
 
 // .searchrow padding 9 11 6 around a 30px .inp; .filters padding 0 11 8 around 24px .seg
@@ -457,9 +453,10 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
     // 直接相减会得到负数，后续各处 `std::max(96, …)` 之类的兜底又把它撑回 96+，
     // 最终控件被画到窗口外（真机上点不到）。
     const float availableContent=std::max(0.0f,layout.nav.top-contentTop);   // 已是像素，不能再乘 scale
+    // 左右边距必须都等于 kPagePadX：以前宽度多减了 dip(kStrokeInset)=0.5 DIP（全工程只此一处用到），
+    // 右缘于是比左缘宽 0.5 DIP —— 100% 下差半个像素、192 DPI 下差 1 像素，正是"左右边距不一样"。
     layout.content=Box(dip(kPagePadX),contentTop,
-
-        width-dip(kPagePadX*2)-dip(kStrokeInset),availableContent);
+        width-dip(kPagePadX*2),availableContent);
     const bool tightContent=availableContent<dip(80.0f);
 
     layout.pageTitle=Box(layout.content.left,layout.content.top,layout.content.right-layout.content.left,dip(22));
@@ -487,8 +484,9 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
             -dip(3)-layout.search.left-dip(29),
         dip(kSearchHeight));
 
-    if(view.activePage==0) {
+    if(view.activePage==0&&view.offlineReason.empty()) {
         // 命中顺序：✕ → 同步按钮 → 搜索框（搜索框是整行大矩形，必须最后）。
+        // 离线页不注册：那三枚控件不画，但留着命中区的话，点离线卡片上沿会落到一个看不见的搜索框里。
         if(view.searchHasText) layout.controls.push_back({ControlId::SearchClear,layout.searchClear});
         layout.controls.push_back({ControlId::SyncModels,layout.syncModels});
         layout.controls.push_back({ControlId::SearchBox,layout.search});
@@ -516,7 +514,8 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
             layout.segments.push_back({ids[index],Box(x,layout.filters.top,segWidth,dip(kSegHeight))});
 
-            layout.controls.push_back(layout.segments.back());
+            // 离线页同样不注册：筛选段不画，命中区不能留（点了会改一个看不见的筛选）。
+            if(view.offlineReason.empty()) layout.controls.push_back(layout.segments.back());
 
             x+=segWidth+dip(kSegGap);
 
@@ -569,7 +568,10 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
 
         float y=layout.hero.bottom+std::max(dip(8),(contentHeight-blockHeight)/2.0f);
 
-        const float centreX=layout.hero.right/2.0f;
+        // 居中取内容区中心：离线页没有 hero（上面 heroFits=false，hero 是空矩形），
+        // 以前用 hero.right/2 会算成 0 —— 离线页整块（图标/标题/正文/按钮）被居中到窗口左缘，
+        // 屏幕上只剩"启动 WSL"的右半截（audit 也报 offlineStart outside-horizontal）。
+        const float centreX=(layout.content.left+layout.content.right)/2.0f;
 
         layout.offlineIcon=Box(centreX-dip(17),y,dip(34),dip(34)); y+=dip(34+9);
 
