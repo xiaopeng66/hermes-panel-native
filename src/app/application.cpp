@@ -175,6 +175,7 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     geometry_.Validate(model_,monitor_.geometry,state_);
     if(state_==State::Collapsed) RenderStrip();
     SyncTopmostStyle();
+    SetTimer(panel_,kTopmostGuardTimer,kTopmostGuardMs,nullptr);
     MigrateLegacySettings();
     RegisterHotkeys();
     if(!AddTray()) {
@@ -642,6 +643,48 @@ void Application::SyncTopmostStyle() {
     };
     place(panel_,stored_.topmost);
     place(strip_,stored_.topmost);
+}
+namespace {
+// 置顶带的覆盖判定：从本窗口向上枚举 z-order（GW_HWNDPREV = 上面一个）。置顶带在
+// z-order 顶部是连续的，所以走到第一个非 topmost 窗口就能断定带内没人压我们。
+// 跳过的都不构成遮挡：自己进程的窗口（悬停卡/贴条本来就该在面板上面）、不可见窗口、
+// 壳层任务栏、DWM cloaked 的壳窗口（在屏幕上根本不绘制，比如输入体验宿主）。
+bool ObscuredInTopmostBand(HWND window) {
+    DWORD pid=0;
+    GetWindowThreadProcessId(window,&pid);
+    RECT self{};
+    if(!GetWindowRect(window,&self)) return false;
+    for(HWND above=GetWindow(window,GW_HWNDPREV);above;above=GetWindow(above,GW_HWNDPREV)) {
+        const auto style=GetWindowLongPtrW(above,GWL_EXSTYLE);
+        if(!(style&WS_EX_TOPMOST)) return false;
+        DWORD other=0;
+        GetWindowThreadProcessId(above,&other);
+        if(other==pid||!IsWindowVisible(above)) continue;
+        wchar_t className[32]{};
+        GetClassNameW(above,className,static_cast<int>(std::size(className)));
+        if(wcscmp(className,L"Shell_TrayWnd")==0||wcscmp(className,L"Shell_SecondaryTrayWnd")==0) continue;
+        BOOL cloaked=FALSE;
+        if(SUCCEEDED(DwmGetWindowAttribute(above,DWMWA_CLOAKED,&cloaked,sizeof(cloaked)))&&cloaked) continue;
+        RECT otherRect{};
+        if(!GetWindowRect(above,&otherRect)) continue;
+        RECT overlap{};
+        if(!IntersectRect(&overlap,&self,&otherRect)) continue;
+        return true;
+    }
+    return false;
+}
+}
+void Application::EnforceTopmost() {
+    if(!stored_.topmost) return;
+    const auto enforce=[this](HWND window) {
+        if(!window||!IsWindowVisible(window)) return;
+        // 压顶才抬 + 兜底：极少数路径（第三方置顶工具/全屏切换）会把 WS_EX_TOPMOST 风格
+        // 从窗口上剥掉，让风格与设置项重新一致。
+        if(ObscuredInTopmostBand(window)||(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)==0)
+            SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+    };
+    enforce(panel_);
+    enforce(strip_);
 }
 // ---- v1.23 原生输入框：创建 / 摆放 / 事件 ----
 namespace {
@@ -3049,6 +3092,7 @@ LRESULT Application::WindowMessage(HWND window,bool strip,UINT message,WPARAM wp
         break;
     case WM_TIMER:
         if(wparam==kMotionTimer&&!strip) { MotionTick();return 0; }
+        if(wparam==kTopmostGuardTimer&&!strip) { EnforceTopmost();return 0; }
         if(strip&&wparam==kStripCardTimer) { ShowHoverCard();return 0; }
         if(wparam==kTrayGraceTimer&&!strip) { GraceExpired();return 0; }
         if(wparam==kCaretTimer&&!strip) {

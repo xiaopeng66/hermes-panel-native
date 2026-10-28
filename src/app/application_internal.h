@@ -22,6 +22,11 @@ constexpr UINT_PTR kPollTimer=3;          // the refresh cadence (settings.pollS
 // 可见性变化后的"立刻刷新一次"必须是**一次性**定时器：直接用 kPollTimer 设 30ms 会把它
 // 永久改成 33Hz 轮询（真机 2026-10-20：任何一次展开/收起后 CPU 空转 25%，拖动卡顿）。
 constexpr UINT_PTR kPollNowTimer=14;
+// 置顶带守护：TOPMOST 只保证"进带"，带内 z-order 仍按"谁最后被抬高"排——别的置顶窗口
+// （截图贴图、其他挂件）随时会压上来，而置顶开关只在切换那一刻抬一次。低频自检，
+// 确有"外来 topmost 压顶"才抬一次，见 Application::EnforceTopmost。
+constexpr UINT_PTR kTopmostGuardTimer=15;
+constexpr UINT kTopmostGuardMs=500;
 constexpr UINT_PTR kToastTimer=4;         // one-shot: the toast clears itself after kToastMilliseconds
 constexpr UINT_PTR kTooltipTimer=5;       // one-shot: 悬停 450ms 后显示提示（旧 title 的等价物）
 constexpr UINT_PTR kSpinTimer=6;

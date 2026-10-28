@@ -4261,7 +4261,7 @@ app.manifest / rc 固定字段 / rc 字符串四处必须一致，否则打包�
   `portable-migration.txt`；窗口位置/贴边状态/主题/收藏全部沿用（geometry 日志与迁移前一致）。
 - 旧 `%LOCALAPPDATA%\HermesModelPanelNative` 不再被写入（mtime 停在切换前），已整体移到
   `E:\AI\Zcode\backups\HermesModelPanelNative-data-preportable-20261026\`，数据现在只在 exe 旁边一份。
-- README / DESIGN 的数据位置说明同步更新；GitHub v1.0.0 的 exe 资产已覆盖为新构建并回读校验一致。
+- README / DESIGN 的数据位置说明同步更新。
 
 **补充（同日）**：安装位置改回项目内的 `dist-live\`（便携整体目录：exe + data 同层）。此前
 覆盖安装装到了 `%LOCALAPPDATA%\Programs\HermesModelPanelNative`（C 盘标准用户目录），用户指出
@@ -4269,3 +4269,25 @@ app.manifest / rc 固定字段 / rc 字符串四处必须一致，否则打包�
 方式同步改指向，settings SHA-256 迁移前后一致（e7c5dcc2…），C 盘目录已不存在。注意：便携
 文件夹**必须整体拷贝**（含 data\），单拷 exe 到新位置会以全新设置启动（旧数据在 backups 里，
 不会被自动找回）。
+
+### G104 置顶带守护：修"始终置顶仍偶尔被盖住"（2026-10-28，真机反馈）
+
+用户："我的 balance 和 hermes 面板的置顶功能，为什么有时候还是会被别的窗口覆盖？有没有根本的办法？"
+
+**根因**（不是开关失效）：`WS_EX_TOPMOST` 只保证"进置顶带"，带内 z-order 按"谁最后被抬高"
+排——截图贴图、其他挂件面板等任何程序之后调 `SetWindowPos(HWND_TOPMOST)` / 弹出新的置顶
+窗口都会落到带顶把面板压住；而置顶只在创建与切换那一刻设置一次，之后从不重抬。
+
+**改法**：
+- `application_internal.h` 新增 `kTopmostGuardTimer=15`（500ms），挂在 panel_ 上，进程内只有这一个。
+- `Application::EnforceTopmost()`：`stored_.topmost` 关着直接返回；对 panel_/strip_ 逐个检查
+  `ObscuredInTopmostBand()`——从本窗口向上走 `GW_HWNDPREV`，走到第一个非 topmost 即断定带内
+  无人压顶；确有"可见、与本窗口相交的外来 topmost"才 `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)`
+  抬一次。跳过：自己进程的窗口（悬停卡/贴条本来就在上面）、不可见窗口、任务栏
+  `Shell_TrayWnd`/`Shell_SecondaryTrayWnd`、DWM cloaked 壳窗口（屏幕上不绘制）。
+- 兜底：第三方工具/全屏切换偶尔会把 `WS_EX_TOPMOST` 风格剥掉，守护顺带把风格与设置项对齐。
+- 不打架：只在外来窗口真压顶时抬一次（抬完即稳），不与同类置顶挂件互顶；独占全屏游戏、
+  UAC 提权全屏窗口盖住置顶窗口属系统规则，不在修复范围。
+
+**验收**：`tools/topmost-guard-test.py`（新门禁，起真实 exe 不依赖控制面）：外来探针窗口盖住
+面板 → 断言自动抬回，两轮循环；实测两轮均 0.3–0.5s 抬回，exit=0。Release 编译零警告通过。

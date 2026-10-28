@@ -100,6 +100,7 @@ private:
     void SetAutoStart(bool enabled);
     bool AutoStartEnabled() const;
     void SyncTopmostStyle();
+    void EnforceTopmost();
     void Show();
     void Hide();
     void DockNearest();
