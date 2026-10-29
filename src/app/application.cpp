@@ -645,30 +645,34 @@ void Application::SyncTopmostStyle() {
     place(strip_,stored_.topmost);
 }
 namespace {
-// 置顶带的覆盖判定：从本窗口向上枚举 z-order（GW_HWNDPREV = 上面一个）。置顶带在
-// z-order 顶部是连续的，所以走到第一个非 topmost 窗口就能断定带内没人压我们。
-// 跳过的都不构成遮挡：自己进程的窗口（悬停卡/贴条本来就该在面板上面）、不可见窗口、
-// 壳层任务栏、DWM cloaked 的壳窗口（在屏幕上根本不绘制，比如输入体验宿主）。
-bool ObscuredInTopmostBand(HWND window) {
-    DWORD pid=0;
-    GetWindowThreadProcessId(window,&pid);
-    RECT self{};
-    if(!GetWindowRect(window,&self)) return false;
-    for(HWND above=GetWindow(window,GW_HWNDPREV);above;above=GetWindow(above,GW_HWNDPREV)) {
-        const auto style=GetWindowLongPtrW(above,GWL_EXSTYLE);
-        if(!(style&WS_EX_TOPMOST)) return false;
-        DWORD other=0;
-        GetWindowThreadProcessId(above,&other);
-        if(other==pid||!IsWindowVisible(above)) continue;
+// 覆盖判定（真机 2026-10-29 重写）：别的程序可能**在置顶带里、却把 WS_EX_TOPMOST 样式位清掉**
+//（Electron 类应用常见：直接 SetWindowLongPtr 改样式而不走 SetWindowPos），所以"按样式位往上
+// 找压顶者"会漏判——实测 ChatGPT 桌面端就这样压在贴条上面而位是 0。窗口管理器给的权威答案
+// 是"这个像素上最上面是谁"：在窗口中心与四分之一处采样 WindowFromPoint，落在外来窗口上即
+// 判定被盖住。自己进程的窗口（悬停卡/贴条）、任务栏、DWM cloaked 壳窗口不算遮挡。
+bool CoveredByForeignWindow(HWND window) {
+    if(!window||!IsWindowVisible(window)) return false;
+    RECT rect{};
+    if(!GetWindowRect(window,&rect)) return false;
+    const DWORD self=GetCurrentProcessId();
+    const LONG cx=(rect.left+rect.right)/2,cy=(rect.top+rect.bottom)/2;
+    const LONG w=rect.right-rect.left,h=rect.bottom-rect.top;
+    std::vector<POINT> points{{cx,cy}};
+    if(h>=40) { points.push_back({cx,rect.top+h/4});points.push_back({cx,rect.bottom-h/4}); }
+    if(w>=40) { points.push_back({rect.left+w/4,cy});points.push_back({rect.right-w/4,cy}); }
+    for(const POINT& point:points) {
+        const HWND hit=WindowFromPoint(point);
+        if(!hit) continue;
+        const HWND root=GetAncestor(hit,GA_ROOT);
+        if(!root||root==window) continue;
+        DWORD pid=0;
+        GetWindowThreadProcessId(root,&pid);
+        if(pid==self) continue;
         wchar_t className[32]{};
-        GetClassNameW(above,className,static_cast<int>(std::size(className)));
+        GetClassNameW(root,className,static_cast<int>(std::size(className)));
         if(wcscmp(className,L"Shell_TrayWnd")==0||wcscmp(className,L"Shell_SecondaryTrayWnd")==0) continue;
         BOOL cloaked=FALSE;
-        if(SUCCEEDED(DwmGetWindowAttribute(above,DWMWA_CLOAKED,&cloaked,sizeof(cloaked)))&&cloaked) continue;
-        RECT otherRect{};
-        if(!GetWindowRect(above,&otherRect)) continue;
-        RECT overlap{};
-        if(!IntersectRect(&overlap,&self,&otherRect)) continue;
+        if(SUCCEEDED(DwmGetWindowAttribute(root,DWMWA_CLOAKED,&cloaked,sizeof(cloaked)))&&cloaked) continue;
         return true;
     }
     return false;
@@ -676,12 +680,13 @@ bool ObscuredInTopmostBand(HWND window) {
 }
 void Application::EnforceTopmost() {
     if(!stored_.topmost) return;
-    const auto enforce=[this](HWND window) {
+    const auto enforce=[](HWND window) {
         if(!window||!IsWindowVisible(window)) return;
-        // 压顶才抬 + 兜底：极少数路径（第三方置顶工具/全屏切换）会把 WS_EX_TOPMOST 风格
-        // 从窗口上剥掉，让风格与设置项重新一致。
-        if(ObscuredInTopmostBand(window)||(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)==0)
-            SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        if(!CoveredByForeignWindow(window)&&(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0) return;
+        // 先确保回到置顶带，再抬到带顶。只发 TOPMOST 在"已在带内但位置不对"时可能不动 z-order
+        //（样式位被第三方清掉后尤其如此），与调试面 focus 命令同一套两步。
+        SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        SetWindowPos(window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
     };
     enforce(panel_);
     enforce(strip_);

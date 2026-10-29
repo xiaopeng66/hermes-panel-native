@@ -4290,4 +4290,11 @@ app.manifest / rc 固定字段 / rc 字符串四处必须一致，否则打包�
   UAC 提权全屏窗口盖住置顶窗口属系统规则，不在修复范围。
 
 **验收**：`tools/topmost-guard-test.py`（新门禁，起真实 exe 不依赖控制面）：外来探针窗口盖住
-面板 → 断言自动抬回，两轮循环；实测两轮均 0.3–0.5s 抬回，exit=0。Release 编译零警告通过。
+面板 → 断言自动抬回，三轮循环；实测均 0.3–0.5s 抬回，exit=0。Release 编译零警告通过。
+
+**真机复测（2026-10-29）**：用户反馈"hermes 贴条还在 Codex 桌面端（ChatGPT.exe）下边"。排查：
+运行中 exe 哈希就是新构建、外部 `SetWindowPos` 能抬起——守护没触发。根因：ChatGPT 窗口**在置顶带
+里但 `WS_EX_TOPMOST` 位为 0**（Electron 类应用直接改样式位、不走 SetWindowPos），旧判定"向上走到
+第一个非 topmost 即认为带内没人"在这里漏判。改为 `WindowFromPoint` 采样（中心 + 四分点，像素级
+权威）判定遮挡，抬升改 TOPMOST→TOP 两步；门禁加第三轮"带内但位被清掉"的压顶者。实跑复测：
+hermes 0.33s 抬回（z-order 8 vs ChatGPT 57），balance 即时抬回。

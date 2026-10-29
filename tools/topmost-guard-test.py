@@ -31,6 +31,8 @@ u32.DestroyWindow.argtypes = [wt.HWND]
 u32.IsWindowVisible.argtypes = [wt.HWND]
 u32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
 u32.GetWindowLongPtrW.restype = ctypes.c_longlong
+u32.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_longlong]
+u32.SetWindowLongPtrW.restype = ctypes.c_longlong
 u32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 u32.UnregisterClassW.argtypes = [wt.LPCWSTR, wt.HINSTANCE]
 
@@ -41,7 +43,7 @@ HWND_TOPMOST = wt.HWND(-1)
 SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x0002, 0x0001, 0x0010
 GA_ROOT = 2
 LIFT_TIMEOUT_S = 4.0
-ROUNDS = 2
+ROUNDS = 3
 
 WndProc = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
 
@@ -144,12 +146,18 @@ def main():
             if root_at(cx, cy) == panel:
                 print("FAIL: 第 %d 轮外来 topmost 没能盖住面板，测试无效" % round_index)
                 return 1
+            if round_index == 3:
+                # 复现真机 2026-10-29：窗口在置顶带里、但 WS_EX_TOPMOST 样式位被清掉
+                #（Electron 类应用直接改样式位而不走 SetWindowPos）。守护必须仍然识别。
+                u32.SetWindowLongPtrW(probe, -20,
+                    u32.GetWindowLongPtrW(probe, -20) & ~WS_EX_TOPMOST)
+                time.sleep(0.05)
             elapsed = wait_lifted(panel)
             if elapsed is None:
                 print("FAIL: 第 %d 轮被盖后 %.1fs 内守护没有抬回" % (round_index, LIFT_TIMEOUT_S))
                 return 1
             print("PASS 第 %d/%d 轮：被盖后 %.2fs 自动抬回" % (round_index, ROUNDS, elapsed))
-        print("PASS: 置顶带守护工作正常（%d 轮覆盖循环）" % ROUNDS)
+        print("PASS: 置顶带守护工作正常（%d 轮覆盖循环，含样式位被清掉的一轮）" % ROUNDS)
         return 0
     finally:
         if probe:
