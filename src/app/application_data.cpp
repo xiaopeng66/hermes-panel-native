@@ -66,7 +66,11 @@ void FillReachability(HermesState& state,int webuiPort,int gatewayPort) {
 void Application::ApplyHelperState(const HermesState& state) {
     hermesState_=state;
     const auto signature=Signature(state);
-    if(signature!=stateSignature_) {
+    // v1.35（真机 2026-10-30"贴条红掉、状态都正常"）：先比较、再更新签名。此前先把
+    // stateSignature_ 赋成新值，下面那次比较就恒为假——状态变化**永远不重绘**，贴条只能
+    // 停在展开/收起那一刻的旧画面（灯色/待重启条都过期），悬浮卡因为悬停时现算所以是新的。
+    const bool changed=signature!=stateSignature_;
+    if(changed) {
         stateSignature_=signature;
         if(log_) log_->Info("data","state changed: providers="+std::to_string(state.providers.size())
             +" fallbacks="+std::to_string(state.fallbacks.size()));
@@ -83,7 +87,7 @@ void Application::ApplyHelperState(const HermesState& state) {
     // v1.28（性能）：状态**没变**就不重绘。轮询每 20s 都会走到这里，即使内容一模一样也会整窗
     // 重画一次（实测一帧 7-16ms，且会和输入/悬停抢消息循环）。界面里没有随时间变化的元素
     // （同步时间戳来自 config mtime，不来自本机时钟），所以跳过是安全的；首帧仍必须画。
-    if(signature!=stateSignature_||!statePainted_) {
+    if(changed||!statePainted_) {
         statePainted_=true;
         InvalidateAll();
     }
