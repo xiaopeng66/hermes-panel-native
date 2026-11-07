@@ -8,6 +8,14 @@
 #include <stdexcept>
 
 namespace hermes {
+// 助手脚本已并入本仓库 tools/，旧值（旧内置默认 ~、旧项目绝对路径）就地改指新位置；
+// 空串视为未设置，同样落回默认。用户自定的其它路径原样保留。
+// 放在匿名命名空间外：application.cpp 的旧版迁移（MigrateLegacySettings）也要用它。
+std::string NormalizeHelperPath(std::string path) {
+    if(path.empty()||path==kLegacyHelperPathHome||path==kLegacyHelperPathOld)
+        return std::string{kDefaultHelperPath};
+    return path;
+}
 namespace {
 constexpr unsigned long long kThrottleMilliseconds=1000;
 std::wstring DirectoryOf(const std::wstring& path) {
@@ -91,7 +99,7 @@ Settings FromJson(const nlohmann::json& value) {
     settings.theme=StrOr(value,"theme",std::string{"system"});
     settings.distro=StrOr(value,"distro",std::string{"Ubuntu"});
     settings.pythonExe=StrOr(value,"pythonExe",std::string{"python3"});
-    settings.helperPath=StrOr(value,"helperPath",std::string{"~/hermes-panel-apply.py"});
+    settings.helperPath=NormalizeHelperPath(StrOr(value,"helperPath",std::string{kDefaultHelperPath}));
     settings.readHelperPath=StrOr(value,"readHelperPath",
         std::string{"/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-read.py"});
     settings.webuiPort=IntOr(value,"webuiPort",8787);

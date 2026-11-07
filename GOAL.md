@@ -73,7 +73,7 @@
 1. **不要求用户手动验收**（除 H7 的真机确认）：门禁必须能在假助手 + 假 WebUI + 隔离数据目录下自证。
 2. **一切"完成/通过"必须附证据**：实际执行的命令 + 关键输出摘要；无证据视为未完成。
 3. **不写真实的 hermes 配置**：`~/.hermes/config.yaml` 与 `.env` 的唯一写入者是 WSL 里的
-   `projects/hermes-panel/wsl/hermes-panel-apply.py`（一行都不改）；面板只做调用与解析。测试一律用假助手夹具。
+   `tools/hermes-panel-apply.py`（已并入本仓库，WSL 经 /mnt/e 执行，一行都不改）；面板只做调用与解析。测试一律用假助手夹具。
 4. **不修改旧版**：`projects/hermes-panel` 及其数据（`%APPDATA%\HermesModelPanel`）保持可用、不被修改、可回退。
 5. **不引入 WebView2 内容区**：界面全自绘（用户明确要求与 `balance-panel-native` 同栈）。
 6. **观感以对照为准**：任何页面上线前，按 `DESIGN.md` §4 的 36 项逐项核对，差异写进修订记录；

@@ -174,7 +174,7 @@ try:
     exe_version = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "(Get-Item '%s').VersionInfo.FileVersion" % APP],
-        capture_output=True, text=True).stdout.strip()
+        capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     check("about dialog opened", bool(box), box)
     check("about shows exe version", ("版本：" + exe_version) in body,
           "exe=%s body=%s" % (exe_version, body[:160]))

@@ -2520,21 +2520,26 @@ void Application::MigrateLegacySettings() {
         const auto text=[&](const char* key,const std::string& fallback) {
             return legacy.contains(key)&&legacy[key].is_string()?legacy[key].get<std::string>():fallback;
         };
-        if(onlyHelperKeys) {
-            // 只补连接信息，不动用户在新面板里改过的收藏/最近/主题等。
-            stored_.pythonExe=text("pythonExe",stored_.pythonExe);
-            stored_.helperPath=text("helperPath",stored_.helperPath);
-            if(stored_.helperPath!=defaults.helperPath&&log_)
-                log_->Info("settings","helper path adopted from the legacy settings");
-            stored_.legacyMigrated=true;
-            PersistSettings(true);
-            return;
-        }
-        stored_.distro=text("distro",stored_.distro);
-        // pythonExe / helperPath 是桥能否工作的两个键（旧版把它们写在 settings.json 里）：不搬就会出现
-        // "读不到 WSL 配置"——面板拿着自己的默认路径去跑不存在的助手脚本。
-        stored_.pythonExe=text("pythonExe",stored_.pythonExe);
-        stored_.helperPath=text("helperPath",stored_.helperPath);
+    if(onlyHelperKeys) {
+        // 只补连接信息，不动用户在新面板里改过的收藏/最近/主题等。
+        // 旧文件里的 helperPath 可能指向已删除的旧项目目录：搬入时同样过 NormalizeHelperPath。
+        const auto python=text("pythonExe",stored_.pythonExe);
+        const auto helper=NormalizeHelperPath(text("helperPath",stored_.helperPath));
+        const auto changed=python!=stored_.pythonExe||helper!=stored_.helperPath;
+        stored_.pythonExe=python;
+        stored_.helperPath=helper;
+        if(changed&&log_) log_->Info("settings","helper path adopted from the legacy settings");
+        stored_.legacyMigrated=true;
+        // 无条件落盘：Load 时的 NormalizeHelperPath 只改内存，磁盘上的旧路径要靠这里写回一次
+        // （否则文件里永远留着已删除目录的路径，排查时误导）。
+        PersistSettings(true);
+        return;
+    }
+    stored_.distro=text("distro",stored_.distro);
+    // pythonExe / helperPath 是桥能否工作的两个键（旧版把它们写在 settings.json 里）：不搬就会出现
+    // "读不到 WSL 配置"——面板拿着自己的默认路径去跑不存在的助手脚本。
+    stored_.pythonExe=text("pythonExe",stored_.pythonExe);
+    stored_.helperPath=NormalizeHelperPath(text("helperPath",stored_.helperPath));
         stored_.webuiPort=number("webuiPort",stored_.webuiPort);
         stored_.gatewayPort=number("gatewayPort",stored_.gatewayPort);
         stored_.pollSeconds=std::clamp(number("pollSec",stored_.pollSeconds),5,3600);

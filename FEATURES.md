@@ -26,7 +26,7 @@
 
 ### 1.1 定位
 
-- 与 `hermes-panel/wsl/hermes-panel-apply.py` **并列**的**只读**脚本（apply 是唯一写入者，本脚本
+- 与 `tools/hermes-panel-apply.py`（已并入本仓库）**并列**的**只读**脚本（apply 是唯一写入者，本脚本
   **永不写 config/.env**，只读 + 发网络探针）。
 - 协议与 apply 相同：stdin 读一行 JSON `{"cmd":"..."}`，stdout 回一行 JSON `{"ok":true,"data":{...}}`。
 - 放在 Windows 侧 `projects/hermes-panel-native/tools/`，WSL 通过 `/mnt/e/...` 执行（与 apply 同机制）。

@@ -7,8 +7,19 @@
 namespace hermes {
 // 收藏 / 最近使用的条数上限（旧 main.js 的 FAVORITES_MAX / RECENTS_MAX）。
 // 放在数据层：**加载时**也要按它截断 —— 被篡改或损坏的 settings.json 里可能有几十万条，
-// 只靠写入路径限长会让启动时把整份数组读进内存（实测 2MB/20 万条不会崩，但没有意义）。
+// 只靠写入路径限长会让启动时把整份数据读进内存（实测 2MB/20 万条不会崩，但没有意义）。
 constexpr int kFavoritesMax=200,kRecentsMax=12;
+
+// WSL 侧写助手（config.yaml / .env 的唯一写入者）随项目并入本仓库 tools/，WSL 经 /mnt/e 执行；
+// 与 readHelperPath 同一定位方式。历史上它住在旧 Electron 项目的 wsl/ 目录（已删除），
+// 旧内置默认还指向过 WSL home（那里从来没有这个文件）——这三类旧值加载时就地改指仓库内脚本，
+// 用户存好的 settings.json 不用动（NormalizeHelperPath，settings.cpp）。
+constexpr const char* kDefaultHelperPath=
+    "/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-apply.py";
+constexpr const char* kLegacyHelperPathHome="~/hermes-panel-apply.py";
+constexpr const char* kLegacyHelperPathOld=
+    "/mnt/e/AI/Zcode/projects/hermes-panel/wsl/hermes-panel-apply.py";
+std::string NormalizeHelperPath(std::string path);
 // Persisted shell state (DESIGN §6.4 mapping). Keys mirror the old Electron settings.json where the
 // meaning is unchanged, so a migration tool can translate one into the other.
 struct Settings {
@@ -30,7 +41,7 @@ struct Settings {
     // 与旧版主进程的 SETTING_DEFAULTS.distro 一致（审计 F-014）。
     std::string distro="Ubuntu-24.04";
     std::string pythonExe="python3";
-    std::string helperPath="~/hermes-panel-apply.py";
+    std::string helperPath=kDefaultHelperPath;
     // 只读助手（diagnose/usage/probe）：与 apply 并列，永不写配置。
     std::string readHelperPath="/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-read.py";
     int webuiPort=8787;

@@ -1,7 +1,8 @@
 # DESIGN —— hermes-panel-native（原生移植）
 
 > 权威来源：旧版 Electron 实现 `projects/hermes-panel`（`renderer/index.html`、`renderer/styles.css`、
-> `renderer/app.js`、`renderer/icons.js`、`preload.js`、`main.js`）与 WSL 侧 `wsl/hermes-panel-apply.py`。
+> `renderer/app.js`、`renderer/icons.js`、`preload.js`、`main.js`，目录已删除）与 WSL 侧写助手
+> `tools/hermes-panel-apply.py`（随本项目并入仓库；WSL 经 /mnt/e 执行）。
 > 本文件是**规格唯一权威**：要改行为先改这里，再改代码。
 
 ## 1. 目标
@@ -27,7 +28,7 @@ hermes-panel-native.exe（C++/Win32，单进程）
 
 **不变量**
 
-- **INV-H1 唯一写入者**：任何原生路径都不直接写 `~/.hermes/config.yaml` / `.env`；写入只经 `hermes-panel-apply.py`。
+- **INV-H1 唯一写入者**：任何原生路径都不直接写 `~/.hermes/config.yaml` / `.env`；写入只经 `tools/hermes-panel-apply.py`（已并入本仓库）。
 - **INV-H2 助手契约不变**：verb、参数白名单、JSON 输出形状与原版一致；原生侧只转发与解析。
 - **INV-H3 信息与观感对齐旧版**：§4 的逐项对照表是验收清单；文案、顺序、状态语义、配色一律照旧。
 - **INV-H4 旧版可回退**：Electron 版与 `%APPDATA%\HermesModelPanel` 保持可用、不被修改；新面板数据在
@@ -212,6 +213,7 @@ hermes-panel-native.exe（C++/Win32，单进程）
 
 | 版本 | 说明 |
 |---|---|
+| v1.36（2026-11-07） | **写助手并入本仓库**。旧 Electron 项目 `projects/hermes-panel` 已删除，WSL 侧写助手 `hermes-panel-apply.py`（config/.env 唯一写入者）迁入 `tools/`；默认 `helperPath` 与 `readHelperPath` 同定位（仓库内绝对路径，WSL 经 /mnt/e 执行）。加载设置与旧版迁移时把旧值（旧内置默认 `~/hermes-panel-apply.py`、旧绝对路径 `…/hermes-panel/wsl/hermes-panel-apply.py`、空串）就地归一化到新位置（`NormalizeHelperPath`），现存 settings.json 不用动；用户自定的其它路径不受影响。 |
 | v1.35（2026-10-30） | **贴条灯色/待重启条不再停在旧画面（真机"贴条红掉、状态都正常"）**。根因：v1.28 的"状态签名没变就不重绘"优化里，`ApplyHelperState()` 先把 `stateSignature_` 赋成新签名、之后才做 `signature!=stateSignature_` 比较——条件恒为假，状态变化永远不触发 `InvalidateAll()`，贴条只能停在展开/收起那一刻的旧帧（灯色、待重启琥珀条全部过期）；悬浮卡是悬停时现算，所以看起来"卡里全绿、贴条还是红/黄"。修法：先比较出 `changed`、再更新签名，`changed||!statePainted_` 才重绘（签名已覆盖所有影响画面的字段，v1.31 补过）。实测：重启后贴条三灯全绿、与悬浮卡一致。 |
 | v1.34（2026-10-28） | **置顶带守护：修"始终置顶仍偶尔被别的窗口盖住"（真机反馈）**。根因不是开关失效：`WS_EX_TOPMOST` 只保证"进置顶带"，带内 z-order 仍按"谁最后被抬高"排——截图贴图、其他挂件面板等任何程序之后调用 `SetWindowPos(HWND_TOPMOST)` 或弹出新的置顶窗口，都会落到带顶把面板压住；而置顶只在创建与切换那一刻设置一次，之后从不重抬。修法：新增 500ms 的 `kTopmostGuardTimer`（挂在 panel_ 上，`EnforceTopmost()` 顺带管 strip_）——只有当带内确有"可见、与本窗口相交的**外来** topmost"时才抬一次（`CoveredByForeignWindow()`：在窗口中心与四分之一处采样 `WindowFromPoint`，落在外来窗口上即判定被盖住——按像素的权威答案，不依赖对方样式位：真机 2026-10-29 实测 ChatGPT 桌面端"在置顶带里但 `WS_EX_TOPMOST` 位为 0"，按样式位的旧判定直接漏判；自己进程的窗口、任务栏 `Shell_*TrayWnd`、DWM cloaked 壳窗口不算遮挡；抬升走 TOPMOST→TOP 两步，`SWP_NOACTIVATE` 不抢焦点），平时零开销、不与同类挂件互相打架；顺带兜底把被第三方剥掉的 `WS_EX_TOPMOST` 风格补回（设置项关着时不动作，与 `SyncTopmostStyle` 不冲突）。独占全屏游戏与 UAC 提权全屏窗口仍会盖住置顶窗口，属系统规则，不在此列。门禁：`tools/topmost-guard-test.py`（起真实 exe，外来探针窗口盖住面板，断言三轮"盖住→抬回"循环——第三轮的压顶窗口在带内但 `WS_EX_TOPMOST` 位被清掉，复现真机场景；实测抬回 0.3–0.5s）。 |
 | v1.33（2026-10-26） | **托盘菜单重排 + 关于版本号 + 版本统一 1.0.0**。①菜单从"五组混排"重排为四组：面板（显隐/当前/切换/贴边收起/始终置顶）· 服务（立即刷新/打开 WebUI/重启网关/重启 WebUI 服务）· 外观与行为（主题/关闭按钮/开机自启/刷新间隔）· 系统（数据目录/关于/退出）；显隐项按状态写成「显示面板 / 展开面板 / 隐藏面板」，贴边项改成状态式勾选（勾=已收起），贴边态点「显示」直接展开成面板（以前只亮出 30×136 的贴条）。②「关于」显示版本号，取 exe 自身的 VERSIONINFO，不另抄一份。③开机自启必须指向当前 exe 才显示为已开启（去引号、忽略大小写），修掉"换目录后勾还在、启动的却是旧 exe"。④**版本失控修复**：`assets/hermes.rc` 的 `FILEVERSION/PRODUCTVERSION`（VS_FIXEDFILEINFO）自 1.1.6 起没再更新过，只有 `VALUE` 字符串跟着发版改 —— 关于对话框读到 1.1.6、文件属性显示 1.1.8。现在版本统一 **1.0.0**，`tools/package.ps1` 对 CMakeLists / app.manifest / rc 固定字段 / rc 字符串四处做**硬校验**，不一致直接打包失败；rc 仍存 UTF-8 with BOM。⑤滑条：`ThemePalette` 新增 `scrollTrack/scrollThumb/scrollThumbHot`（按主题正文色的透明度台阶），`widgets::DrawScrollBar` 统一五处（模型列表/回退链/页内/弹窗横向/下拉 + 探测结果列表），拇指与卡片对比度实测 3.26–3.72、轨道 1.17–1.25。 |
