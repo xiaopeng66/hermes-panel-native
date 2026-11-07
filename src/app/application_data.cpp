@@ -193,7 +193,7 @@ void Application::StartRefresh(bool quiet) {
     // 刷新进行中：同步章的图标绕中心旋转（真机反馈：不要「读取 WSL 配置…」的文字，改成图标转）。
     // v1.24：忙碌条在独立子窗口里画（单帧 0.05ms），16ms 一拍 = 60fps。
     if(panel_) { spinGlyph_.Restart();lastSpinTick_=0;SetTimer(panel_,kSpinTimer,kSpinIntervalMs,nullptr); }
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.helperPath,"hermes-panel-apply.py");
     const auto webuiPort=stored_.webuiPort,gatewayPort=stored_.gatewayPort;
     const bool first=firstRefresh_;
     firstRefresh_=false;
@@ -419,7 +419,7 @@ void Application::StartHelperAction(const std::string& verb,Json args,const std:
         return;
     }
     if(worker_.joinable()) worker_.join();
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.helperPath,"hermes-panel-apply.py");
     if(log_) log_->Info("data","action "+verb+" started");
     const int generation=probeFallbacks?++probeGeneration_:probeGeneration_;
     if(!SpawnWorker(worker_,&workerBusy_,nullptr,nullptr,[this,distro,python,path,verb,args,successToast,refreshAfter,probeFallbacks,wantsPreview,generation] {
@@ -691,7 +691,7 @@ void Application::StartSwitch(const std::string& providerId,const std::string& m
         return;
     }
     if(worker_.joinable()) worker_.join();
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.helperPath,"hermes-panel-apply.py");
     switchingKey_=providerId+"|"+model;
     switchingModel_=model;
     InvalidateAll();
@@ -767,7 +767,7 @@ void Application::StartReadHelper(const std::string& cmd) {
     if(worker_.joinable()) worker_.join();
     const auto token=++readToken_;
     readBusy_=true;
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.readHelperPath,"hermes-panel-read.py");
     if(log_) log_->Info("data","read "+cmd+" started");
     if(!SpawnWorker(worker_,&workerBusy_,nullptr,&readBusy_,[this,distro,python,path,cmd,token] {
         try {
@@ -868,7 +868,7 @@ void Application::SyncAllModels() {
         ShowToast(Narrow(L"没有可同步的供应商（都缺 base_url）"),2);
         return;
     }
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.readHelperPath,"hermes-panel-read.py");
     if(log_) log_->Info("data","sync-all started ("+std::to_string(targets.size())+" providers)");
     if(!SpawnWorker(syncAllWorker_,&syncAllBusy_,nullptr,nullptr,
         [this,distro,python,path,targets] {
@@ -962,7 +962,7 @@ void Application::ProbeAllModels() {
         ShowToast(Narrow(L"\u6CA1\u6709\u53EF\u63A2\u6D4B\u7684\u4F9B\u5E94\u5546\uFF08\u90FD\u7F3A base_url\uFF09"),2);
         return;
     }
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.readHelperPath,"hermes-panel-read.py");
     if(log_) log_->Info("data","probe-all started ("+std::to_string(targets.size())+" providers)");
     if(!SpawnWorker(allProbeWorker_,&allProbeBusy_,nullptr,nullptr,
         [this,distro,python,path,targets] {
@@ -1026,7 +1026,7 @@ void Application::StartLatencyProbe(bool manual) {
         addTarget(hermesState_.model.provider+"|"+hermesState_.model.model);
     for(const auto& key:stored_.favorites) addTarget(key);
     if(targets.empty()) { latencyBusy_=false;return; }
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.readHelperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.readHelperPath,"hermes-panel-read.py");
     if(log_) log_->Info("data","latency probe started ("+(manual?std::string("manual"):std::string("timer"))
         +", "+std::to_string(targets.size())+" model(s))");
     if(!SpawnWorker(latencyWorker_,&latencyBusy_,nullptr,nullptr,[this,distro,python,path,targets] {
@@ -1110,7 +1110,7 @@ void Application::StartProfileApply(const std::string& name) {
     }
     if(profileWorker_.joinable()) profileWorker_.join();
     const auto profile=*found;
-    const auto distro=stored_.distro,python=stored_.pythonExe,path=stored_.helperPath;
+    const auto distro=stored_.distro,python=stored_.pythonExe,path=ResolveHelperPath(stored_.helperPath,"hermes-panel-apply.py");
     const int fallbackCount=static_cast<int>(hermesState_.fallbacks.size());
     if(log_) log_->Info("data","profile apply started: "+profile.name);
     if(!SpawnWorker(profileWorker_,&profileBusy_,nullptr,nullptr,[this,distro,python,path,profile,fallbackCount] {
@@ -1466,7 +1466,7 @@ void Application::StartWsl() {
     // 离线卡的主按钮（旧 startWsl）：真的去敲一次 WSL，成功就立刻刷新。
     if(log_) log_->Info("data","start wsl requested");
     HelperBridge bridge;
-    bridge.Configure(Widen(stored_.distro),Widen(stored_.pythonExe),Widen(stored_.helperPath));
+    bridge.Configure(Widen(stored_.distro),Widen(stored_.pythonExe),Widen(ResolveHelperPath(stored_.helperPath,"hermes-panel-apply.py")));
 #if HERMES_CONTROL_PLANE
     if(const auto override=EnvironmentValue(L"HERMES_WSL_EXE");!override.empty())
         bridge.SetWslExecutable(override);

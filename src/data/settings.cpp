@@ -8,12 +8,45 @@
 #include <stdexcept>
 
 namespace hermes {
-// 助手脚本已并入本仓库 tools/，旧值（旧内置默认 ~、旧项目绝对路径）就地改指新位置；
-// 空串视为未设置，同样落回默认。用户自定的其它路径原样保留。
-// 放在匿名命名空间外：application.cpp 的旧版迁移（MigrateLegacySettings）也要用它。
+// 助手脚本随项目放在仓库 tools/。设置里这两个键**空串 = 自动**：按 exe 所在目录推算仓库根——
+// 便携布局是 <仓库>\dist-live\HermesModelPanelNative.exe（脚本就在 <仓库>\tools），再往上的
+// 目录层级逐级找 tools\<文件名>（最多 4 级，覆盖非标准安装深度）。Windows 侧拼出 WSL 的
+// /mnt/<盘>/... 路径；exe 不在盘根形态（UNC 等）或找不到 tools 时，回退到开发机仓库根
+// （kFallbackRepoRoot，保持旧默认行为）。用户显式设置的路径原样返回，任何自动值不落盘。
+std::string ResolveHelperPath(const std::string& stored,const char* fileName) {
+    if(!stored.empty()&&stored!=kLegacyHelperPathHome&&stored!=kLegacyHelperPathOld
+        &&stored!=kLegacyHelperPathNative&&stored!=kLegacyReadHelperPathNative)
+        return stored;
+    wchar_t exePath[MAX_PATH]{};
+    if(GetModuleFileNameW(nullptr,exePath,MAX_PATH)&&exePath[0]>=L'A'&&exePath[0]<=L'Z'
+        &&exePath[1]==L':') {
+        std::wstring directory=DirectoryOfPath(exePath);
+        for(int depth=0;depth<4&&!directory.empty();++depth) {
+            const auto candidate=directory+L"\\tools\\"+Widen(fileName);
+            if(GetFileAttributesW(candidate.c_str())!=INVALID_FILE_ATTRIBUTES) {
+                // W:/workspace → /mnt/w/workspace（小写盘符，与 /mnt 约定一致；盘符字母与
+                // 冒号都已在 posix 前缀里，遍历时跳过，否则拼出 /mnt/eE:/...）
+                std::string posix="/mnt/";
+                posix.push_back(static_cast<char>(tolower(exePath[0])));
+                const auto windows=directory+L"\\tools";
+                for(std::size_t index=2;index<windows.size();++index) {
+                    const wchar_t ch=windows[index];
+                    posix.push_back(ch==L'\\'?'/':static_cast<char>(ch));
+                }
+                return posix+"/"+fileName;
+            }
+            const auto slash=directory.find_last_of(L"\\/");
+            if(slash==std::wstring::npos) break;
+            directory.resize(slash);
+        }
+    }
+    return std::string{kFallbackRepoRoot}+"/tools/"+fileName;
+}
+// 旧值清成空串走自动：旧内置默认 ~、旧 Electron 项目绝对路径，以及 v1.0.0 发行版硬编码的
+// 开发机绝对路径（只可能由程序写入，设置页没有这两个键的输入框）；用户自定的其它路径原样保留。
 std::string NormalizeHelperPath(std::string path) {
-    if(path.empty()||path==kLegacyHelperPathHome||path==kLegacyHelperPathOld)
-        return std::string{kDefaultHelperPath};
+    if(path==kLegacyHelperPathHome||path==kLegacyHelperPathOld
+        ||path==kLegacyHelperPathNative||path==kLegacyReadHelperPathNative) return {};
     return path;
 }
 namespace {
@@ -99,9 +132,8 @@ Settings FromJson(const nlohmann::json& value) {
     settings.theme=StrOr(value,"theme",std::string{"system"});
     settings.distro=StrOr(value,"distro",std::string{"Ubuntu"});
     settings.pythonExe=StrOr(value,"pythonExe",std::string{"python3"});
-    settings.helperPath=NormalizeHelperPath(StrOr(value,"helperPath",std::string{kDefaultHelperPath}));
-    settings.readHelperPath=StrOr(value,"readHelperPath",
-        std::string{"/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-read.py"});
+    settings.helperPath=NormalizeHelperPath(StrOr(value,"helperPath",std::string{}));
+    settings.readHelperPath=NormalizeHelperPath(StrOr(value,"readHelperPath",std::string{}));
     settings.webuiPort=IntOr(value,"webuiPort",8787);
     settings.gatewayPort=IntOr(value,"gatewayPort",8642);
     // 加载即截断（与写入路径同一个上限）：损坏/手改的文件里可能有几十万条，

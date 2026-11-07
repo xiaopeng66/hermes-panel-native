@@ -2491,11 +2491,23 @@ void Application::MigrateLegacySettings() {
     // 旧 Electron 版的数据目录（%APPDATA%\HermesModelPanel）**只读**：把与面板行为有关的键搬一次，
     // 搬过就记 legacyMigrated，之后不再搬（旧版与其数据始终可回退）。
     //
-    // 例外：如果新设置里的 helperPath 还是内置默认值（早期版本迁移时漏搬了这两个键），而旧文件里有
-    // 真实值，就只补这两个键——否则面板会一直拿默认路径去跑不存在的助手脚本（真机上表现为"读不到配置"）。
-    const Settings defaults;
-    const auto helperLooksUnset=stored_.helperPath.empty()||stored_.helperPath==defaults.helperPath;
+    // 例外：如果新设置里的 helperPath 还是空（早期版本迁移时漏搬了这两个键），而旧文件里有
+    // 真实值，就只补这两个键——否则面板会一直拿空路径去跑不存在的助手脚本（真机上表现为"读不到配置"）。
+    // 注意：空串现在表示"自动推算"（ResolveHelperPath），所以"看起来未设置"只按空串判断。
+    const auto helperLooksUnset=stored_.helperPath.empty();
     const auto onlyHelperKeys=stored_.legacyMigrated&&helperLooksUnset;
+    // 历史发行版把助手路径硬编码进 settings.json（设置页没有这两个键的输入框，只可能由
+    // 程序写入）：清成空串走自动推算，并落盘一次——否则换机器后文件里永远留着旧机器的路径。
+    {
+        const auto helper=NormalizeHelperPath(stored_.helperPath);
+        const auto readHelper=NormalizeHelperPath(stored_.readHelperPath);
+        if(helper!=stored_.helperPath||readHelper!=stored_.readHelperPath) {
+            stored_.helperPath=helper;
+            stored_.readHelperPath=readHelper;
+            if(log_) log_->Info("settings","helper paths normalized to auto-detect");
+            PersistSettings(true);
+        }
+    }
     if(stored_.legacyMigrated&&!helperLooksUnset) return;
     std::wstring directory=legacyDirectory_.empty()
         ?LegacyDefaultDirectory():legacyDirectory_;
@@ -2522,7 +2534,8 @@ void Application::MigrateLegacySettings() {
         };
     if(onlyHelperKeys) {
         // 只补连接信息，不动用户在新面板里改过的收藏/最近/主题等。
-        // 旧文件里的 helperPath 可能指向已删除的旧项目目录：搬入时同样过 NormalizeHelperPath。
+        // 旧文件里的 helperPath 可能指向已删除的旧项目目录：搬入时同样过 NormalizeHelperPath
+        // （旧值清成空串走自动推算，用户自定值保留）。
         const auto python=text("pythonExe",stored_.pythonExe);
         const auto helper=NormalizeHelperPath(text("helperPath",stored_.helperPath));
         const auto changed=python!=stored_.pythonExe||helper!=stored_.helperPath;
@@ -2530,8 +2543,8 @@ void Application::MigrateLegacySettings() {
         stored_.helperPath=helper;
         if(changed&&log_) log_->Info("settings","helper path adopted from the legacy settings");
         stored_.legacyMigrated=true;
-        // 无条件落盘：Load 时的 NormalizeHelperPath 只改内存，磁盘上的旧路径要靠这里写回一次
-        // （否则文件里永远留着已删除目录的路径，排查时误导）。
+        // 无条件落盘：磁盘上的旧路径要在这里写回一次（清成空串 = 自动），否则文件里
+        // 永远留着已删除目录的路径，排查时误导。
         PersistSettings(true);
         return;
     }

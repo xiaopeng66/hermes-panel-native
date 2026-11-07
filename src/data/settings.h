@@ -10,16 +10,25 @@ namespace hermes {
 // 只靠写入路径限长会让启动时把整份数据读进内存（实测 2MB/20 万条不会崩，但没有意义）。
 constexpr int kFavoritesMax=200,kRecentsMax=12;
 
-// WSL 侧写助手（config.yaml / .env 的唯一写入者）随项目并入本仓库 tools/，WSL 经 /mnt/e 执行；
-// 与 readHelperPath 同一定位方式。历史上它住在旧 Electron 项目的 wsl/ 目录（已删除），
-// 旧内置默认还指向过 WSL home（那里从来没有这个文件）——这三类旧值加载时就地改指仓库内脚本，
-// 用户存好的 settings.json 不用动（NormalizeHelperPath，settings.cpp）。
-constexpr const char* kDefaultHelperPath=
-    "/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-apply.py";
+// WSL 侧助手（写助手 hermes-panel-apply.py 是 config.yaml / .env 的唯一写入者；只读助手
+// hermes-panel-read.py 与它并列）随项目放在仓库 tools/，WSL 经 /mnt/<盘> 执行。
+// 设置里的 helperPath / readHelperPath **空串 = 自动**：按 exe 所在目录推算仓库根
+// （dist-live 在 <仓库>\dist-live，脚本在 <仓库>\tools），换盘符/换目录/拷到别的机器都不用改设置。
+// 推算失败（目录布局不是仓库）回退到开发机的仓库路径。历史发行版把默认值硬编码成绝对路径，
+// 那些值只可能由程序写入（设置页没有这两个键的输入框），加载时清成空串走自动
+// （NormalizeHelperPath）——不清的话换机器后设置里永远留着旧机器的路径。
 constexpr const char* kLegacyHelperPathHome="~/hermes-panel-apply.py";
 constexpr const char* kLegacyHelperPathOld=
     "/mnt/e/AI/Zcode/projects/hermes-panel/wsl/hermes-panel-apply.py";
+constexpr const char* kLegacyHelperPathNative=
+    "/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-apply.py";
+constexpr const char* kLegacyReadHelperPathNative=
+    "/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-read.py";
+// 开发机的仓库根（回退用；发行布局推不出时才用到）。
+constexpr const char* kFallbackRepoRoot="/mnt/e/AI/Zcode/projects/hermes-panel-native";
 std::string NormalizeHelperPath(std::string path);
+// 空/遗留值 → 按 exe 位置推算出的 WSL 路径；用户显式设置的路径原样返回。
+std::string ResolveHelperPath(const std::string& stored,const char* fileName);
 // Persisted shell state (DESIGN §6.4 mapping). Keys mirror the old Electron settings.json where the
 // meaning is unchanged, so a migration tool can translate one into the other.
 struct Settings {
@@ -41,9 +50,9 @@ struct Settings {
     // 与旧版主进程的 SETTING_DEFAULTS.distro 一致（审计 F-014）。
     std::string distro="Ubuntu-24.04";
     std::string pythonExe="python3";
-    std::string helperPath=kDefaultHelperPath;
+    std::string helperPath;   // 空 = 按 exe 位置自动推算（ResolveHelperPath）
     // 只读助手（diagnose/usage/probe）：与 apply 并列，永不写配置。
-    std::string readHelperPath="/mnt/e/AI/Zcode/projects/hermes-panel-native/tools/hermes-panel-read.py";
+    std::string readHelperPath;   // 空 = 同上（文件名 hermes-panel-read.py）
     int webuiPort=8787;
     int gatewayPort=8642;
     std::vector<std::string> favorites;               // the old setSetting(favorites) list - panel-local
