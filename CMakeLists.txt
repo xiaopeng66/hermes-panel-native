@@ -42,6 +42,24 @@ add_executable(widget-gallery tools/widget_gallery.cpp src/render/icons.cpp src/
 target_include_directories(widget-gallery PRIVATE src)
 target_link_libraries(widget-gallery PRIVATE d2d1 dwrite windowscodecs ole32)
 
+# ---- 安装版（installer）：单文件 setup.exe + 独立卸载器 ----
+# setup.exe 构建完后再由 tools/build-installer.ps1 把 主程序/卸载器/第三方声明 拼到文件尾部
+# （footer 记长度），所以发布出去的安装包仍是**一个 exe**，不需要解压目录。
+add_executable(hermes-panel-setup WIN32 installer/setup.cpp installer/common.cpp installer/setup.rc)
+target_include_directories(hermes-panel-setup PRIVATE installer "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+target_link_libraries(hermes-panel-setup PRIVATE user32 shell32 ole32 advapi32 shlwapi uuid)
+target_compile_definitions(hermes-panel-setup PRIVATE "HERMES_VERSION=L\"${PROJECT_VERSION}\"")
+target_link_options(hermes-panel-setup PRIVATE "/MANIFEST:EMBED"
+    "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/installer/installer.manifest")
+
+add_executable(hermes-panel-uninstaller WIN32 installer/uninstall.cpp installer/common.cpp installer/uninstall.rc)
+target_include_directories(hermes-panel-uninstaller PRIVATE installer "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+target_link_libraries(hermes-panel-uninstaller PRIVATE user32 shell32 ole32 advapi32 shlwapi uuid)
+target_compile_definitions(hermes-panel-uninstaller PRIVATE "HERMES_VERSION=L\"${PROJECT_VERSION}\"")
+target_link_options(hermes-panel-uninstaller PRIVATE "/MANIFEST:EMBED"
+    "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/installer/installer.manifest")
+
+
 # 2026-10-26（用户要求）：测试门禁整套移除 —— tests/、tools/e2e.ps1、tools/full_audit.py、
 # 夹具（fake-wsl / fake-hermes / icons-check / geometry-probe / unc-parity 驱动）都已从仓库摘掉
 # （备份在 E:/AI/Zcode/backups/hermes-panel-native-gates-20261026）。本文件只留产品目标：

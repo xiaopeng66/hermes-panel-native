@@ -624,6 +624,7 @@ void Application::SettingsPageClick(float x,float y) {
             case 1: SetSetting("autoReloadGateway",stored_.autoReloadGateway?"0":"1");break;
             case 2: SetSetting("alwaysOnTop",stored_.topmost?"0":"1");break;
             case 3: SetSetting("latencyProbe",stored_.latencyProbe?"0":"1");break;
+            case 4: SetAutoStart(!AutoStartEnabled());InvalidateAll();break;
             default: break;
             }
             return;

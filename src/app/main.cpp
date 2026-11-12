@@ -265,7 +265,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (std::wstring(arguments[index]) == L"--legacy-dir") legacyDirectory = arguments[index + 1];
     }
 #endif
+    // 登录自启（安装器写入 Run 键的命令带 --startup）：启动后只挂托盘，不弹面板。
+    bool startupHidden = false;
+    for (int index = 1; index < argumentCount; ++index) {
+        if (std::wstring(arguments[index]) == L"--startup") startupHidden = true;
+    }
     if (arguments) LocalFree(arguments);
+    if (startupHidden) app.SetStartupHidden(true);
     // 便携目录首次启动：把旧 %LOCALAPPDATA% 里的设置/档案复制过来。门禁夹具用 --data-dir
     // 指定自己的目录，绝不把真机设置搬进夹具。
     if(!explicitDataDirectory) MigrateLegacyDataDirectory(dataDirectory);

@@ -472,12 +472,16 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
     layout.searchIcon=Box(layout.search.left+dip(8),layout.search.top+dip(8),dip(14),dip(14));
 
     // v1.25：搜索框右端是「✕ + 刷新同步」两个按钮，互不重叠；文字区在它们左边。
-    layout.syncModels=Box(layout.search.right-dip(92),layout.search.top+dip(5),dip(84),
+    // v1.39：按钮宽度按「同步 99/99」预留 —— caption 11px 下约 59 DIP，加上图标格（9+12+5）
+    // 与右内边距 6，84 DIP 只够「刷新同步」；同步进度一到两位数就被截成「同步 12/1…」
+    // （真机反馈）。94 DIP 留出 62 DIP 文字区，两位/两位的进度完整显示；
+    // 三位数时渲染层改用紧凑的「n/N」，也放得下。
+    layout.syncModels=Box(layout.search.right-dip(102),layout.search.top+dip(5),dip(94),
         dip(kSearchHeight)-dip(10));
 
-    layout.searchClear=Box(layout.search.right-dip(114),layout.search.top+dip(5),dip(20),dip(20));
+    layout.searchClear=Box(layout.search.right-dip(124),layout.search.top+dip(5),dip(20),dip(20));
 
-    layout.searchHint=Box(layout.search.right-dip(134),layout.search.top+dip(6),dip(14),dip(18));
+    layout.searchHint=Box(layout.search.right-dip(144),layout.search.top+dip(6),dip(14),dip(18));
 
     layout.searchText=Box(layout.search.left+dip(29),layout.search.top,
         (view.searchHasText?layout.searchClear.left:layout.searchHint.left)

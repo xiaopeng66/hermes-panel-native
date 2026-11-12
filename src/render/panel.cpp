@@ -2107,9 +2107,14 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
         } else {
             Icon(target,iconBox,IconId::RefreshCw,palette.dim,1.7f);
         }
+        // 进度文案：两位数/两位数（同步 99/99）在加宽后的 62 DIP 文字区里放得下；
+        // 三位数改紧凑的「n/N」，不再为极端数量挤占搜索框（真机 v1.39 反馈：12/17 被截断）。
+        const bool syncCompact=view.syncDone>=100||view.syncTotal>=100;
         const auto syncLabel=view.syncBusy&&view.syncTotal>0
-            ? ("\xE5\x90\x8C\xE6\xAD\xA5 "+std::to_string(view.syncDone)+"/"
-                +std::to_string(view.syncTotal))
+            ? (syncCompact
+                ? std::to_string(view.syncDone)+"/"+std::to_string(view.syncTotal)
+                : ("\xE5\x90\x8C\xE6\xAD\xA5 "+std::to_string(view.syncDone)+"/"
+                    +std::to_string(view.syncTotal)))
             : std::string("\xE5\x88\xB7\xE6\x96\xB0\xE5\x90\x8C\xE6\xAD\xA5");
         Text(target,syncLabel,
             D2D1::RectF(iconLeft+glyph+Dip(5,scale_),layout.syncModels.top,

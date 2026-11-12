@@ -56,6 +56,20 @@ std::wstring ExecutableVersion() {
         +std::to_wstring(HIWORD(info->dwFileVersionLS))+L"."
         +std::to_wstring(LOWORD(info->dwFileVersionLS));
 }
+// Run 键里的命令行 → 第一个参数（去引号）。安装器与 SetAutoStart 写的是
+// "<exe>" --startup；旧版本只写 "<exe>"，两种都要能认出来。
+std::wstring FirstCommandArgument(const std::wstring& command) {
+    std::size_t index=0;
+    while(index<command.size()&&(command[index]==L' '||command[index]==L'\t')) ++index;
+    if(index>=command.size()) return {};
+    if(command[index]==L'"') {
+        const auto close=command.find(L'"',index+1);
+        if(close==std::wstring::npos) return {};
+        return command.substr(index+1,close-index-1);
+    }
+    const auto end=command.find_first_of(L" \t",index);
+    return command.substr(index,end==std::wstring::npos?std::wstring::npos:end-index);
+}
 NativeMonitor ReadMonitor(HMONITOR monitor) {    MONITORINFOEXW info{};info.cbSize=sizeof(info);
     if(!monitor || !GetMonitorInfoW(monitor,&info)) throw std::runtime_error("Monitor information unavailable");
     UINT x=96,y=96;
@@ -170,6 +184,8 @@ bool Application::Initialize(HINSTANCE instance,HWND control,SettingsStore* sett
     // The persisted presentation decides what the user sees at startup: a docked panel comes back as
     // the collapsed strip, exactly like the tray "show" path (DESIGN §5.2 row 1, §6.5 step 5).
     state_=model_.edge==Edge::None?State::Floating:State::Collapsed;
+    // --startup（安装器写进 Run 键的命令带这个参数）：登录自启只挂托盘，不把面板弹到桌面上。
+    if(startupHidden_) state_=State::Hidden;
     geometry_.Place(model_,monitor_.geometry,state_,"startup");
     geometry_.Visibility(state_);
     geometry_.Validate(model_,monitor_.geometry,state_);
@@ -814,9 +830,11 @@ void Application::SyncNativeFields(const PanelLayout& layout) {
             // 左边留出放大镜；右边让开 ✕ 清空按钮与「刷新同步」按钮（两者都在搜索框右端）。
             // （真机反馈：✕ / 同步按钮被原生输入框盖住，点不到、文字也看不到）。
             const auto leftInset=static_cast<LONG>(ScaleDip(30,dpi));
-            // 右侧要让开 ✕（search.right-114..-94）与「刷新同步」按钮。原来给 100 DIP，只让到
-            // ✕ 的中间，清空按钮被输入框盖住大半——真机上只剩紧贴边框的一条":"。
-            const auto rightInset=static_cast<LONG>(ScaleDip(118,dpi));
+            // 右侧要让开 ✕ 与「刷新同步」按钮：右内缩直接取 layout 里 ✕ 的左缘再加 4 DIP。
+            // 以前写死 118 DIP，按钮为两位数进度加宽（v1.39：84→94）后就会盖住 ✕ 的左半边；
+            // 现在只改 layout 一处，原生输入框自动跟着让位。
+            const auto rightInset=static_cast<LONG>(layout.search.right-layout.searchClear.left)
+                +static_cast<LONG>(ScaleDip(4,dpi));
             visibleFields[&search_]=RECT{static_cast<LONG>(layout.search.left)+leftInset,
                 static_cast<LONG>(layout.search.top)+static_cast<LONG>(ScaleDip(3,dpi)),
                 static_cast<LONG>(layout.search.right)-rightInset,
@@ -1891,23 +1909,28 @@ bool Application::AutoStartEnabled() const {
     const auto status=RegQueryValueExW(key,L"HermesModelPanelNative",nullptr,&type,reinterpret_cast<BYTE*>(value),&size);
     RegCloseKey(key);
     if(status!=ERROR_SUCCESS||type!=REG_SZ) return false;
+    std::wstring command(value,size/sizeof(wchar_t));
+    while(!command.empty()&&command.back()==L'\0') command.pop_back();
     // 必须**指向当前这个 exe** 才算开启：换目录/装新版后，注册表里残留的旧路径不该继续显示成
-    // "已开启"（否则勾是亮的、开机启动的却是旧版本）。去掉引号、忽略大小写比较。
-    std::wstring stored=value;
-    if(stored.size()>=2&&stored.front()==L'"'&&stored.back()==L'"') stored=stored.substr(1,stored.size()-2);
+    // "已开启"（否则勾是亮的、开机启动的却是旧版本）。命令可能带参数（安装器写的是
+    // "<exe>" --startup），只比较第一个参数（支持引号），忽略大小写。
     wchar_t self[MAX_PATH]{};
-    if(!GetModuleFileNameW(nullptr,self,MAX_PATH)) return false;
-    return _wcsicmp(stored.c_str(),self)==0;
+    const auto length=GetModuleFileNameW(nullptr,self,MAX_PATH);
+    if(length==0||length>=MAX_PATH) return false;
+    const auto path=FirstCommandArgument(command);
+    return !path.empty()&&_wcsicmp(path.c_str(),self)==0;
 }
 void Application::SetAutoStart(bool enabled) {
     HKEY key=nullptr;
     if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,nullptr,0,KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS) return;
     if(enabled) {
         wchar_t path[MAX_PATH]{};
-        GetModuleFileNameW(nullptr,path,MAX_PATH);
-        const std::wstring command=L"\""+std::wstring(path)+L"\"";
-        RegSetValueExW(key,L"HermesModelPanelNative",0,REG_SZ,reinterpret_cast<const BYTE*>(command.c_str()),
-            static_cast<DWORD>((command.size()+1)*sizeof(wchar_t)));
+        if(GetModuleFileNameW(nullptr,path,MAX_PATH)) {
+            // --startup：登录时启动到托盘，不弹面板（与安装器写入的命令保持同一份格式）。
+            const std::wstring command=L"\""+std::wstring(path)+L"\" --startup";
+            RegSetValueExW(key,L"HermesModelPanelNative",0,REG_SZ,reinterpret_cast<const BYTE*>(command.c_str()),
+                static_cast<DWORD>((command.size()+1)*sizeof(wchar_t)));
+        }
     } else {
         RegDeleteValueW(key,L"HermesModelPanelNative");
     }
@@ -2267,6 +2290,8 @@ PanelViewModel Application::CurrentView() {
         page.theme=stored_.theme;
         page.previewDiff=stored_.previewDiff;
         page.autoReloadGateway=stored_.autoReloadGateway;
+        // 注册表是唯一真相：勾选状态每次建视图时现读，托盘菜单/安装器改过也能立刻对上。
+        page.autoStart=AutoStartEnabled();
         page.latencyProbe=stored_.latencyProbe;
         page.latencyMinutes=stored_.latencyMinutes;
         page.widgetStyle=stored_.widgetStyle;

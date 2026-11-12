@@ -382,6 +382,7 @@ struct SettingsPageInput {
     std::string distro,hotkey,closeAction,theme,meta;
     int webuiPort=8787,pollSeconds=60;
     bool previewDiff=false,autoReloadGateway=false,alwaysOnTop=false;
+    bool autoStart=false;                           // 开机自启（HKCU Run 键，指向当前 exe）
     bool latencyProbe=false;                        // F4：延迟探测开关
     int latencyMinutes=5;                           // F4：5/15/60
     std::string widgetStyle="capsule";   // 只剩铭牌/胶囊两套（设置层会给出真实值）               // G11：贴边挂件样式

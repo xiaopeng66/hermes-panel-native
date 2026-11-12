@@ -136,6 +136,10 @@ Json Application::Dump() const {
         {"state",static_cast<int>(state_)},{"edge",static_cast<int>(model_.edge)},
         {"anchor",model_.anchor},{"compact",false},   // 紧凑视图已删除
         {"pinned",stored_.topmost},{"activePage",activePage_},
+        // 「刷新同步」进度（布局回归用）：文案「同步 n/N」的宽度直接吃按钮宽度，
+        // 两位数/两位数曾经被截断（v1.39）。门禁/截图据此确认按钮与文字同帧一致。
+        {"sync",{{"busy",syncAllBusy_.load()},{"done",syncAllDone_.load()},
+            {"total",syncAllTotal_.load()}}},
         {"search",{{"text",search_.TextUtf8()},{"focused",focusedField_==&search_},
             {"composing",search_.Composing()},{"composingText",Narrow(search_.composition)}}},
         {"pollSeconds",stored_.pollSeconds},{"topmost",stored_.topmost},
@@ -914,6 +918,17 @@ Json Application::Command(const Json& request) {
         }
         if(request.contains("theme")) {
             SetSetting("theme",request["theme"].get<std::string>());
+        }
+        // 「同步 n/N」布局回归：直接把进度摆到按钮上（不跑真实写操作）。
+        // [done,total]；done<0 表示收工。只有 Debug 控制面存在，发布版没有这条路径。
+        if(request.contains("syncProgress")) {
+            const auto values=request["syncProgress"].get<std::vector<int>>();
+            const int done=values.empty()?-1:values[0];
+            const int total=values.size()>1?values[1]:0;
+            syncAllBusy_.store(done>=0);
+            syncAllDone_.store(std::max(done,0));
+            syncAllTotal_.store(std::max(total,0));
+            InvalidateAll();
         }
         // 动效开关（门禁用确定性模式）：animations=false 时所有进度恒为 1，即无动画。
         if(request.contains("animations")) {

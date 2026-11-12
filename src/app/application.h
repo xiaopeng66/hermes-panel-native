@@ -57,6 +57,8 @@ public:
     bool Initialize(HINSTANCE instance,HWND control,SettingsStore* settings,Log* log);
     // 旧设置目录的覆盖（门禁夹具用，避免碰真实的 %APPDATA%\HermesModelPanel）。
     void SetLegacyDirectory(std::wstring directory) { legacyDirectory_=std::move(directory); }
+    // --startup（安装器写进 Run 键的那条命令带它）：登录自启时只挂托盘，不把面板弹到桌面。
+    void SetStartupHidden(bool hidden) { startupHidden_=hidden; }
     Settings SnapshotSettings() const;
     void PersistSettings(bool force=false);
     ~Application();
@@ -178,6 +180,7 @@ private:
     GeometryModel model_;
     NativeMonitor monitor_;
     State state_=State::Floating;
+    bool startupHidden_=false;   // --startup：启动后停在托盘（安装器自启项）
     GeometryController geometry_;
     bool hotkeysRegistered_=false;
     int hotkeyErrors_[3]{0,0,0};

@@ -6,7 +6,13 @@ WSL 里 Hermes 的模型与供应商管理悬浮窗：C++20 + 纯 Win32 + Direct
 
 需要 Windows 10/11，以及一台跑着 Hermes 的 WSL 发行版。
 
-- 直接运行：下载发行版里的 `HermesModelPanelNative.exe`，校验值见发行版附带的 `manifest.sha256`。
+- 安装版（推荐）：运行 `HermesModelPanelNative-Setup-<版本>.exe`。默认安装到
+  `D:\自制小工具\HermesModelPanelNative`（可改路径），安装时可勾选**开机自启**（登录后启动到托盘）、
+  桌面/开始菜单快捷方式；「应用和功能」里有卸载入口，卸载时可选择保留 `data` 设置与日志。
+  静默安装：`HermesModelPanelNative-Setup-<版本>.exe --silent [--dir=<路径>] [--no-autostart]`。
+  安装包由 `tools/build-installer.ps1` 生成（单文件，主程序/卸载器在文件尾部）。
+- 便携版：下载发行版里的 `HermesModelPanelNative.exe`，校验值见发行版附带的 `manifest.sha256`。
+  数据放在 exe 旁边的 `data\`，整个文件夹拷走即可迁移。
 - 从源码构建：`cmake -S . -B build -G "Visual Studio 17 2022" -A x64`，随后 `cmake --build build --config Release --parallel`。
 
 ## 用法
@@ -17,7 +23,7 @@ WSL 里 Hermes 的模型与供应商管理悬浮窗：C++20 + 纯 Win32 + Direct
 - **回退链页**：梯级列表上移 / 下移 / 移除，追加条目，逐条探测连通性。
 - **添加页**：新建供应商、给已有供应商加模型、删除供应商。
 - **备份页**：每次写入前自动备份 `config.yaml` 与 `.env`，可筛选并一键恢复。
-- **设置页**：WSL 发行版、WebUI 端口、刷新间隔、写入前 diff、自动重启网关、置顶、关闭行为、主题、呼出热键。
+- **设置页**：WSL 发行版、WebUI 端口、刷新间隔、写入前 diff、自动重启网关、置顶、开机自启、关闭行为、主题、呼出热键。
 
 数据（设置 / 档案 / 日志）默认放在 **exe 所在目录的 `data\` 子文件夹**（便携）：复制整个文件夹
 就带走全部设置。只有程序被放在只读位置（如 `Program Files`）时才回退到
