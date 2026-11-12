@@ -2094,31 +2094,16 @@ void PanelRenderer::Draw(ID2D1RenderTarget* target,IDWriteFactory* text,const Pa
         const auto skin=widgets::ButtonSkinOf(widgets::ButtonVariant::Normal,
             hovered_(ControlId::SyncModels)?widgets::Visual::Hovered:widgets::Visual::Normal,palette);
         widgets::DrawButtonShape(target,brush_.Get(),layout.syncModels,skin,scale_);
-        const auto glyph=Dip(12.0f,scale_);
-        const auto iconLeft=layout.syncModels.left+Dip(9,scale_);
-        const auto iconBox=D2D1::RectF(iconLeft,
-            (layout.syncModels.top+layout.syncModels.bottom)/2.0f-glyph/2.0f,iconLeft+glyph,
-            (layout.syncModels.top+layout.syncModels.bottom)/2.0f+glyph/2.0f);
+        // 图标格与文案起点都由布局算好（v1.40：图标 + 文字整体居中），这里只照着画；
+        // 旋转子窗口也按同一个 syncIcon 落位，不再各自推算「左缘 + 9 DIP」。
         if(view.syncBusy) {
             // 进行中：这一格**留给独立的 SpinGlyph 子窗口**（它自己按时间转，单帧 <0.2ms）。
             // 主面板整窗重绘 10–170ms，在这里画旋转只会"不转、只在抖"（真机实测）。
             // 不画任何东西：按钮底色已由 DrawButtonShape 铺好，子窗口正好盖住这一格。
-            (void)iconBox;
         } else {
-            Icon(target,iconBox,IconId::RefreshCw,palette.dim,1.7f);
+            Icon(target,layout.syncIcon,IconId::RefreshCw,palette.dim,1.7f);
         }
-        // 进度文案：两位数/两位数（同步 99/99）在加宽后的 62 DIP 文字区里放得下；
-        // 三位数改紧凑的「n/N」，不再为极端数量挤占搜索框（真机 v1.39 反馈：12/17 被截断）。
-        const bool syncCompact=view.syncDone>=100||view.syncTotal>=100;
-        const auto syncLabel=view.syncBusy&&view.syncTotal>0
-            ? (syncCompact
-                ? std::to_string(view.syncDone)+"/"+std::to_string(view.syncTotal)
-                : ("\xE5\x90\x8C\xE6\xAD\xA5 "+std::to_string(view.syncDone)+"/"
-                    +std::to_string(view.syncTotal)))
-            : std::string("\xE5\x88\xB7\xE6\x96\xB0\xE5\x90\x8C\xE6\xAD\xA5");
-        Text(target,syncLabel,
-            D2D1::RectF(iconLeft+glyph+Dip(5,scale_),layout.syncModels.top,
-                layout.syncModels.right-Dip(6,scale_),layout.syncModels.bottom),caption_.Get(),
+        Text(target,view.syncLabel,layout.syncText,caption_.Get(),
             palette.text,DWRITE_TEXT_ALIGNMENT_LEADING,true);
     }
     Filters(target,layout,view,palette);

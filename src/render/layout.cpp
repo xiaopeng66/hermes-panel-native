@@ -478,6 +478,22 @@ PanelLayout ComputeLayout(const PanelViewModel& view,float width,float height,fl
     // 三位数时渲染层改用紧凑的「n/N」，也放得下。
     layout.syncModels=Box(layout.search.right-dip(102),layout.search.top+dip(5),dip(94),
         dip(kSearchHeight)-dip(10));
+    // v1.40：图标 + 文案作为一组整体居中（按钮从 84 加宽到 94 后，固定 9 DIP 的图标
+    // 偏移会让文字看起来偏左）。旋转子窗口按 syncIcon 落位，文案按 syncText 绘制。
+    {
+        const float iconSize=dip(12.0f);
+        const float gap=dip(5.0f);
+        const auto label=view.syncLabel.empty()
+            ?std::string("\xE5\x88\xB7\xE6\x96\xB0\xE5\x90\x8C\xE6\xAD\xA5"):view.syncLabel;
+        const float contentWidth=iconSize+gap+EstimateWidth(label,11.0f)*scale;
+        const float left=layout.syncModels.left
+            +(layout.syncModels.right-layout.syncModels.left-contentWidth)/2.0f;
+        const float centreY=(layout.syncModels.top+layout.syncModels.bottom)/2.0f;
+        layout.syncIcon=Box(left,centreY-iconSize/2.0f,iconSize,iconSize);
+        layout.syncText=Box(left+iconSize+gap,layout.syncModels.top,
+            layout.syncModels.right-(left+iconSize+gap)-dip(2.0f),
+            layout.syncModels.bottom-layout.syncModels.top);
+    }
 
     layout.searchClear=Box(layout.search.right-dip(124),layout.search.top+dip(5),dip(20),dip(20));
 

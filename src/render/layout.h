@@ -93,6 +93,9 @@ struct PanelLayout {
     // ---- H5 其余四页：页头 / 表单 / 阶梯 / 卡片 / 模态 / Toast ----
     D2D1_RECT_F pageHead{},pageHeadTitle{},pageHeadSub{},pageHeadAction{};
     D2D1_RECT_F syncModels{};       // v1.25：模型页的一键刷新同步按钮
+    // v1.40：按钮内容（图标 + 间距 + 文案）整体居中；旋转子窗口按 syncIcon 落位，
+    // 文案按 syncText 左对齐绘制 —— 布局与渲染不再各算一份图标偏移。
+    D2D1_RECT_F syncIcon{},syncText{};
     D2D1_RECT_F ladder{};                     // 阶梯列表的外框
     std::vector<ListItem> ladderRows;         // 每行一个（kind=Row，row=序号）
     D2D1_RECT_F addLine{},fold{},foldClose{}; // 「追加一条」虚线 + 页内浮层表单卡片

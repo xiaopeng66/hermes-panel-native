@@ -266,6 +266,9 @@ struct PanelViewModel {
     // 「刷新同步」进行中的反馈：以前点了只有顶部忙碌条在动、按钮毫无变化，用户以为"卡住了"。
     bool syncBusy=false;
     int syncDone=0,syncTotal=0;        // 进度 n/N（同步是逐供应商串行/并行的）
+    // 按钮上的文案（「刷新同步」/「同步 12/17」）：布局与渲染共用同一份，
+    // 按钮宽度与图标/文字的居中位置都按它算，避免两边各拼一份字符串。
+    std::string syncLabel;
     std::string helperError;           // 助手最近一次错误（列表空态优先显示它）
     // The visible rows in draw order: the ↑↓ cursor and ↵ walk this list, so a collapsed group's rows
     // are not reachable (the old panel only ever put rendered .mrow elements in its cursor sequence).

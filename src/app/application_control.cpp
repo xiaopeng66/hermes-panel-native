@@ -732,6 +732,9 @@ Json Application::Command(const Json& request) {
         for(const auto& control:layout.controls)
             if(control.id==ControlId::SwitchRowControl) switchRows.push_back(translate(control.rect));
         controls["_switches"]=switchRows;
+        // 「刷新同步」按钮的内容格（v1.40）：图标 + 文案整体居中，门禁量左右留白与图标位置。
+        controls["syncIcon"]=translate(layout.syncIcon);
+        controls["syncText"]=translate(layout.syncText);
         // 模型药丸（新建供应商页的探测结果）：门禁要能逐个点掉。
         Json chipRects=Json::array();
         for(const auto& control:layout.controls)

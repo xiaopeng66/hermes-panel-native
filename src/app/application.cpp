@@ -917,12 +917,10 @@ void Application::SyncBusyBar(const PanelLayout& layout,const D2D1_RECT_F& pageH
     D2D1_RECT_F glyphCell{};
     bool glyphWanted=false;
     //   模型页 + 正在同步（SyncAllModels）⇒ 搜索框右端的「刷新同步」
-    if(activePage_==0&&syncAllBusy_.load()&&layout.syncModels.right>layout.syncModels.left) {
-        const auto dpiScale=static_cast<float>(dpi)/96.0f;
-        const auto glyph=12.0f*dpiScale;
-        const auto left=layout.syncModels.left+9.0f*dpiScale;
-        const auto centreY=(layout.syncModels.top+layout.syncModels.bottom)/2.0f;
-        glyphCell=D2D1::RectF(left,centreY-glyph/2.0f,left+glyph,centreY+glyph/2.0f);
+    if(activePage_==0&&syncAllBusy_.load()&&layout.syncIcon.right>layout.syncIcon.left) {
+        // 图标格由布局算好（v1.40：图标 + 文案整体居中；文案变长时图标会左移几 DIP），
+        // 子窗口必须跟同一个矩形，否则旋转圆环会偏离静态图标的位置。
+        glyphCell=layout.syncIcon;
         glyphWanted=true;
     } else if(activePage_==3&&backupBusy_&&pageHeadIcon.right>pageHeadIcon.left) {
         const auto dpiScale=static_cast<float>(dpi)/96.0f;
@@ -2355,6 +2353,14 @@ PanelViewModel Application::CurrentView() {
         view.syncBusy=syncAllBusy_.load();
         view.syncDone=syncAllDone_.load();
         view.syncTotal=syncAllTotal_.load();
+        // 进度文案只拼这一处：布局（宽度/居中）与渲染层共用。三位数改紧凑的「n/N」，
+        // 两位数/两位数保持「同步 12/17」（按钮 94 DIP 的文字区放得下）。
+        view.syncLabel=view.syncBusy&&view.syncTotal>0
+            ? ((view.syncDone>=100||view.syncTotal>=100)
+                ? std::to_string(view.syncDone)+"/"+std::to_string(view.syncTotal)
+                : ("\xE5\x90\x8C\xE6\xAD\xA5 "+std::to_string(view.syncDone)+"/"
+                    +std::to_string(view.syncTotal)))
+            : std::string("\xE5\x88\xB7\xE6\x96\xB0\xE5\x90\x8C\xE6\xAD\xA5");
         // The scroll offset is clamped against the real viewport, so the wheel/drag and the renderer
         // always agree on where the list is (the clamp needs the layout, hence the client rect here).
         RECT client{};
