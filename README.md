@@ -7,7 +7,7 @@ WSL 里 Hermes 的模型与供应商管理悬浮窗：C++20 + 纯 Win32 + Direct
 需要 Windows 10/11，以及一台跑着 Hermes 的 WSL 发行版。
 
 - 安装版（推荐）：运行 `HermesModelPanelNative-Setup-<版本>.exe`。默认安装到
-  `D:\自制小工具\HermesModelPanelNative`（可改路径），安装时可勾选**开机自启**（登录后启动到托盘）、
+  `D:\办公\自制小工具\HermesModelPanelNative`（可改路径），安装时可勾选**开机自启**（登录后启动到托盘）、
   桌面/开始菜单快捷方式；「应用和功能」里有卸载入口，卸载时可选择保留 `data` 设置与日志。
   静默安装：`HermesModelPanelNative-Setup-<版本>.exe --silent [--dir=<路径>] [--no-autostart]`。
   安装包由 `tools/build-installer.ps1` 生成（单文件，主程序/卸载器在文件尾部）。

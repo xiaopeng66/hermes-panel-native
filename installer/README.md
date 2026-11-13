@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-installer.ps1
 
 ## 安装器
 
-默认装到 `D:\自制小工具\HermesModelPanelNative`，安装时可选：
+默认装到 `D:\办公\自制小工具\HermesModelPanelNative`，安装时可选：
 
 - 开机自动启动（HKCU `...\CurrentVersion\Run`，值为 `"<安装目录>\HermesModelPanelNative.exe" --startup`，登录后启动到托盘）
 - 桌面快捷方式 / 开始菜单快捷方式
@@ -29,7 +29,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-installer.ps1
 
 ```
 --silent | /S            无界面安装
---dir=<路径> | /DIR=<路径>  安装目录（默认 D:\自制小工具\HermesModelPanelNative）
+--dir=<路径> | /DIR=<路径>  安装目录（默认 D:\办公\自制小工具\HermesModelPanelNative）
 --no-autostart           不写开机自启项（已有项会被移除）
 --no-desktop             不建桌面快捷方式（已有快捷方式会被删除）
 --no-startmenu           不建开始菜单快捷方式（已有文件夹会被删除）

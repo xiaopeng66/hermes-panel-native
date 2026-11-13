@@ -20,7 +20,7 @@ inline constexpr wchar_t kUninstallKey[] =
 inline constexpr wchar_t kShortcutFolder[] = L"Hermes 模型面板";
 inline constexpr wchar_t kShortcutName[] = L"Hermes 模型面板";
 inline constexpr wchar_t kUninstallShortcutName[] = L"卸载 Hermes 模型面板";
-inline constexpr wchar_t kDefaultDirectory[] = L"D:\\自制小工具\\HermesModelPanelNative";
+inline constexpr wchar_t kDefaultDirectory[] = L"D:\\办公\\自制小工具\\HermesModelPanelNative";
 // 安装包尾部标记：H N P A Y L 2 \0（小端 uint64）。
 inline constexpr unsigned long long kPayloadMagic = 0x00324C5941504E48ULL;
 inline constexpr unsigned long long kPayloadFooterSize = 32;
